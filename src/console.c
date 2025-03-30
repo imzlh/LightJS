@@ -7,6 +7,7 @@
 
 #define MAX_DEPTH 8
 #define MAX_OUTPUT_LEN 1024
+#define MAX_OBJECT_PROP_LEN 20
 
 // ANSI 颜色代码
 #define ANSI_RESET   "\x1b[0m"
@@ -65,10 +66,10 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
     }
 
     // global.Object 缓存
-    static JSValue cached_object;
+    static thread_local JSValue cached_object;
     if (JS_IsUndefined(cached_object)) {
         JSValue global_obj = JS_GetGlobalObject(ctx);
-        cached_object = JS_GetProperty(ctx, global_obj, JS_NewAtom(ctx, "Object"));
+        cached_object = JS_DupValue(ctx, JS_GetProperty(ctx, global_obj, JS_NewAtom(ctx, "Object")));
         JS_FreeValue(ctx, global_obj);
     }
 
@@ -124,17 +125,26 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
         JSValue length_val = JS_GetProperty(ctx, val, JS_NewAtom(ctx, "length"));
         JS_ToInt32(ctx, &length, length_val);
         JS_FreeValue(ctx, length_val);
-        fprintf(target_fd, ANSI_GREEN "[" ANSI_RESET);
-        if (length > 12) {
+        
+        if (length > MAX_OBJECT_PROP_LEN) {
             fprintf(target_fd, "Array(%d) ", length);
             goto end;
         }
-        for (int i = 0; i < length; i++) {
-            if (i > 0) fprintf(target_fd, ", ");
+        
+        fprintf(target_fd, ANSI_GREEN "[" ANSI_RESET);
+        char* indent = str_repeat(" ", (depth + 1) * 4);
+        for (uint32_t i = 0; i < length; i++) {
+            if (i > 0) {
+                if(length > 8) fprintf(target_fd, ",\n%s", indent);
+                else fprintf(target_fd, ", ");
+            }else if(length > 8){
+                fprintf(target_fd, "\n%s", indent);
+            }
             JSValue element = JS_GetPropertyUint32(ctx, val, i);
             LJS_print_value(ctx, element, depth + 1, visited, target_fd);
             JS_FreeValue(ctx, element);
         }
+        if(length > 8) printf("\n%s", str_repeat(" ", depth * 4));
         fprintf(target_fd, ANSI_GREEN "]" ANSI_RESET);
 
     end:
@@ -224,7 +234,9 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
             JSValue class_name = getClassName(ctx, val);
             const char *class_name_str = JS_ToCString(ctx, class_name);
 
-            fprintf(target_fd, ANSI_MAGENTA "%s" ANSI_RESET, class_name_str);
+            if(strcmp(class_name_str, "Object") != 0)
+                fprintf(target_fd, ANSI_MAGENTA "%s" ANSI_RESET, class_name_str);
+            JS_FreeCString(ctx, class_name_str);
         }
 
         // 读取对象键名
@@ -236,10 +248,11 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
         }
         
         fprintf(target_fd, ANSI_GREEN " { " ANSI_RESET);
+        char* indent = str_repeat(" ", (depth +1) * 4);
 
         for (int i = 0; i < len; i++) {
             if(len > 4) {
-                fprintf(target_fd, "\n%s", str_repeat(" ", (depth +1) * 4));
+                fprintf(target_fd, "\n%s", indent);
             }
 
             JSValue key = JS_AtomToValue(ctx, props[i].atom);
@@ -257,6 +270,10 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
             JS_FreeValue(ctx, key);
             
             if (i != len - 1) fprintf(target_fd, ", ");
+            if ( i == MAX_OBJECT_PROP_LEN ){
+                fprintf(target_fd, "\n%s...", indent);
+                break;
+            }
         }
 
         if(len > 4) {

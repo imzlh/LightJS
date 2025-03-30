@@ -1,4 +1,6 @@
 #include "../engine/quickjs.h"
+#include "../engine/cutils.h"
+#include "../engine/list.h"
 #include "./core.h"
 
 #include <stdlib.h>
@@ -10,10 +12,13 @@
 #include <paths.h>
 #include <limits.h>
 #include <signal.h>
-#include <sys/wait.h>
-#include <sys/ioctl.h>
 #include <libgen.h>
 #include <pty.h>
+#include <errno.h>
+#include <sys/utsname.h>
+#include <sys/wait.h>
+#include <sys/ioctl.h>
+#include <sys/sysinfo.h>
 
 #define MAX_SIGNAL_SIZE 1024
 
@@ -190,23 +195,25 @@ JSValue js_exit(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* a
     return JS_UNDEFINED;
 }
 
-struct signal_data {
+typedef struct {
     JSValue handler;
     JSContext* ctx;
     int sig;
-};
-struct signal_data* js_signal_table[MAX_SIGNAL_SIZE];
-size_t js_signal_table_size = 0;
+    struct list_head* list;
+} signal_data;
+static struct list_head* signal_list;
 
 static void js_signal_handler(int sig){
-    for(int i = 0; i < js_signal_table_size; i++){
-        if(js_signal_table[i] && js_signal_table[i]->sig == sig){
-            JSValue handler = js_signal_table[i]->handler;
-            JSValue ret = JS_Call(js_signal_table[i]->ctx, handler, JS_UNDEFINED, 0, NULL);
+    struct list_head *el, *el1;
+    list_for_each_safe(el, el1, signal_list){
+        signal_data* data = list_entry(el, signal_data, list);
+        if(data -> sig == sig){
+            JSValue handler = data->handler;
+            JSValue ret = JS_Call(data->ctx, handler, JS_UNDEFINED, 0, NULL);
             if(JS_IsException(ret)){
-                fprintf(stderr, "Uncaught exception: %s\n", JS_ToCString(js_signal_table[i]->ctx, ret));
+                fprintf(stderr, "Uncaught exception: %s\n", JS_ToCString(data->ctx, ret));
             }
-            JS_FreeValue(js_signal_table[i]->ctx, ret);
+            JS_FreeValue(data->ctx, ret);
             break;
         }
     }
@@ -214,24 +221,48 @@ static void js_signal_handler(int sig){
 
 static JSValue js_set_signal(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if (argc!= 2) {
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid arguments", "Process.signal(signal: number, handler: () => any)");
     }
-    const uint32_t sig = JS_ToInt32(ctx, NULL, argv[0]);
+    const int sig = JS_ToInt32(ctx, NULL, argv[0]);
     if( signal(sig, js_signal_handler) ){
         return JS_ThrowTypeError(ctx, "Set signal handler failed");
     }
 
     // 加入signal表
-    if(js_signal_table_size >= MAX_SIGNAL_SIZE){
-        return JS_ThrowTypeError(ctx, "Too many signal handlers");
-    }
-    struct signal_data* data = malloc(sizeof(struct signal_data));
+    signal_data* data = malloc(sizeof(signal_data));
     data->handler = JS_DupValue(ctx, argv[1]);
     data->ctx = ctx;
     data->sig = sig;
-    js_signal_table[js_signal_table_size++] = data;
+    list_add_tail(data -> list, signal_list);
 
     return JS_UNDEFINED;
+}
+
+static JSValue js_del_signal(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    if (argc!= 1) {
+        return LJS_Throw(ctx, "Invalid arguments", "Process.removeSignal(callback: Function, signal?: number): boolean");
+    }
+    uint32_t sig = -1;
+    if(argc == 2) JS_ToUint32(ctx, &sig, argv[1]);
+    JSValue handler = argv[0];
+
+    // 遍历signal表
+    struct list_head* el, *el1;
+    list_for_each_safe(el, el1, signal_list){
+        signal_data* data = list_entry(el, signal_data, list);
+        if(data -> sig == sig || sig == -1){
+            if(
+                // 完全相同函数
+                JS_VALUE_GET_PTR(data -> handler) == JS_VALUE_GET_PTR(handler) &&
+                (sig == -1 ? true : data -> sig == sig)
+            ){
+                list_del(data -> list);
+                free(data);
+                return JS_TRUE;
+            }
+        }
+    }
+    return JS_FALSE;
 }
 
 static JSValue js_get_ppid(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
@@ -263,6 +294,7 @@ static JSValue js_get_self(JSContext* ctx){
     JS_SetPropertyStr(ctx, ret, "env", js_create_reactive_environ(ctx));
 
     JS_SetPropertyStr(ctx, ret, "signal", JS_NewCFunction(ctx, js_set_signal, "setSignal", 2));
+    JS_SetPropertyStr(ctx, ret, "removeSignal", JS_NewCFunction(ctx, js_del_signal, "removeSignal", 1));
 
     JS_DefinePropertyGetSet(ctx, ret, JS_NewAtom(ctx, "cwd"), JS_NewCFunction(ctx, js_cwd, "getCwd", 0), JS_NewCFunction(ctx, js_cwd, "setCwd", 1), 0);
     JS_DefinePropertyGetSet(ctx, ret, JS_NewAtom(ctx, "ppid"), JS_NewCFunction(ctx, js_get_ppid, "getPpid", 0), JS_UNDEFINED, 0);
@@ -534,10 +566,85 @@ static const JSCFunctionListEntry js_process_proto_funcs[] = {
     JS_CGETSET_DEF("title", js_process_get_title, NULL),
 };
 
+static const JSCFunctionListEntry js_process_signals[] = {
+    C_CONST(SIGTERM),
+    C_CONST(SIGINT),
+    C_CONST(SIGKILL),
+    C_CONST(SIGQUIT),
+    C_CONST(SIGHUP),
+    C_CONST(SIGUSR1),
+    C_CONST(SIGUSR2),
+    C_CONST(SIGPIPE),
+    C_CONST(SIGALRM),
+    C_CONST(SIGCHLD),
+    C_CONST(SIGCONT),
+    C_CONST(SIGSTOP),
+    C_CONST(SIGTSTP),
+    C_CONST(SIGTTIN),
+    C_CONST(SIGTTOU),
+    C_CONST(SIGURG),
+    C_CONST(SIGXCPU),
+    C_CONST(SIGXFSZ),
+    C_CONST(SIGVTALRM),
+    C_CONST(SIGPROF),
+    C_CONST(SIGWINCH),
+    C_CONST(SIGIO),
+    C_CONST(SIGPWR),
+    C_CONST(SIGSYS),
+};
+
 static const JSClassDef js_process_class = {
     "Process",
     .finalizer = js_process_finalizer
 };
+
+static JSValue js_get_sysinfo(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    struct sysinfo info;
+    if(sysinfo(&info) == -1){
+        return LJS_Throw(ctx, "Failed to get system information: %s", NULL, strerror(errno));
+    }
+    JSValue obj = JS_NewObject(ctx);
+    JSValue memory_obj = JS_NewObject(ctx);
+    JSValue cpu_obj = JS_NewObject(ctx);
+    JSValue load_arr = JS_NewArrayFrom(ctx, 3, (JSValueConst[]){
+        JS_NewFloat64(ctx, info.loads[0]), 
+        JS_NewFloat64(ctx, info.loads[1]), 
+        JS_NewFloat64(ctx, info.loads[2])
+    });
+    JS_SetPropertyStr(ctx, memory_obj, "total", JS_NewInt64(ctx, info.totalram));
+    JS_SetPropertyStr(ctx, memory_obj, "free", JS_NewInt64(ctx, info.freeram));
+    JS_SetPropertyStr(ctx, memory_obj, "shared", JS_NewInt64(ctx, info.sharedram));
+    JS_SetPropertyStr(ctx, memory_obj, "buffers", JS_NewInt64(ctx, info.bufferram));
+    JS_SetPropertyStr(ctx, memory_obj, "cached", JS_NewInt64(ctx, info.totalswap - info.freeswap));
+    JS_SetPropertyStr(ctx, memory_obj, "used", JS_NewInt64(ctx, info.totalram - info.freeram));
+    JS_SetPropertyStr(ctx, memory_obj, "swap", JS_NewInt64(ctx, info.totalswap));
+
+    JS_SetPropertyStr(ctx, cpu_obj, "count", JS_NewInt32(ctx, sysconf(_SC_NPROCESSORS_ONLN)));
+    JS_SetPropertyStr(ctx, cpu_obj, "speed", JS_NewInt32(ctx, sysconf(_SC_CLK_TCK)));
+    struct timespec cpu_time;
+    if(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_time)){
+        JS_SetPropertyStr(ctx, cpu_obj, "time", JS_NewInt64(ctx, cpu_time.tv_sec * 1000 + cpu_time.tv_nsec / 1000000 % 1000));
+    }
+
+    struct utsname uts;
+    if(uname(&uts) == 0){
+        JSValue sys_obj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, sys_obj, "system", JS_NewString(ctx, uts.sysname));
+        JS_SetPropertyStr(ctx, sys_obj, "node", JS_NewString(ctx, uts.nodename));
+        JS_SetPropertyStr(ctx, sys_obj, "release", JS_NewString(ctx, uts.release));
+        JS_SetPropertyStr(ctx, sys_obj, "version", JS_NewString(ctx, uts.version));
+        JS_SetPropertyStr(ctx, sys_obj, "arch", JS_NewString(ctx, uts.machine));
+        JS_SetPropertyStr(ctx, sys_obj, "domain", JS_NewString(ctx, uts.domainname));
+        JS_SetPropertyStr(ctx, obj, "sys", sys_obj);
+    }
+
+    JS_SetPropertyStr(ctx, obj, "memory", memory_obj);
+    JS_SetPropertyStr(ctx, obj, "uptime", JS_NewInt64(ctx, info.uptime));
+    JS_SetPropertyStr(ctx, obj, "loadavg", load_arr);
+    JS_SetPropertyStr(ctx, obj, "cpu", cpu_obj);
+    JS_SetPropertyStr(ctx, obj, "process", JS_NewInt32(ctx, info.procs));
+    return obj;
+}
 
 static int js_process_init(JSContext* ctx, JSModuleDef* m){
     JS_SetModuleExport(ctx, m, "self", js_get_self(ctx));
@@ -551,6 +658,23 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
     JS_SetConstructor(ctx, process, process);
 
     JS_SetModuleExport(ctx, m, "Process", process);
+
+    // signal
+    JSValue signals = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, signals, js_process_signals, countof(js_process_signals));
+    JS_SetModuleExport(ctx, m, "signals", signals);
+
+    // stdin, stdout, stderr
+    JSValue stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, PIPE_BUF, JS_NULL),
+        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, PIPE_BUF, JS_NULL),
+        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, PIPE_BUF, JS_NULL);
+
+    JS_SetModuleExport(ctx, m, "stdin", stdin_p);
+    JS_SetModuleExport(ctx, m, "stdout", stdout_p);
+    JS_SetModuleExport(ctx, m, "stderr", stderr_p);
+
+    // vm
+    JS_SetModuleExport(ctx, m, "sysinfo", JS_NewCFunction(ctx, js_get_sysinfo, "sysinfo", 0));
 
     return 0;
 }
@@ -598,6 +722,17 @@ bool LJS_init_process(JSContext* ctx,
 
     JS_AddModuleExport(ctx, m, "Process");
     JS_AddModuleExport(ctx, m, "exit");
+
+    // signal
+    JS_AddModuleExport(ctx, m, "signals");
+
+    // stdin/out/err
+    JS_AddModuleExport(ctx, m, "stdin");
+    JS_AddModuleExport(ctx, m, "stdout");
+    JS_AddModuleExport(ctx, m, "stderr");
+
+    // vm
+    JS_AddModuleExport(ctx, m, "sysinfo");
 
     return true;
 }

@@ -37,7 +37,7 @@ static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValu
     }
     if (fseek(fd, 0, SEEK_END) < 0) {
         fclose(fd);
-        return LJS_Throw(ctx, "not a regular file", NULL);
+        return LJS_Throw(ctx, "not a regular file: %s", NULL, strerror(errno));
     }
     long lret = ftell(fd);
     if (lret < 0 || fseek(fd, 0, SEEK_SET) < 0) {
@@ -168,7 +168,7 @@ static JSValue js_stdio_write(JSContext *ctx, JSValueConst self, int argc, JSVal
 static JSValue js_stdio_mkdir(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     const char *path;
     size_t path_len;
-    int mode = 0777;
+    int mode = 0755;
 
     if(argc != 1 || !JS_IsString(argv[0])) 
         return LJS_Throw(ctx, "invalid arguments", "stdio.mkdir(path: string, mode: int): void");
@@ -185,7 +185,11 @@ static JSValue js_stdio_mkdir(JSContext *ctx, JSValueConst self, int argc, JSVal
     return JS_UNDEFINED;
 }
 
-static bool get_all_files_or_dirs(const char* path, char*** list, uint32_t* list_length, uint32_t* list_used, bool stop_when_error){
+static bool get_all_files_or_dirs(const char* path, 
+    char*** list, uint32_t* list_length, uint32_t* list_used,
+    char*** dir_list, uint32_t* dir_list_length, uint32_t* dir_list_used, 
+    bool stop_when_error
+){
     DIR* dir = opendir(path);
     bool error = false;
 
@@ -205,7 +209,11 @@ static bool get_all_files_or_dirs(const char* path, char*** list, uint32_t* list
             strcpy(new_path, path);
             strcat(new_path, "/");
             strcat(new_path, ent->d_name);
-            if (!get_all_files_or_dirs(new_path, list, list_length, list_used, stop_when_error)){ 
+            if (!get_all_files_or_dirs(new_path, 
+                list, list_length, list_used,
+                dir_list, dir_list_length, dir_list_used,
+                stop_when_error
+            )){ 
                 if (stop_when_error){
                     free(new_path);
                     closedir(dir);
@@ -215,6 +223,13 @@ static bool get_all_files_or_dirs(const char* path, char*** list, uint32_t* list
                 }
             }
             free(new_path);
+            // add to dir_list
+            if (*dir_list_used >= *dir_list_length) {
+                *dir_list_length += 16;
+                *dir_list = realloc(*dir_list, *dir_list_length * sizeof(char*));
+            }
+            (*dir_list)[*dir_list_used] = strdup(ent->d_name);
+            (*dir_list_used)++;
         }else{
             if (*list_used >= *list_length) {
                 *list_length += 16;
@@ -256,21 +271,34 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
     
     size_t path_len;
     const char *path = JS_ToCStringLen(ctx, &path_len, argv[0]);
-    if (!path)
+    if (!path){
         return JS_EXCEPTION;
+    }
 
     // stat is a dir or file
     struct stat st;
     if (stat(path, &st) < 0) {
         LJS_Throw(ctx, "failed to stat file: %s", NULL, strerror(errno));
+        JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
     }
     if (S_ISDIR(st.st_mode)) {
         char** list = malloc(16 * sizeof(char*));
         uint32_t list_length = 16;
         uint32_t list_used = 0;
-        if (!get_all_files_or_dirs(path, &list, &list_length, &list_used, true)) {
+        char** dir_list = malloc(16 * sizeof(char*));
+        uint32_t dir_list_length = 16;
+        uint32_t dir_list_used = 0;
+        if (!get_all_files_or_dirs(path, 
+            &list, &list_length, &list_used, 
+            &dir_list, &dir_list_length, &dir_list_used, 
+            true
+        )) {
             LJS_Throw(ctx, "failed to get subfiles in this directory: %s", NULL, strerror(errno));
+            free(list);
+            free(dir_list);
+            JS_FreeCString(ctx, path);
+            return JS_EXCEPTION;
         }
 
         // delete all subfiles
@@ -280,26 +308,52 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
             strcat(sub_path, "/");
             strcat(sub_path, list[i]);
             if (unlink(sub_path) < 0) {
-                LJS_Throw(ctx, "failed to remove file: %s", NULL, strerror(errno));
+                LJS_Throw(ctx, "failed to remove file %s: %s", NULL, sub_path, strerror(errno));
+                free(sub_path);
+                free(list);
+                free(dir_list);
+                JS_FreeCString(ctx, path);
                 return JS_EXCEPTION;
             }
             free(sub_path);
         }
         free(list);
 
+        // delete subdirs
+        for (uint32_t i = 0; i < dir_list_used; i++) {
+            char* sub_path = malloc(strlen(path) + strlen(dir_list[i]) + 2);
+            strcpy(sub_path, path);
+            strcat(sub_path, "/");
+            strcat(sub_path, dir_list[i]);
+            if (rmdir(sub_path) < 0) {
+                LJS_Throw(ctx, "failed to remove directory: %s", NULL, strerror(errno));
+                free(sub_path);
+                free(list);
+                free(dir_list);
+                JS_FreeCString(ctx, path);
+                return JS_EXCEPTION;
+            }
+            free(sub_path);
+        }
+        free(dir_list);
+
         // delete dir
         if (rmdir(path) < 0) {
             LJS_Throw(ctx, "failed to remove directory: %s", NULL, strerror(errno));
+            free(list);
+            free(dir_list);
             return JS_EXCEPTION;
         }
 
     } else {
         if (unlink(path) < 0) {
             LJS_Throw(ctx, "failed to remove file: %s", NULL, strerror(errno));
+            JS_FreeCString(ctx, path);
             return JS_EXCEPTION;
         }
     }
 
+    JS_FreeCString(ctx, path);
     return JS_UNDEFINED;
 }
 
@@ -437,10 +491,11 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
     const char *path = JS_ToCStringLen(ctx, &path_len, argv[0]);
     const char *flags = JS_ToCString(ctx, argv[1]);
     
-    if(argc == 3) JS_ToUint32(ctx, &mode, argv[2]);
-
-    if (!path || !flags)
-        return JS_EXCEPTION;
+    if((argc == 3 && 0 != JS_ToUint32(ctx, &mode, argv[2])) || !path || !flags){
+        if(path) JS_FreeCString(ctx, path);
+        if(flags) JS_FreeCString(ctx, flags);
+        return LJS_Throw(ctx, "invalid arguments", NULL);
+    }
 
     // parse flags
     // flag1: r, w, a, x
@@ -449,14 +504,20 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
         else if(flags[0] == 'w') flag |= O_WRONLY | O_CREAT | O_TRUNC;
         else if(flags[0] == 'a') flag |= O_WRONLY | O_CREAT | O_APPEND;
         else if(flags[0] == 'x') flag |= O_WRONLY | O_CREAT | O_EXCL;
-        else return LJS_Throw(ctx, "invalid flag", NULL);
+        else {
+            LJS_Throw(ctx, "invalid flag", NULL);
+            goto error;
+        }
     }
     // flag2/3: x, s, +
     if(flags[1] != '\0'){
         if(flags[1] == 'x') flag |= O_EXCL;
         else if(flags[1] == 's') flag |= O_SYNC;
         else if(flags[1] == '+') flag |= O_RDWR;
-        else return LJS_Throw(ctx, "invalid flag", NULL);
+        else {
+            LJS_Throw(ctx, "invalid flag", NULL);
+            goto error;
+        }
 
         if(flags[2] != '\0' && flags[2] == '+'){
             flag |= O_RDWR;
@@ -466,10 +527,18 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
     int fd = open(path, flag, mode);
     if (fd < 0) {
         LJS_Throw(ctx, "failed to open file: %s", NULL, strerror(errno));
-        return JS_EXCEPTION;
+        goto error;
     }
 
+    JS_FreeCString(ctx, path);
+    JS_FreeCString(ctx, flags);
     return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE, PIPE_BUF, JS_NULL);
+
+    error:{
+        JS_FreeCString(ctx, path);
+        JS_FreeCString(ctx, flags);
+        return JS_EXCEPTION;
+    }
 }
 
 static const JSCFunctionListEntry js_stdio_funcs[] = {
@@ -489,15 +558,6 @@ static const JSCFunctionListEntry js_stdio_funcs[] = {
 static int js_mod_stdio_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetModuleExportList(ctx, m, js_stdio_funcs, countof(js_stdio_funcs));
 
-    // stdin, stdout, stderr
-    JSValue stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, PIPE_BUF, JS_NULL),
-        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, PIPE_BUF, JS_NULL),
-        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, PIPE_BUF, JS_NULL);
-
-    JS_SetModuleExport(ctx, m, "stdin", stdin_p);
-    JS_SetModuleExport(ctx, m, "stdout", stdout_p);
-    JS_SetModuleExport(ctx, m, "stderr", stderr_p);
-
     return 0;
 }
 
@@ -505,9 +565,6 @@ bool LJS_init_stdio(JSContext *ctx){
     JSModuleDef *m = JS_NewCModule(ctx, "stdio", js_mod_stdio_init);
     if (!m) return false;
     JS_AddModuleExportList(ctx, m, js_stdio_funcs, countof(js_stdio_funcs));
-    JS_AddModuleExport(ctx, m, "stdin");
-    JS_AddModuleExport(ctx, m, "stdout");
-    JS_AddModuleExport(ctx, m, "stderr");
 
     return true;
 }

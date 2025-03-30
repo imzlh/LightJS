@@ -10,7 +10,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/ljs",
             "preLaunchTask": "CMake: 生成",
-            "args": ["test", "stdio"],
+            "args": ["src/repl.js"],
             "stopAtEntry": true,
             "cwd": "${workspaceFolder}",
             "environment": [],

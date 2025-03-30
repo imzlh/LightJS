@@ -16,7 +16,7 @@ test("console.time", () => {
     console.timeLog("my-timer");
 
     // wait for 1 second
-    delay(1000).then(() => console.timeEnd("my-timer"));
+    delay(10000).then(() => console.timeEnd("my-timer"));
 });
 test("console.assert", () => console.assert(true, "Assertion passed"));
 // test("console.clear", () => console.clear());

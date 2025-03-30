@@ -442,10 +442,11 @@ bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data
             if (errno == EINTR) continue;
             perror("epoll_wait");
             break;
-        }else if (nfds == 0 && (evloop_abort_check ? evloop_abort_check(user_data) : false)){
-            printf("evloop_abort_check return true, exit loop\n");
-            return true; // no events
         }
+        // }else if (nfds == 0 && (evloop_abort_check ? evloop_abort_check(user_data) : false)){
+        //     printf("evloop_abort_check return true, exit loop\n");
+        //     return true; // no events
+        // }
         
         for (int i = 0; i < nfds; ++i) {
             struct FdContext* ctx = (struct FdContext*)events[i].data.ptr;

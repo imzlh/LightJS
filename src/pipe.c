@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <errno.h>
 #include <threads.h>
+#include <termios.h>
 
 #define PIPE_READ 0b1
 #define PIPE_WRITE 0b10
@@ -36,6 +37,7 @@ struct FDPipe_T{
     JSValue write_rj;
 
     JSValue close_rs;
+    JSValue close_rs2;
     bool closed;
 };
 union FDPipeUnion_T{
@@ -416,7 +418,7 @@ static JSValue js_U8Pipe_read(JSContext *ctx, JSValueConst this_val, int argc, J
     }
 
     if(argc == 1){
-        if(!JS_ToUint32(ctx, &expected_size, argv[0])){
+        if(0 != JS_ToUint32(ctx, &expected_size, argv[0])){
             return LJS_Throw(ctx, "Expected size must be a number", "U8Pipe.read(expected_size)");
         }
     }
@@ -536,6 +538,38 @@ static void evclose_callback(int fd, void* opaque){
     }
 }
 
+static JSValue js_U8Pipe_readline(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    struct U8Pipe_T *pipe = JS_GetOpaque(this_val, U8Pipe_class_id);
+    if (!pipe){
+        return JS_ThrowTypeError(ctx, "U8Pipe invaild");
+    }
+    if(u8pipe_closed(ctx, pipe)){
+        return JS_ThrowTypeError(ctx, "U8Pipe is closed");
+    }
+    if(!u8pipe_is(ctx, pipe, PIPE_READ)){
+        return JS_ThrowTypeError(ctx, "U8Pipe is not readable");
+    }
+    if(u8pipe_locked(ctx, pipe, true)){
+        return JS_ThrowTypeError(ctx, "U8Pipe is locked");
+    }
+
+    // todo: supoort normal pipe
+
+    uint32_t expected_size = 16 * 1024;
+    if(argc == 1) JS_ToUint32(ctx, &expected_size, argv[0]);
+    uint8_t* buffer = malloc(expected_size);
+
+    struct LJS_Promise_Proxy* promise = LJS_NewPromise(ctx);
+    if(!promise){
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    pipe -> pipe.fdpipe -> read_rs = JS_DupValue(ctx, promise -> resolve);
+    pipe -> pipe.fdpipe -> read_rj = JS_DupValue(ctx, promise -> reject);
+
+    LJS_evfd_readline(pipe -> pipe.fdpipe -> fd, expected_size, buffer, evread_callback, pipe -> pipe.fdpipe);
+    return promise -> promise;
+}
+
 static JSValue js_U8Pipe_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
     JSValue proto = JS_GetPropertyStr(ctx, new_target, "prototype");
     JSValue obj = JS_NewObjectProtoClass(ctx, proto, U8Pipe_class_id);
@@ -580,6 +614,100 @@ fail:
     return JS_NULL;
 }
 
+static inline int get_fd_from_pipe(JSContext* ctx, JSValueConst pipe){
+    struct U8Pipe_T* pipe_data = JS_GetOpaque(pipe, U8Pipe_class_id);
+    if(!pipe_data || !pipe_data -> fdpipe) return -1;
+    EvFD* fd = pipe_data -> pipe.fdpipe -> fd;
+    if(fd -> aio) return fd -> raw_fd;
+    else return fd -> fd;
+}
+static JSValue js_iopipe_setraw(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    if(argc == 0)
+        return LJS_Throw(ctx, "Expected a boolean value", "U8Pipe(tty).ttyRaw(set_to_raw: boolean): boolean");
+    
+    int fdnum = get_fd_from_pipe(ctx, this_val);
+    if(fdnum == -1) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+    bool res = isatty(fdnum);
+
+    if(JS_ToBool(ctx, argv[0])){
+        // set raw mode
+        struct termios tty;
+
+        memset(&tty, 0, sizeof(tty));
+        tcgetattr(fdnum, &tty);
+
+        tty.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP
+                            |INLCR|IGNCR|ICRNL|IXON);
+        tty.c_oflag |= OPOST;
+        tty.c_lflag &= ~(ECHO|ECHONL|ICANON|IEXTEN);
+        tty.c_cflag &= ~(CSIZE|PARENB);
+        tty.c_cflag |= CS8;
+        tty.c_cc[VMIN] = 1;
+        tty.c_cc[VTIME] = 0;
+
+        tcsetattr(fdnum, TCSANOW, &tty);
+    }
+
+    return JS_NewBool(ctx, res);
+}
+
+static JSValue js_iopipe_get_size(JSContext *ctx, JSValueConst this_val){
+    int fdnum = get_fd_from_pipe(ctx, this_val);
+    if(fdnum == -1) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+
+    struct winsize size;
+    if(ioctl(fdnum, TIOCGWINSZ, &size) == -1){
+        return LJS_Throw(ctx, "Failed to get terminal size", NULL);
+    }
+
+    return JS_NewArrayFrom(ctx, 2, (JSValueConst[]){JS_NewInt32(ctx, size.ws_row), JS_NewInt32(ctx, size.ws_col)});
+}
+
+static JSValue js_iopipe_set_size(JSContext *ctx, JSValueConst this_val, JSValueConst value){
+    int fdnum = get_fd_from_pipe(ctx, this_val);
+    if(fdnum == -1) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+
+    uint32_t rows, cols;
+    if (
+        JS_ToUint32(ctx, &rows, JS_GetPropertyUint32(ctx, value, 0)) != 0 ||
+        JS_ToUint32(ctx, &cols, JS_GetPropertyUint32(ctx, value, 1)) != 0
+    ){
+        return LJS_Throw(ctx, "expected array of two integers", NULL);
+    }
+
+    struct winsize size;
+    size.ws_row = rows;
+    size.ws_col = cols;
+    if(ioctl(fdnum, TIOCSWINSZ, &size) == -1){
+        return LJS_Throw(ctx, "Failed to set terminal size", NULL);
+    }
+
+    return JS_TRUE;
+}
+
+static JSValue js_iopipe_istty(JSContext *ctx, JSValueConst this_val){
+    int fdnum = get_fd_from_pipe(ctx, this_val);
+    if(fdnum == -1) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+
+    return JS_NewBool(ctx, isatty(fdnum));
+}
+
+static JSValue js_iopipe_flush(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    int fdnum = get_fd_from_pipe(ctx, this_val);
+    if(fdnum == -1) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+
+    if(isatty(fdnum)){
+        if(tcflush(fdnum, TCIOFLUSH) == -1){
+            return LJS_Throw(ctx, "Failed to flush terminal", NULL);
+        }
+    }else{
+        if(fdatasync(fdnum) == -1){
+            return LJS_Throw(ctx, "Failed to flush file", NULL);
+        }
+    }
+    return JS_UNDEFINED;
+}
+
 static JSClassDef U8Pipe_class = {
     "U8Pipe",
     .finalizer = c_u8pipe_cleanup
@@ -589,6 +717,11 @@ static const JSCFunctionListEntry U8Pipe_proto_funcs[] = {
     JS_CFUNC_DEF("write", 1, js_U8Pipe_write),
     JS_CFUNC_DEF("close", 0, js_U8Pipe_close),
     JS_CGETSET_DEF("closed", js_u8pipe_get_closed, NULL),
+    JS_CFUNC_DEF("readline", 1, js_U8Pipe_readline),
+    JS_CFUNC_DEF("ttyRaw", 1, js_iopipe_setraw),
+    JS_CGETSET_DEF("ttySize", js_iopipe_get_size, js_iopipe_set_size),
+    JS_CGETSET_DEF("isTTY", js_iopipe_istty, NULL),
+    JS_CFUNC_DEF("flush", 0, js_iopipe_flush),
     JS_PROP_STRING_DEF("[Symbol.toStringTag]", "U8Pipe", JS_PROP_CONFIGURABLE),
 };
 
@@ -642,11 +775,13 @@ static inline JSValue u8pipe_new(JSContext *ctx, bool fdpipe, struct U8Pipe_T *p
     if(fdpipe){
         pipe -> pipe.fdpipe = malloc(sizeof(struct FDPipe_T));
         pipe -> pipe.fdpipe -> close_rs = JS_DupValue(ctx, promise_callback[0]);
+        pipe -> pipe.fdpipe -> closed = false;
     }else{
         pipe -> pipe.pipe = malloc(sizeof(struct Pipe_T));
         pipe -> pipe.pipe -> close_rs = JS_DupValue(ctx, promise_callback[0]);
+        pipe -> pipe.pipe -> closed = false;
     }
-    JS_SetPropertyStr(ctx, obj, "closed", close_prom);
+    JS_SetPropertyStr(ctx, obj, "end", close_prom);
 
     return obj;
 }
@@ -675,7 +810,7 @@ JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, 
     pipe -> pipe.fdpipe -> read_rj = JS_NULL;
     pipe -> pipe.fdpipe -> write_rs = JS_NULL;
     pipe -> pipe.fdpipe -> write_rj = JS_NULL;
-    pipe -> pipe.fdpipe -> close_rs = onclose;
+    pipe -> pipe.fdpipe -> close_rs2 = onclose;
     return obj;
 }
 

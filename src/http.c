@@ -910,8 +910,7 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
     URL_data *url_struct = malloc(sizeof(URL_data));
     struct JS_URL_struct *js_url_struct = malloc(sizeof(struct JS_URL_struct));
     if(url_struct == NULL || js_url_struct == NULL){
-        JS_ThrowOutOfMemory(ctx);
-        return JS_EXCEPTION;
+        return JS_ThrowOutOfMemory(ctx);
     }
 
     js_url_struct -> dup_count = 0;
@@ -920,7 +919,7 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
         const char *url = JS_ToCString(ctx, argv[0]);
         if(url == NULL){
             free(url_struct);
-            return JS_EXCEPTION;
+            return LJS_Throw(ctx, "Invalid URL", NULL);
         }
         // 深拷贝
         char* url_copied = malloc(strlen(url) + 1);
@@ -932,7 +931,7 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
             URL_data *base_url = JS_GetOpaque(argv[1], js_class_url_id);
             if(base_url == NULL){
                 free(url_struct);
-                return JS_EXCEPTION;
+                return LJS_Throw(ctx, "Invalid base URL", NULL);
             }
             // 创建引用
             js_url_struct -> template = JS_DupValue(ctx, argv[1]);
@@ -940,12 +939,12 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
             URL_data *base_url = malloc(sizeof(URL_data));
             if(base_url == NULL){
                 free(url_struct);
-                return JS_EXCEPTION;
+                return JS_ThrowOutOfMemory(ctx);
             }
             const char *base_url_str = JS_ToCString(ctx, argv[1]);
             if(base_url_str == NULL){
                 free(url_struct);
-                return JS_EXCEPTION;
+                return LJS_Throw(ctx, "Invalid base URL", NULL);
             }
             // 拷贝
             char* base_url_copied = strclone(base_url_str);
@@ -972,7 +971,7 @@ static JSValue js_url_toString(JSContext *ctx, JSValueConst this_val, int argc, 
     URL_data *url_struct = js_url_struct -> self;
     char *url_str = malloc(1024);
     if(url_str == NULL){
-        return JS_EXCEPTION;
+        return JS_ThrowOutOfMemory(ctx);
     }
 
     char* data = LJS_format_url(url_struct);
@@ -1040,7 +1039,7 @@ static JSValue js_url_getQueryStr(JSContext *ctx, JSValueConst this_val){
     }
     char *query_str = malloc(1024);
     if(query_str == NULL){
-        return JS_EXCEPTION;
+        return JS_ThrowOutOfMemory(ctx);
     }
     for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
         if(url_struct -> query[i].key == NULL){
@@ -1124,7 +1123,7 @@ static JSValue js_url_setUsername(JSContext *ctx, JSValueConst this_val, JSValue
     URL_data *url_struct = js_url_struct -> self;
     const char *username = JS_ToCString(ctx, value);
     if(username == NULL){
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid username", NULL);
     }
     js_url_struct -> dup_value[js_url_struct -> dup_count ++] = JS_DupValue(ctx, value);
     url_struct -> username = (char*)username;
@@ -1139,7 +1138,7 @@ static JSValue js_url_setPassword(JSContext *ctx, JSValueConst this_val, JSValue
     URL_data *url_struct = js_url_struct -> self;
     const char *password = JS_ToCString(ctx, value);
     if(password == NULL){
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid password", NULL);
     }
     js_url_struct -> dup_value[js_url_struct -> dup_count ++] = JS_DupValue(ctx, value);
     url_struct -> password = (char*)password;
@@ -1154,7 +1153,7 @@ static JSValue js_url_setProtocol(JSContext *ctx, JSValueConst this_val, JSValue
     URL_data *url_struct = js_url_struct -> self;
     const char *protocol = JS_ToCString(ctx, value);
     if(protocol == NULL){
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid protocol", NULL);
     }
     js_url_struct -> dup_value[js_url_struct -> dup_count ++] = JS_DupValue(ctx, value);
     url_struct -> protocol = (char*)protocol;
@@ -1169,7 +1168,7 @@ JSValue js_url_setHost(JSContext *ctx, JSValueConst this_val, JSValueConst value
     URL_data *url_struct = js_url_struct -> self;
     const char *host = JS_ToCString(ctx, value);
     if(host == NULL){
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid host", NULL);
     }
     js_url_struct -> dup_value[js_url_struct -> dup_count ++] = JS_DupValue(ctx, value);
     url_struct -> host = (char*)host;
@@ -1184,7 +1183,7 @@ JSValue js_url_setPort(JSContext *ctx, JSValueConst this_val, JSValueConst value
     URL_data *url_struct = js_url_struct -> self;
     int32_t port;
     if(!JS_ToInt32(ctx, &port, value))
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid port", NULL);
     if(port < 0 || port > 65535){
         return JS_ThrowRangeError(ctx, "port out of range");
     }
@@ -1200,7 +1199,7 @@ JSValue js_url_setPath(JSContext *ctx, JSValueConst this_val, JSValueConst value
     URL_data *url_struct = js_url_struct -> self;
     const char *path = JS_ToCString(ctx, value);
     if(path == NULL){
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid path", NULL);
     }
     url_struct -> path = strdup(path);
     return JS_UNDEFINED;
@@ -1214,12 +1213,12 @@ JSValue js_url_setQueryStr(JSContext *ctx, JSValueConst this_val, JSValue value)
     URL_data *url_struct = js_url_struct -> self;
     const char *query = JS_ToCString(ctx, value);
     if(query == NULL){
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid query string", NULL);
     }
     URL_query_data* query_list = malloc(sizeof(URL_query_data) * MAX_QUERY_COUNT);
     char* query_str = strclone(query);
     if(!LJS_parse_query(query_str, &query_list, MAX_QUERY_COUNT)){
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Failed to parse query string", NULL);
     }
     url_struct -> query_string = query_str;
     url_struct -> query = query_list;
@@ -1241,12 +1240,12 @@ JSValue js_url_delQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     if(argc == 1){
         key = (char*)JS_ToCString(ctx, argv[0]);
         if(key == NULL){
-            return JS_EXCEPTION;
+            return LJS_Throw(ctx, "Invalid query key", NULL);
         }
     }else if(argc == 2){
         key = (char*)JS_ToCString(ctx, argv[0]);
         if(!JS_ToUint32(ctx, &del_id, argv[1]) || key == NULL){
-            return JS_EXCEPTION;
+            return LJS_Throw(ctx, "Invalid arguments", NULL);
         }
     }else{
         return JS_ThrowTypeError(ctx, "delQuery takes 1 or 2 arguments");
@@ -1282,13 +1281,13 @@ JSValue js_url_addQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     URL_data *url_struct = js_url_struct -> self;
     const char *key = JS_ToCString(ctx, argv[0]);
     if(key == NULL){
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid query key", NULL);
     }
     const char *value = NULL;
     if(argc == 2){
         value = JS_ToCString(ctx, argv[1]);
         if(value == NULL){
-            return JS_EXCEPTION;
+            return LJS_Throw(ctx, "Invalid query value", NULL);
         }
     }
 
@@ -1335,7 +1334,7 @@ JSValue js_url_setHash(JSContext *ctx, JSValueConst this_val, JSValueConst value
     URL_data *url_struct = js_url_struct -> self;
     const char *hash = JS_ToCString(ctx, value);
     if(hash == NULL){
-        return JS_EXCEPTION;
+        return LJS_Throw(ctx, "Invalid hash", NULL);
     }
     char* hash_copied = malloc(strlen(hash) + 1);
     memcpy(hash_copied, hash, strlen(hash) + 1);

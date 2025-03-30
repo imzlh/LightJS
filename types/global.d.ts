@@ -1,6 +1,9 @@
 /// <reference path="./process.d.ts" />
 /// <reference path="./socket.d.ts" />
 
+type IModule = 'pipe' | 'socket' | 'process' | 'stdio' | 'console' | 'event' | 'module' | 'url' | 'timer' |
+    /* ES6 features */ 'base' | 'date' | 'eval' | 'regexp' | 'json' | 'proxy' | 'mapset' | 'typedarray' | 'promise' | 'bigint' | 'weakmap' | 'performance';
+
 declare class Event {
     type: string;
     preventDefault: () => void;
@@ -36,6 +39,19 @@ declare function atob(encoded: string): string;
 declare function btoa(raw: string): string;
 
 declare function encodeStr(str: string): Uint8Array;
+
+declare function Worker(scriptURL: string, module?: boolean): U8Pipe;
+declare class Sandbox {
+    constructor(opts?: {
+        loader?: (input: string) => string;
+        init: Array<IModule>;
+    })
+
+    eval(code: string, import_meta: Record<string, any>): Promise<any>;
+    eval(code: string): any;
+
+    get context(): typeof globalThis;
+}
 
 /**
  * URL
@@ -121,7 +137,21 @@ declare class U8Pipe {
     pipeTo(destination: Pipe<Uint8Array> | U8Pipe, callback?: (data: Uint8Array) => Uint8Array): void;
     close(): void;
     read(length?: number): Promise<Uint8Array | null>;
+    readline(): Promise<Uint8Array | null>;
     readonly closed: boolean;
+    readonly end: Promise<void>;
+
+    // features for tty
+    ttyRaw(raw: boolean): boolean;
+    set ttySize(size: { rows: number, cols: number });
+    get ttySize(): { rows: number, cols: number };
+    get isTTY(): boolean;
+
+    // features for fd.
+    /**
+     * @deprecated read、write方法已经实现了Promise接口，此方法不再建议使用
+     */
+    flush(): void;
 }
 
 interface ImportMeta {

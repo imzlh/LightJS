@@ -109,6 +109,13 @@
         "aio_abi.h": "c",
         "libaio.h": "c",
         "aio.h": "c",
-        "syscall.h": "c"
+        "syscall.h": "c",
+        "libbf.h": "c",
+        "termios.h": "c",
+        "strings.h": "c",
+        "sysinfo.h": "c",
+        "utsname.h": "c",
+        "features.h": "c",
+        "libregexp.h": "c"
     }
 }

@@ -1,4 +1,7 @@
 test('url', function(){
+    console.log('Testing URL class');
+    // @ts-ignore
+    if(!globalThis.URL) throw new Error('URL class is not available');
     let url = new URL('https://username:password@www.example.com/path/to/page.html?query=string#hash');
     assert(url.protocol === 'https:', 'url.protocol should be "https:"');
     assert(url.host === 'www.example.com', 'url.hostname should be "www.example.com"');

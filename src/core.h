@@ -4,8 +4,17 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
+// once include
+#pragma once
+
 // GNU/POSIX compatibility
 #define _POSIX_C_SOURCE 1
+#ifndef __GNUC__
+#warning "This code may not fit well on non-GNU compilers"
+#endif
+
+// version
+#define LJS_VERSION "0.1.0"
 
 #define MAX_EVENTS 64
 #define MAX_QUERY_COUNT 32
@@ -14,7 +23,11 @@
 #define MAX_MESSAGE_COUNT 10
 #define EV_REMOVE_ALL (EV_REMOVE_READ | EV_REMOVE_WRITE | EV_REMOVE_EOF)
 
+#ifndef countof
 #define countof(x) (sizeof(x)/sizeof((x)[0]))
+#endif
+
+#define C_CONST(x) JS_PROP_INT32_DEF(#x, x, JS_PROP_CONFIGURABLE )
 
 typedef JSValue (*PipeCallback)(JSContext* ctx, void* ptr, JSValueConst data);
 
@@ -137,6 +150,7 @@ typedef struct {
     // module
     JSValue module_loader;
     JSValue module_format;
+    JSContext* module_ctx;
 } App;
 
 typedef void (*HTTP_Callback)(HTTP_data* data, uint8_t* buffer, uint32_t size, void* userdata);
@@ -207,7 +221,7 @@ App* LJS_create_app(
 );
 void LJS_init_context(App* app, char** init_list);
 App* LJS_NewWorker(App* parent);
-bool LJS_init_worker(JSContext* ctx);
+bool LJS_init_thread(JSContext* ctx);
 
 // --------------- HELPER FUNCTIONS ------------------------
 void free_malloc(JSRuntime *rt, void *opaque, void *ptr);
@@ -300,4 +314,67 @@ static inline void LJS_Promise_Resolve(struct LJS_Promise_Proxy* proxy, JSValue 
     JSValue args[1] = {value};
     if(!proxy) return;
     JS_Call(proxy -> ctx, proxy -> resolve, proxy -> promise, 1, args);
+}
+
+/**
+ * 创建一个继承自指定父类的新类
+ * 
+ * @param ctx JS上下文
+ * @param parent_class 父类的JS值
+ * @param class_id 新类的ID
+ * @param class_def 类定义
+ * @return 新类的构造函数
+ */
+static inline JSValue JS_NewClass2(JSContext *ctx, JSValue parent_class, 
+                    JSClassID class_id, const JSClassDef *class_def) {
+    // 1. 注册新类
+    if (JS_NewClass(JS_GetRuntime(ctx), class_id, class_def) < 0) {
+        return JS_EXCEPTION;
+    }
+    
+    // 2. 获取父类的原型
+    JSValue parent_proto = JS_GetPropertyStr(ctx, parent_class, "prototype");
+    if (JS_IsException(parent_proto)) {
+        return JS_EXCEPTION;
+    }
+    
+    // 3. 创建子类构造函数
+    JSValue child_ctor = JS_NewCFunction2(ctx, NULL, class_def->class_name, 
+                                        0, JS_CFUNC_constructor, class_id);
+    if (JS_IsException(child_ctor)) {
+        JS_FreeValue(ctx, parent_proto);
+        return JS_EXCEPTION;
+    }
+    
+    // 4. 创建子类原型对象
+    JSValue child_proto = JS_NewObjectProtoClass(ctx, parent_proto, class_id);
+    JS_FreeValue(ctx, parent_proto);
+    if (JS_IsException(child_proto)) {
+        JS_FreeValue(ctx, child_ctor);
+        return JS_EXCEPTION;
+    }
+    
+    // 5. 设置构造函数的prototype属性
+    JS_SetPropertyStr(ctx, child_ctor, "prototype", child_proto);
+    
+    // 6. 设置原型对象的constructor属性
+    JS_SetPropertyStr(ctx, child_proto, "constructor", child_ctor);
+    
+    JS_FreeValue(ctx, child_proto);
+    return child_ctor;
+}
+
+static inline bool JS_CopyObject(JSContext *ctx, JSValueConst from, JSValue to, uint32_t max_items){
+    JSValue val;
+
+    JSPropertyEnum *props[max_items];
+    int proplen = JS_GetOwnPropertyNames(ctx, props, &max_items, from, JS_GPN_ENUM_ONLY);
+    if(proplen < 0) return false;
+    for(int i = 0; i < proplen; i++){
+        val = JS_GetProperty(ctx, from, props[i]->atom);
+        if(!JS_IsException(val)){
+            JS_SetProperty(ctx, to, props[i]->atom, val);
+        }
+    }
+    return true;
 }

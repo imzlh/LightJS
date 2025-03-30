@@ -1,5 +1,7 @@
 import { open, read, rename, scandir, stat, unlink, write } from "stdio";
 
+console.log('test stdio');
+
 test("write sync", () => write("test.txt", "Hello World"));
 
 test("read sync", () => read("test.txt", true) === "Hello World");
@@ -16,9 +18,12 @@ test("stat", () => {
     assert(s.size === "Hello World".length);
 });
 
-test("open", async () => {
-    const pipe = open("test2.txt", "r+");
-    assert(isEqual(pipe.read(), encodeStr("Hello World")));
+await test("open", async () => {
+    const pipe = open("test2.txt", "r+"),
+        res = await pipe.read("Hello World".length);
+    console.log(res);
+    assert(isEqual(res, encodeStr("Hello World")), "Read mismatch with write");
+    assert(pipe.closed, "Pipe should be closed after read");
     pipe.write(encodeStr("Goodbye World"));
     pipe.close();
 });
