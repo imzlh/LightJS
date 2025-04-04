@@ -1098,7 +1098,7 @@ util.inspect = function (val, show_hidden, max_depth = 1, use_colors = true) {
      * @template T
      * @param {any} opt 
      * @param {T} def 
-     * @returns {T}
+     * @returns {T | number}
      */
     function set(opt, def) {
         return (typeof opt === 'undefined') ? def : (opt === null) ? Infinity : opt;
@@ -1106,6 +1106,7 @@ util.inspect = function (val, show_hidden, max_depth = 1, use_colors = true) {
     if (typeof show_hidden !== 'boolean')
         show_hidden = false;
     max_depth = set(max_depth, 2);
+    // @ts-ignore
     use_colors = set(use_colors, true);
     var breakLength = set(options.breakLength, Math.min(term_width, 80));
     var maxArrayLength = set(options.maxArrayLength, 100);

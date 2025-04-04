@@ -6,3 +6,5 @@ Makefile
 back/
 build/
 CMakeFiles/
+test*
+!test.sh

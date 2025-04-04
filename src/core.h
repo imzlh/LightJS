@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <sys/inotify.h>
 
 // once include
 #pragma once
@@ -22,6 +23,7 @@
 #define PIPE_WRITE 0b10
 #define MAX_MESSAGE_COUNT 10
 #define EV_REMOVE_ALL (EV_REMOVE_READ | EV_REMOVE_WRITE | EV_REMOVE_EOF)
+#define EVFD_BUFSIZE 16 * 1024
 
 #ifndef countof
 #define countof(x) (sizeof(x)/sizeof((x)[0]))
@@ -35,23 +37,9 @@ typedef JSValue (*PipeCallback)(JSContext* ctx, void* ptr, JSValueConst data);
 typedef void (*EvReadCallback)(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data);
 typedef void (*EvWriteCallback)(EvFD* evfd, void* opaque);
 typedef void (*EvCloseCallback)(int fd, void* opaque);
-typedef void (*EvTimerCallback)(void* user_data);
-
-struct EvFD{
-    int fd;
-    int raw_fd;
-    bool aio;
-
-    struct ReadTask* read_queue;
-    struct WriteTask* write_queue;
-    EvCloseCallback close_callback;
-    void* close_opaque;
-    uint8_t* line_buffer;
-    uint32_t line_pos;    // 末端位置
-    uint32_t line_size;   // 总计大小
-    bool eof;
-    bool active;
-};
+typedef void (*EvINotifyCallback)(struct inotify_event* event, void* user_data);
+typedef void (*EvSyncCallback)(EvFD* evfd, void* user_data);
+typedef void (*EvTimerCallback)(uint64_t count, void* user_data);
 
 typedef struct{
     char *key;
@@ -188,7 +176,7 @@ JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCal
 // Core event loop
 bool LJS_evcore_init();
 bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
-int LJS_evcore_attach(int fd, EvReadCallback rcb, EvWriteCallback wcb, EvCloseCallback ccb, void* opaque);
+int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback wcb, EvCloseCallback ccb, void* opaque);
 bool LJS_evcore_detach(int fd, uint8_t type);
 EvFD* LJS_evfd_new(int fd, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
 bool LJS_evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
@@ -196,9 +184,14 @@ bool LJS_evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCal
 bool LJS_evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size, EvWriteCallback callback, void* user_data);
 bool LJS_evfd_close(EvFD* evfd);
-int LJS_evcore_setTimeout(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
-int LJS_evcore_interval(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
+int LJS_evfd_getfd(EvFD* evfd, int* timer_fd);
+EvFD* LJS_evcore_setTimeout(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
+EvFD* LJS_evcore_interval(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
 bool LJS_evcore_clearTimer(int timer_fd);
+EvFD* LJS_evcore_inotify(EvINotifyCallback callback, void* user_data);
+bool LJS_evcore_stop_inotify(EvFD* evfd);
+int LJS_evcore_inotify_watch(EvFD* evfd, const char* path, uint32_t mask);
+bool LJS_evcore_inotify_unwatch(EvFD* evfd, int wd);
 
 // URL module
 char* LJS_resolve_path(const char* path, const char* base);

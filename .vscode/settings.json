@@ -116,6 +116,9 @@
         "sysinfo.h": "c",
         "utsname.h": "c",
         "features.h": "c",
-        "libregexp.h": "c"
+        "libregexp.h": "c",
+        "test.h": "c",
+        "inotify.h": "c",
+        "utils.h": "c"
     }
 }

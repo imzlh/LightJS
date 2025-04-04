@@ -672,7 +672,7 @@ static void parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len,
 
     error:{
         data->state = HTTP_ERROR;
-        close (evfd -> fd);
+        close (LJS_evfd_getfd(evfd, NULL));
         return;
     }
 }

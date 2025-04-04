@@ -36,7 +36,7 @@ void socket_handle_connect(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void
     // accept
     struct sockaddr_storage client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
-    int client_fd = accept(evfd->fd, (struct sockaddr*)&client_addr, &client_addr_len);
+    int client_fd = accept(LJS_evfd_getfd(evfd, NULL), (struct sockaddr*)&client_addr, &client_addr_len);
 
     // 转换为Object
     JSValue addr_info = JS_NewObject(data -> ctx);
@@ -205,7 +205,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     data->fd = sockfd;
     data->ctx = ctx;
     data->bufsize = bufsize;
-    LJS_evcore_attach(sockfd, socket_handle_connect, (EvWriteCallback)NULL, socket_handle_close, data);
+    LJS_evcore_attach(sockfd, false, socket_handle_connect, (EvWriteCallback)NULL, socket_handle_close, data);
 
     return promise -> promise;
 }

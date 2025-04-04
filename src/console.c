@@ -195,7 +195,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
         // Promise检查
         if(JS_IsPromise(val)){
             JSPromiseStateEnum state = JS_PromiseState(ctx, val);
-            char* state_str;
+            char* state_str = "unknown";
             switch(state){
                 case JS_PROMISE_PENDING:
                     state_str = "pending";

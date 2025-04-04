@@ -5,6 +5,7 @@
 //  */
 
 // #include "../engine/quickjs.h"
+// #include "core.h"
 // #include <zlib.h>
 
 // static JSValue qjs_zlib_ext_deflate(JSContext* ctx, JSValueConst this_val,
@@ -51,16 +52,9 @@
 //     JS_CFUNC_MAGIC_DEF("inflateSync", 2, qjs_zlib_ext_inflate, 0),
 //     JS_OBJECT_DEF("constants",
 //                   qjs_zlib_constants,
-//                   njs_nitems(qjs_zlib_constants),
+//                   countof(qjs_zlib_constants),
 //                   JS_PROP_CONFIGURABLE),
 // };
-
-
-// qjs_module_t  qjs_zlib_module = {
-//     .name = "zlib",
-//     .init = qjs_zlib_init,
-// };
-
 
 // static JSValue
 // qjs_zlib_ext_deflate(JSContext* ctx, JSValueConst this_val, int argc,

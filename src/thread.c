@@ -448,8 +448,8 @@ static void LJS_worker_loop(App* app, JSValue func){
     }
 
     // 监听pipe
-    LJS_evcore_attach(app -> worker -> efd_main2worker, worker_message_callback, NULL, worker_close_callback, app);
-    LJS_evcore_attach(app -> worker -> efd_worker2main, NULL, worker_writeable_callback, NULL, app);
+    LJS_evcore_attach(app -> worker -> efd_main2worker, false, worker_message_callback, NULL, worker_close_callback, app);
+    LJS_evcore_attach(app -> worker -> efd_worker2main, false, NULL, worker_writeable_callback, NULL, app);
 
     // 启动事件循环
     LJS_evcore_run(NULL, NULL);
@@ -476,6 +476,20 @@ static bool in(char** arr, const char* str){
 void LJS_init_context(App* app, char** init_list){
     JSContext* ctx = app -> ctx;
 
+    // 基础JS语法
+    if(!init_list || in(init_list, "base")) JS_AddIntrinsicBaseObjects(ctx);
+    if(!init_list || in(init_list, "date")) JS_AddIntrinsicDate(ctx);
+    if(!init_list || in(init_list, "eval")) JS_AddIntrinsicEval(ctx);
+    if(!init_list || in(init_list, "regexp")) JS_AddIntrinsicRegExp(ctx);
+    if(!init_list || in(init_list, "json")) JS_AddIntrinsicJSON(ctx);
+    if(!init_list || in(init_list, "proxy")) JS_AddIntrinsicProxy(ctx);
+    if(!init_list || in(init_list, "mapset")) JS_AddIntrinsicMapSet(ctx);
+    if(!init_list || in(init_list, "typedarray")) JS_AddIntrinsicTypedArrays(ctx);
+    if(!init_list || in(init_list, "promise")) JS_AddIntrinsicPromise(ctx);
+    if(!init_list || in(init_list, "bigint")) JS_AddIntrinsicBigInt(ctx);
+    if(!init_list || in(init_list, "weakref")) JS_AddIntrinsicWeakRef(ctx);
+    if(!init_list || in(init_list, "performance")) JS_AddPerformance(ctx);
+
     // 初始化所有模块
     if(!init_list || in(init_list, "pipe")){
         LJS_init_pipe(ctx);
@@ -497,20 +511,6 @@ void LJS_init_context(App* app, char** init_list){
     if(!init_list || in(init_list, "module")) LJS_init_module(ctx);
     if(!init_list || in(init_list, "url")) LJS_init_global_url(ctx);
     if(!init_list || in(init_list, "timer")) LJS_init_timer(ctx);    // delay
-
-    // 基础JS语法
-    if(!init_list || in(init_list, "base")) JS_AddIntrinsicBaseObjects(ctx);
-    if(!init_list || in(init_list, "date")) JS_AddIntrinsicDate(ctx);
-    if(!init_list || in(init_list, "eval")) JS_AddIntrinsicEval(ctx);
-    if(!init_list || in(init_list, "regexp")) JS_AddIntrinsicRegExp(ctx);
-    if(!init_list || in(init_list, "json")) JS_AddIntrinsicJSON(ctx);
-    if(!init_list || in(init_list, "proxy")) JS_AddIntrinsicProxy(ctx);
-    if(!init_list || in(init_list, "mapset")) JS_AddIntrinsicMapSet(ctx);
-    if(!init_list || in(init_list, "typedarray")) JS_AddIntrinsicTypedArrays(ctx);
-    if(!init_list || in(init_list, "promise")) JS_AddIntrinsicPromise(ctx);
-    if(!init_list || in(init_list, "bigint")) JS_AddIntrinsicBigInt(ctx);
-    if(!init_list || in(init_list, "weakref")) JS_AddIntrinsicWeakRef(ctx);
-    if(!init_list || in(init_list, "performance")) JS_AddPerformance(ctx);
 }
 
 static void* pthread_main(void* arg){
@@ -623,8 +623,8 @@ static JSValue js_create_worker(JSContext* ctx, JSValueConst new_target, int arg
     App* app = LJS_NewWorker(self_app);
 
     // evloop
-    LJS_evcore_attach(app -> worker -> efd_worker2main, main_message_callback, NULL, main_close_callback, app);
-    LJS_evcore_attach(app -> worker -> efd_main2worker, NULL, main_writeable_callback, NULL, app);
+    LJS_evcore_attach(app -> worker -> efd_worker2main, false, main_message_callback, NULL, main_close_callback, app);
+    LJS_evcore_attach(app -> worker -> efd_main2worker, false, NULL, main_writeable_callback, NULL, app);
 
     // Pipe
     return LJS_NewU8Pipe(app -> ctx, PIPE_READ | PIPE_WRITE, BUFFER_SIZE,
@@ -743,9 +743,9 @@ struct Timer_T {
     bool once;
 };
 
-static void timer_callback(void* ptr){
+static void timer_callback(uint64_t count, void* ptr){
     struct Timer_T* timer = (struct Timer_T*)ptr;
-    JS_Call(timer -> ctx, timer -> resolve, JS_UNDEFINED, 0, NULL);
+    JS_Call(timer -> ctx, timer -> resolve, JS_UNDEFINED, 1, (JSValue[1]){ JS_NewInt64(timer -> ctx, count) });
 
     if(timer -> once){
         free(timer);
@@ -789,9 +789,9 @@ static JSValue js_timer_set_timeout(JSContext* ctx, JSValueConst this_val, int a
     timer -> resolve = callback;
     timer -> once = true;
 
-    int id = LJS_evcore_setTimeout(delay_time / 1000, timer_callback, timer);
+    EvFD* fd = LJS_evcore_setTimeout(delay_time / 1000, timer_callback, timer);
 
-    return JS_NewUint32(ctx, id);
+    return JS_NewUint32(ctx, LJS_evfd_getfd(fd, NULL));
 }
 
 static JSValue js_timer_interval(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
@@ -810,9 +810,9 @@ static JSValue js_timer_interval(JSContext* ctx, JSValueConst this_val, int argc
     timer -> resolve = callback;
     timer -> once = false;
 
-    int id = LJS_evcore_interval(interval_time / 1000, timer_callback, timer);
+    EvFD* fd = LJS_evcore_interval(interval_time / 1000, timer_callback, timer);
 
-    return JS_NewUint32(ctx, id);
+    return JS_NewUint32(ctx, LJS_evfd_getfd(fd, NULL));
 }
 
 static JSValue js_timer_clear(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){

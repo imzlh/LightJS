@@ -88,6 +88,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
 endif()
 
 if(CMAKE_BUILD_TYPE MATCHES "Debug")
+    message(STATUS "Building in debug mode")
     add_compile_options(-O0)
     xcheck_add_c_compiler_flag(-ggdb)
     xcheck_add_c_compiler_flag(-fno-omit-frame-pointer)
@@ -115,9 +116,9 @@ endif()
 # QJS_ENABLE_MSAN only works with clang at the time of writing; also not checked
 # for the same reason
 xoption(QJS_BUILD_EXAMPLES "Build examples" OFF)
-xoption(QJS_BUILD_CLI_STATIC "Build a static qjs executable" OFF)
-xoption(QJS_BUILD_CLI_WITH_MIMALLOC "Build the qjs executable with mimalloc" OFF)
-xoption(QJS_BUILD_CLI_WITH_STATIC_MIMALLOC "Build the qjs executable with mimalloc (statically linked)" OFF)
+xoption(LJS_BUILD_STATIC "Build a static ljs executable" OFF)
+xoption(LJS_BUILD_WITH_MIMALLOC "Build the ljs executable with mimalloc" OFF)
+xoption(LJS_BUILD_WITH_STATIC_MIMALLOC "Build the ljs executable with mimalloc (statically linked)" OFF)
 xoption(QJS_ENABLE_ASAN "Enable AddressSanitizer (ASan)" OFF)
 xoption(QJS_ENABLE_MSAN "Enable MemorySanitizer (MSan)" OFF)
 xoption(QJS_ENABLE_TSAN "Enable ThreadSanitizer (TSan)" OFF)
@@ -184,7 +185,7 @@ endif()
 #
 
 macro(add_static_if_needed target)
-    if(QJS_BUILD_CLI_STATIC OR MINGW)
+    if(LJS_BUILD_STATIC OR MINGW)
         target_link_options(${target} PRIVATE -static)
         if(MINGW)
             target_link_options(${target} PRIVATE -static-libgcc)
@@ -193,7 +194,7 @@ macro(add_static_if_needed target)
 endmacro()
 
 file(GLOB ljs_core src/*.c)
-set(qjs_sources
+set(ljs_sources
     engine/cutils.c
     engine/libbf.c
     engine/libregexp.c
@@ -202,34 +203,34 @@ set(qjs_sources
     ${ljs_core}
 )
 
-list(APPEND qjs_defines _GNU_SOURCE)
+list(APPEND ljs_defines _GNU_SOURCE)
 if(WIN32)
     # NB: Windows 7 is EOL and we are only supporting in so far as it doesn't interfere with progress.
-    list(APPEND qjs_defines WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0601)
+    list(APPEND ljs_defines WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0601)
 endif()
-list(APPEND qjs_libs ${CMAKE_DL_LIBS})
+list(APPEND ljs_libs ${CMAKE_DL_LIBS})
 find_package(Threads)
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
-    list(APPEND qjs_libs ${CMAKE_THREAD_LIBS_INIT})
+    list(APPEND ljs_libs ${CMAKE_THREAD_LIBS_INIT})
 endif()
 
 # try to find libm
 find_library(M_LIBRARIES m)
 if(M_LIBRARIES OR CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
-    list(APPEND qjs_libs m)
+    list(APPEND ljs_libs m)
 endif()
 
-add_library(qjs ${qjs_sources})
-target_compile_definitions(qjs PRIVATE ${qjs_defines})
-target_include_directories(qjs PUBLIC
+add_library(ljs ${ljs_sources})
+target_compile_definitions(ljs PRIVATE ${ljs_defines})
+target_include_directories(ljs PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_link_libraries(qjs PUBLIC ${qjs_libs})
+target_link_libraries(ljs PUBLIC ${ljs_libs})
 
 if(EMSCRIPTEN)
-    add_executable(qjs_wasm ${qjs_sources})
-    target_link_options(qjs_wasm PRIVATE
+    add_executable(ljs_wasm ${ljs_sources})
+    target_link_options(ljs_wasm PRIVATE
         # in emscripten 3.x, this will be set to 16k which is too small for quickjs. #write sth. to force github rebuild
         -sSTACK_SIZE=2097152 # let it be 2m = 2 * 1024 * 1024 = 2097152, otherwise, stack overflow may be occured at bootstrap
         -sNO_INVOKE_RUN
@@ -241,34 +242,34 @@ if(EMSCRIPTEN)
         -sNO_DEFAULT_TO_CXX # this project is pure c project, no need for c plus plus handle
         -sEXPORTED_RUNTIME_METHODS=ccall,cwrap
     )
-    target_compile_definitions(qjs_wasm PRIVATE ${qjs_defines})
-    target_link_libraries(qjs_wasm m)
+    target_compile_definitions(ljs_wasm PRIVATE ${ljs_defines})
+    target_link_libraries(ljs_wasm m)
 endif()
 
 # LightJS CLI
 #
 
-add_executable(qjs_exe
+add_executable(ljs_exe
     # gen/repl.c
     # gen/standalone.c
     main.c
 )
-add_static_if_needed(qjs_exe)
-set_target_properties(qjs_exe PROPERTIES
+add_static_if_needed(ljs_exe)
+set_target_properties(ljs_exe PROPERTIES
     OUTPUT_NAME "ljs"
 )
-target_compile_definitions(qjs_exe PRIVATE ${qjs_defines})
-target_link_libraries(qjs_exe qjs)
+target_compile_definitions(ljs_exe PRIVATE ${ljs_defines})
+target_link_libraries(ljs_exe ljs)
 if(NOT WIN32)
-    set_target_properties(qjs_exe PROPERTIES ENABLE_EXPORTS TRUE)
+    set_target_properties(ljs_exe PROPERTIES ENABLE_EXPORTS TRUE)
 endif()
-if(QJS_BUILD_CLI_WITH_MIMALLOC OR QJS_BUILD_CLI_WITH_STATIC_MIMALLOC)
+if(LJS_BUILD_WITH_MIMALLOC OR LJS_BUILD_WITH_STATIC_MIMALLOC)
     find_package(mimalloc REQUIRED)
     # Upstream mimalloc doesn't provide a way to know if both libraries are supported.
-    if(QJS_BUILD_CLI_WITH_STATIC_MIMALLOC)
-        target_link_libraries(qjs_exe mimalloc-static)
+    if(LJS_BUILD_WITH_STATIC_MIMALLOC)
+        target_link_libraries(ljs_exe mimalloc-static)
     else()
-        target_link_libraries(qjs_exe mimalloc)
+        target_link_libraries(ljs_exe mimalloc)
     endif()
 endif()
 
@@ -281,7 +282,7 @@ endif()
 #     list(GET QJS_VERSION 0 QJS_VERSION_MAJOR)
 #     list(GET QJS_VERSION 1 QJS_VERSION_MINOR)
 #     list(GET QJS_VERSION 2 QJS_VERSION_PATCH)
-#     set_target_properties(qjs PROPERTIES
+#     set_target_properties(ljs PROPERTIES
 #         VERSION ${QJS_VERSION_MAJOR}.${QJS_VERSION_MINOR}.${QJS_VERSION_PATCH}
 #         SOVERSION ${QJS_VERSION_MAJOR}
 #     )
@@ -289,13 +290,13 @@ endif()
 #     if(QJS_BUILD_LIBC)
 #         install(FILES quickjs-libc.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 #     endif()
-#     install(TARGETS qjs_exe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-#     install(TARGETS qjsc RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-#     install(TARGETS qjs EXPORT qjsConfig
+#     install(TARGETS ljs_exe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+#     install(TARGETS ljsc RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+#     install(TARGETS ljs EXPORT ljsConfig
 #             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 #             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 #             ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-#     install(EXPORT qjsConfig DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/quickjs)
+#     install(EXPORT ljsConfig DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/quickjs)
 #     install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 #     install(DIRECTORY examples DESTINATION ${CMAKE_INSTALL_DOCDIR})
 # endif()

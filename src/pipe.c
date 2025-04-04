@@ -1,5 +1,7 @@
 #include "../engine/quickjs.h"
 #include "core.h"
+#include "utils.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -14,16 +16,8 @@
 
 #define PIPE_READ 0b1
 #define PIPE_WRITE 0b10
-#define MIN(a, b) ((a) < (b)? (a) : (b))
 
 // 从FD创建的管道
-struct CycledBuffer_T{
-    uint8_t* buf;
-    uint32_t start;
-    uint32_t end;
-    uint32_t size;
-    bool cycled;
-};
 struct FDPipe_T{
     EvFD* fd;
     uint8_t flag;
@@ -56,7 +50,7 @@ struct Pipe_T{
     JSValue close_func;
 
     // for u8pipe
-    struct CycledBuffer_T* read_buf;
+    struct Buffer* read_buf;
 
     bool closed;
     uint8_t flag;
@@ -71,9 +65,10 @@ static thread_local uint32_t PIPE_u8_buf_size = 16 * 1024;
 
 // ---------------- Pipe -------------------
 static void c_pipe_destroy(JSContext *ctx, struct Pipe_T *pipe) {
-    JS_Call(ctx, pipe->close_func, JS_NULL, 0, NULL);
-    if(JS_IsFunction(ctx, pipe->close_rs))
-        JS_Call(ctx, pipe->close_rs, JS_NULL, 0, NULL);
+    JS_FreeValue(ctx, JS_Call(ctx, pipe->close_func, JS_NULL, 0, NULL));
+    if(JS_IsFunction(ctx, pipe->close_rs)){
+        JS_FreeValue(ctx, JS_Call(ctx, pipe->close_rs, JS_NULL, 0, NULL));
+    }
 }
 
 static void pipe_cleanup(JSRuntime *rt, struct Pipe_T* pipe) {
@@ -82,6 +77,7 @@ static void pipe_cleanup(JSRuntime *rt, struct Pipe_T* pipe) {
     JS_FreeValueRT(rt, pipe->pull_func);
     JS_FreeValueRT(rt, pipe->write_func);
     JS_FreeValueRT(rt, pipe->close_func);
+    buffer_free(pipe->read_buf);
 
     free(pipe);
 }
@@ -168,9 +164,9 @@ static JSValue js_pipe_constructor(JSContext *ctx, JSValueConst new_target, int 
     JSValue pull_func = JS_GetPropertyStr(ctx, argv[0], "pull");
     JSValue write_func = JS_GetPropertyStr(ctx, argv[0], "write");
     JSValue start_func = JS_GetPropertyStr(ctx, argv[0], "start");
-    pipe -> pull_func = JS_IsFunction(ctx, pull_func) ? pull_func : JS_NULL;
-    pipe -> write_func = JS_IsFunction(ctx, write_func) ? write_func : JS_NULL;
-    pipe -> close_func = JS_IsFunction(ctx, close_func) ? close_func : JS_NULL;
+    pipe -> pull_func = JS_IsFunction(ctx, pull_func) ? JS_DupValue(ctx, pull_func) : JS_NULL;
+    pipe -> write_func = JS_IsFunction(ctx, write_func) ? JS_DupValue(ctx, write_func) : JS_NULL;
+    pipe -> close_func = JS_IsFunction(ctx, close_func) ? JS_DupValue(ctx, close_func) : JS_NULL;
     pipe -> close_rs = JS_NULL;
     pipe -> closed = false;
     pipe -> flag = 0;
@@ -181,7 +177,7 @@ static JSValue js_pipe_constructor(JSContext *ctx, JSValueConst new_target, int 
 
     // 调用start
     if(JS_IsFunction(ctx, start_func)){
-        JS_Call(ctx, start_func, obj, 0, NULL);
+        JS_FreeValue(ctx, JS_Call(ctx, start_func, obj, 0, NULL));
     }
 
     JS_FreeValue(ctx, proto);
@@ -194,6 +190,9 @@ static inline void fdpipe_cleanup(JSRuntime *rt, struct FDPipe_T* pipe){
     if(!JS_IsNull(pipe -> read_rj)) JS_FreeValueRT(rt, pipe -> read_rj);
     if(!JS_IsNull(pipe -> write_rs)) JS_FreeValueRT(rt, pipe -> write_rs);
     if(!JS_IsNull(pipe -> write_rj)) JS_FreeValueRT(rt, pipe -> write_rj);
+    if(!JS_IsNull(pipe -> write_buf)) JS_FreeValueRT(rt, pipe -> write_buf);
+    if(!JS_IsNull(pipe -> close_rs)) JS_FreeValueRT(rt, pipe -> close_rs);
+    if(!JS_IsNull(pipe -> close_rs2)) JS_FreeValueRT(rt, pipe -> close_rs2);
     free(pipe);
 }
 
@@ -238,101 +237,6 @@ void free_malloc(JSRuntime *rt, void *opaque, void *ptr){
     free(ptr);
 }
 
-static inline bool cbuf_get_available_size(struct CycledBuffer_T* cbuf){
-    return cbuf -> cycled? cbuf -> end - cbuf -> start : cbuf -> end - cbuf -> start + cbuf -> size;
-}
-
-static inline bool cbuf_get_used_size(struct CycledBuffer_T* cbuf){
-    return cbuf -> cycled? cbuf -> size - cbuf -> end + cbuf -> start : cbuf -> end - cbuf -> start;
-}
-
-static struct CycledBuffer_T* cbuf_create(uint32_t size){
-    struct CycledBuffer_T* cbuf = malloc(sizeof(struct CycledBuffer_T));
-    cbuf -> buf = malloc(size);
-    cbuf -> start = 0;
-    cbuf -> end = 0;
-    cbuf -> size = size;
-    cbuf -> cycled = false;
-    return cbuf;
-}
-
-static inline void cbuf_destroy(struct CycledBuffer_T* cbuf){
-    free(cbuf -> buf);
-    free(cbuf);
-}
-
-static inline bool cbuf_write(struct CycledBuffer_T* cbuf, uint8_t* data, uint32_t size){
-    uint32_t available = cbuf_get_available_size(cbuf);
-    if(available < size){
-        return false;
-    }
-    uint32_t used = cbuf_get_used_size(cbuf);
-    if(used + size > cbuf -> size){
-        // 缓冲区已满，需要循环
-        uint32_t left = cbuf -> size - used;
-        if(left) memcpy(cbuf -> buf + used, data, left);
-        memcpy(cbuf -> buf, data + left, size - left);
-        cbuf -> start = 0;
-        cbuf -> end = size - left;
-        cbuf -> cycled = true;
-    }else{
-        // 缓冲区未满，直接写入
-        memcpy(cbuf -> buf + used, data, size);
-        cbuf -> end += size;
-    }
-    return true;
-}
-
-static inline bool cbuf_read_fd(struct CycledBuffer_T* cbuf, int fd){
-    // 单次能读取的量
-    uint32_t available = cbuf -> cycled ? cbuf -> start - cbuf -> end : cbuf -> size - cbuf -> end,
-        cycled_available = cbuf_get_available_size(cbuf) - available;
-    if(available == 0){
-        if(cycled_available == 0) return false;
-        // 循环
-        available = cycled_available;
-        cbuf -> cycled = true;
-        cbuf -> start = 0;
-    }
-    // 读取数据
-    int ret = recv(fd, cbuf -> buf + cbuf -> end, available, 0);
-    if(ret <= 0){
-        return false;
-    }
-    cbuf -> end += ret;
-    return true;
-}
-
-static inline JSValue cbuf_read(struct CycledBuffer_T* cbuf, JSContext *ctx, uint32_t size){
-    uint32_t available = cbuf_get_available_size(cbuf);
-    if(available < size){
-        return JS_NULL;
-    }
-
-    uint8_t* buf = malloc(size);
-    if(!buf){
-        return JS_NULL;
-    }
-
-    if(cbuf -> cycled){
-        if(cbuf -> size - cbuf -> start >= size){
-            memcpy(buf, cbuf -> buf + cbuf -> start, size);
-            cbuf -> start += size;
-        }else{
-            uint32_t space1 = cbuf -> size - cbuf -> start;
-            memcpy(buf, cbuf -> buf + cbuf -> start, space1);
-            memcpy(buf, cbuf -> buf, size - space1);
-            cbuf -> start = size - space1;
-            cbuf -> cycled = false;
-        }
-    }else{
-        memcpy(buf, cbuf -> buf + cbuf -> start, size);
-        cbuf -> start += size;
-    }
-
-    return JS_NewUint8Array(ctx, buf, size, free_malloc, NULL, true);
-}
-
 static inline bool is_uint8array(JSContext *ctx, JSValueConst val){
     return JS_IsInstanceOf(ctx, val, 
         JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Uint8Array")
@@ -343,7 +247,7 @@ static void u8pipe_fill_by_callback(JSContext *ctx, struct Pipe_T* pipe, JSValue
     uint8_t* buf = malloc(expected_size);
 
     JSValue data;
-    while (cbuf_get_used_size(pipe -> read_buf) < expected_size){
+    while (buffer_used(pipe -> read_buf) < expected_size){
         // 调用函数
         data = JS_Call(ctx, pipe -> pull_func, JS_NULL, 0, NULL);
         if(JS_IsException(data) || !is_uint8array(ctx, data)){
@@ -353,12 +257,13 @@ static void u8pipe_fill_by_callback(JSContext *ctx, struct Pipe_T* pipe, JSValue
         // 填充
         size_t readed = 0;
         uint8_t* buf2 = JS_GetUint8Array(ctx, &readed, data);
-        cbuf_write(pipe -> read_buf, buf2, readed);
+        buffer_push(pipe -> read_buf, buf2, readed);
         JS_FreeValue(ctx, data);
     }
 
     // 提取数据
-    JSValue ret = cbuf_read(pipe -> read_buf, ctx, expected_size);
+    uint8_t* ret_buf = buffer_export(pipe -> read_buf, &expected_size);
+    JSValue ret = JS_NewUint8Array(ctx, ret_buf, (size_t)expected_size, free_malloc, NULL, true);
 
     // 调用回调
     JSValue arr[1] = { ret };
@@ -378,9 +283,15 @@ static void u8pipe_fill_once_by_callback(JSContext *ctx, struct Pipe_T* pipe, JS
     // 填充
     size_t readed = 0;
     uint8_t *buf = JS_GetUint8Array(ctx, &readed, data);
-    cbuf_write(pipe -> read_buf, buf, readed);
+    buffer_push(pipe -> read_buf, buf, readed);
     JS_FreeValue(ctx, data);
-    JSValue ret = cbuf_read(pipe -> read_buf, ctx, cbuf_get_used_size(pipe -> read_buf));
+    uint32_t bufsize;
+    JSValue ret = JS_NewUint8Array(ctx,
+        buffer_export(pipe -> read_buf, &bufsize),
+        (size_t)bufsize,
+        free_malloc, NULL,
+        true
+    );
     // 调用回调
     JSValue arr[1] = { ret };
     JS_Call(ctx, promise_callback[0], JS_NULL, 1, arr);
@@ -554,6 +465,9 @@ static JSValue js_U8Pipe_readline(JSContext *ctx, JSValueConst this_val, int arg
     }
 
     // todo: supoort normal pipe
+    if(!pipe -> fdpipe){
+        return LJS_Throw(ctx, "U8Pipe.readline() only support for fdpipe", NULL);
+    }
 
     uint32_t expected_size = 16 * 1024;
     if(argc == 1) JS_ToUint32(ctx, &expected_size, argv[0]);
@@ -592,7 +506,7 @@ static JSValue js_U8Pipe_constructor(JSContext *ctx, JSValueConst new_target, in
     pipe -> pipe.pipe -> pull_func = JS_DupValue(ctx, JS_GetPropertyStr(ctx, argv[0], "pull"));
     pipe -> pipe.pipe -> write_func = JS_DupValue(ctx, JS_GetPropertyStr(ctx, argv[0], "write"));
     pipe -> pipe.pipe -> close_func = JS_DupValue(ctx, JS_GetPropertyStr(ctx, argv[0], "close"));
-    pipe -> pipe.pipe -> read_buf = cbuf_create(PIPE_u8_buf_size);
+    buffer_init(&pipe -> pipe.pipe -> read_buf, NULL, PIPE_u8_buf_size);
     pipe -> pipe.pipe -> closed = false;
     JS_SetOpaque(obj, pipe);
 
@@ -618,8 +532,7 @@ static inline int get_fd_from_pipe(JSContext* ctx, JSValueConst pipe){
     struct U8Pipe_T* pipe_data = JS_GetOpaque(pipe, U8Pipe_class_id);
     if(!pipe_data || !pipe_data -> fdpipe) return -1;
     EvFD* fd = pipe_data -> pipe.fdpipe -> fd;
-    if(fd -> aio) return fd -> raw_fd;
-    else return fd -> fd;
+    return LJS_evfd_getfd(fd, NULL);
 }
 static JSValue js_iopipe_setraw(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0)
@@ -855,7 +768,7 @@ JSValue LJS_NewU8Pipe(JSContext *ctx, uint32_t flag, uint32_t buf_size,
     pipe -> pipe.pipe -> flag = flag;
     pipe -> pipe.pipe -> read_buf = NULL;
     pipe -> pipe.pipe -> closed = false;
-    pipe -> pipe.pipe -> read_buf = cbuf_create(buf_size);
+    buffer_init(&pipe -> pipe.pipe -> read_buf, NULL, PIPE_u8_buf_size);
     return obj;
 }
 
@@ -891,7 +804,7 @@ JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag,
     pipe -> flag = flag;
     pipe -> read_buf = NULL;
     pipe -> closed = false;
-    pipe -> read_buf = cbuf_create(PIPE_u8_buf_size);
+    buffer_init(&pipe -> read_buf, NULL, PIPE_u8_buf_size);
 
     JS_SetOpaque(obj, pipe);
 
