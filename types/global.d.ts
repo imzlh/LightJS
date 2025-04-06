@@ -57,6 +57,11 @@ declare class Sandbox {
  * URL
  */
 declare class URL {
+    /**
+     * @link https://developer.mozilla.org/zh-CN/docs/Web/API/URL/revokeObjectURL_static
+     */
+    static canParse(url: string, base?: string): boolean;
+
     constructor(url: string, base?: string);
     href: string;
     protocol: string;

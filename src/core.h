@@ -16,11 +16,19 @@
 
 // version
 #define LJS_VERSION "0.1.0"
+enum {
+    __JS_ATOM_NULL = JS_ATOM_NULL,
+#define DEF(name, str) JS_ATOM_ ## name,
+#include "../engine/quickjs-atom.h"
+#undef DEF
+    JS_ATOM_END,
+};
 
 #define MAX_EVENTS 64
 #define MAX_QUERY_COUNT 32
 #define PIPE_READ 0b1
 #define PIPE_WRITE 0b10
+#define PIPE_AIO 0b100
 #define MAX_MESSAGE_COUNT 10
 #define EV_REMOVE_ALL (EV_REMOVE_READ | EV_REMOVE_WRITE | EV_REMOVE_EOF)
 #define EVFD_BUFSIZE 16 * 1024
@@ -146,7 +154,7 @@ typedef void (*HTTP_ParseCallback)(HTTP_data *data, uint8_t *buffer, uint32_t le
 
 
 // Core events
-void LJS_dispatch_ev(char* name, JSValue data);
+void LJS_dispatch_ev(JSContext *ctx, const char * name, JSValue data);
 
 // console
 void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visited[], FILE* target_fd);
@@ -161,11 +169,10 @@ void LJS_dump_error(JSContext *ctx, JSValueConst exception);
 bool LJS_init_global_helper(JSContext *ctx);
 bool LJS_init_console(JSContext *ctx);
 bool LJS_init_pipe(JSContext *ctx);
-bool LJS_init_HTTP(JSContext *ctx);
+bool LJS_init_http(JSContext *ctx);
 bool LJS_init_module(JSContext *ctx);
 void LJS_init_runtime(JSRuntime* rt);
 bool LJS_init_stdio(JSContext *ctx);
-bool LJS_init_global_url(JSContext *ctx);
 bool LJS_init_process(JSContext* ctx, char* _entry, uint32_t _argc, char** _argv);
 
 // Core I/O Pipe
@@ -178,13 +185,14 @@ bool LJS_evcore_init();
 bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
 int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback wcb, EvCloseCallback ccb, void* opaque);
 bool LJS_evcore_detach(int fd, uint8_t type);
-EvFD* LJS_evfd_new(int fd, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
+EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
 bool LJS_evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool LJS_evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool LJS_evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size, EvWriteCallback callback, void* user_data);
 bool LJS_evfd_close(EvFD* evfd);
 int LJS_evfd_getfd(EvFD* evfd, int* timer_fd);
+bool LJS_evfd_isAIO(EvFD* evfd);
 EvFD* LJS_evcore_setTimeout(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
 EvFD* LJS_evcore_interval(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
 bool LJS_evcore_clearTimer(int timer_fd);
@@ -232,10 +240,10 @@ static inline JSValue LJS_Throw(JSContext *ctx, const char *msg, const char *hel
 
     // Allocate the error message
     size_t msg_len = strlen(msg) * 3;
-    char* msg2 = malloc(msg_len);   // guessed
+    char* msg2 = js_malloc(ctx, msg_len);   // guessed
     if (!msg2) {
         JS_FreeValue(ctx, error_obj);
-        return JS_EXCEPTION;
+        return JS_ThrowOutOfMemory(ctx);
     }
 
     va_start(args, help);
@@ -243,7 +251,7 @@ static inline JSValue LJS_Throw(JSContext *ctx, const char *msg, const char *hel
     va_end(args);
 
     JS_DefinePropertyValueStr(ctx, error_obj, "message", JS_NewString(ctx, msg2), JS_PROP_C_W_E);
-    free(msg2);
+    js_free(ctx, msg2);
 
     if (help) {
         JS_DefinePropertyValueStr(ctx, error_obj, "help", JS_NewString(ctx, help), JS_PROP_C_W_E);
@@ -252,7 +260,8 @@ static inline JSValue LJS_Throw(JSContext *ctx, const char *msg, const char *hel
 }
 
 static inline JSValue LJS_ThrowWithError(JSContext *ctx, const char *msg, const char *help){
-    char* error_str = malloc(1024);
+    char* error_str = js_malloc(ctx, 1024);
+    if(!error_str) return JS_ThrowOutOfMemory(ctx);
     JSValue error = JS_GetException(ctx);
     JSValue message = JS_GetPropertyStr(ctx, error, "message");
     JSValue type = JS_GetPropertyStr(ctx, error, "name");
@@ -266,7 +275,7 @@ static inline JSValue LJS_ThrowWithError(JSContext *ctx, const char *msg, const 
     }
     snprintf(error_str, 1024, "%s: %s", type_str, message_str);
     JS_Throw(ctx, LJS_Throw(ctx, error_str, help));
-    free(error_str);
+    js_free(ctx, error_str);
     return JS_EXCEPTION;
 }
 
@@ -287,7 +296,8 @@ struct LJS_Promise_Proxy{
  * @param ctx 运行时上下文
  */
 static inline struct LJS_Promise_Proxy* LJS_NewPromise(JSContext *ctx){
-    struct LJS_Promise_Proxy* proxy = malloc(sizeof(struct LJS_Promise_Proxy));
+    struct LJS_Promise_Proxy* proxy = js_malloc(ctx, sizeof(struct LJS_Promise_Proxy));
+    if(!proxy) return NULL;
     JSValue resolving_funcs[2];
     proxy -> ctx = ctx;
     proxy -> promise = JS_NewPromiseCapability(ctx, resolving_funcs);
@@ -300,61 +310,13 @@ static inline void LJS_FreePromise(struct LJS_Promise_Proxy* proxy){
     JS_FreeValue(proxy -> ctx, proxy -> resolve);
     JS_FreeValue(proxy -> ctx, proxy -> reject);
     JS_FreeValue(proxy -> ctx, proxy -> promise);
-    free(proxy);
+    js_free(proxy -> ctx, proxy);
 }
 
 static inline void LJS_Promise_Resolve(struct LJS_Promise_Proxy* proxy, JSValue value){
     JSValue args[1] = {value};
     if(!proxy) return;
     JS_Call(proxy -> ctx, proxy -> resolve, proxy -> promise, 1, args);
-}
-
-/**
- * 创建一个继承自指定父类的新类
- * 
- * @param ctx JS上下文
- * @param parent_class 父类的JS值
- * @param class_id 新类的ID
- * @param class_def 类定义
- * @return 新类的构造函数
- */
-static inline JSValue JS_NewClass2(JSContext *ctx, JSValue parent_class, 
-                    JSClassID class_id, const JSClassDef *class_def) {
-    // 1. 注册新类
-    if (JS_NewClass(JS_GetRuntime(ctx), class_id, class_def) < 0) {
-        return JS_EXCEPTION;
-    }
-    
-    // 2. 获取父类的原型
-    JSValue parent_proto = JS_GetPropertyStr(ctx, parent_class, "prototype");
-    if (JS_IsException(parent_proto)) {
-        return JS_EXCEPTION;
-    }
-    
-    // 3. 创建子类构造函数
-    JSValue child_ctor = JS_NewCFunction2(ctx, NULL, class_def->class_name, 
-                                        0, JS_CFUNC_constructor, class_id);
-    if (JS_IsException(child_ctor)) {
-        JS_FreeValue(ctx, parent_proto);
-        return JS_EXCEPTION;
-    }
-    
-    // 4. 创建子类原型对象
-    JSValue child_proto = JS_NewObjectProtoClass(ctx, parent_proto, class_id);
-    JS_FreeValue(ctx, parent_proto);
-    if (JS_IsException(child_proto)) {
-        JS_FreeValue(ctx, child_ctor);
-        return JS_EXCEPTION;
-    }
-    
-    // 5. 设置构造函数的prototype属性
-    JS_SetPropertyStr(ctx, child_ctor, "prototype", child_proto);
-    
-    // 6. 设置原型对象的constructor属性
-    JS_SetPropertyStr(ctx, child_proto, "constructor", child_ctor);
-    
-    JS_FreeValue(ctx, child_proto);
-    return child_ctor;
 }
 
 static inline bool JS_CopyObject(JSContext *ctx, JSValueConst from, JSValue to, uint32_t max_items){

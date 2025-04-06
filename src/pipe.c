@@ -79,7 +79,7 @@ static void pipe_cleanup(JSRuntime *rt, struct Pipe_T* pipe) {
     JS_FreeValueRT(rt, pipe->close_func);
     buffer_free(pipe->read_buf);
 
-    free(pipe);
+    js_free_rt(rt, pipe);
 }
 
 static void c_pipe_cleanup(JSRuntime *rt, JSValue val) {
@@ -159,14 +159,14 @@ static JSValue js_pipe_constructor(JSContext *ctx, JSValueConst new_target, int 
     if(argc != 2){
         return LJS_Throw(ctx, "Pipe constructor need 2 arguments", "new Pipe({ read(), poll(), close(), start() }, Pipe.READ | Pipe.WRITE)");
     }
-    struct Pipe_T *pipe = malloc(sizeof(struct Pipe_T));
+    struct Pipe_T *pipe = js_malloc(ctx, sizeof(struct Pipe_T));
     JSValue close_func = JS_GetPropertyStr(ctx, argv[0], "close");
     JSValue pull_func = JS_GetPropertyStr(ctx, argv[0], "pull");
     JSValue write_func = JS_GetPropertyStr(ctx, argv[0], "write");
     JSValue start_func = JS_GetPropertyStr(ctx, argv[0], "start");
-    pipe -> pull_func = JS_IsFunction(ctx, pull_func) ? JS_DupValue(ctx, pull_func) : JS_NULL;
-    pipe -> write_func = JS_IsFunction(ctx, write_func) ? JS_DupValue(ctx, write_func) : JS_NULL;
-    pipe -> close_func = JS_IsFunction(ctx, close_func) ? JS_DupValue(ctx, close_func) : JS_NULL;
+    pipe -> pull_func = JS_IsFunction(ctx, pull_func) ? pull_func : JS_NULL;
+    pipe -> write_func = JS_IsFunction(ctx, write_func) ? write_func : JS_NULL;
+    pipe -> close_func = JS_IsFunction(ctx, close_func) ? close_func : JS_NULL;
     pipe -> close_rs = JS_NULL;
     pipe -> closed = false;
     pipe -> flag = 0;
@@ -193,7 +193,7 @@ static inline void fdpipe_cleanup(JSRuntime *rt, struct FDPipe_T* pipe){
     if(!JS_IsNull(pipe -> write_buf)) JS_FreeValueRT(rt, pipe -> write_buf);
     if(!JS_IsNull(pipe -> close_rs)) JS_FreeValueRT(rt, pipe -> close_rs);
     if(!JS_IsNull(pipe -> close_rs2)) JS_FreeValueRT(rt, pipe -> close_rs2);
-    free(pipe);
+    js_free_rt(rt, pipe);
 }
 
 static void c_u8pipe_cleanup(JSRuntime *rt, JSValue val) {
@@ -204,7 +204,7 @@ static void c_u8pipe_cleanup(JSRuntime *rt, JSValue val) {
     }else{
         c_pipe_cleanup(rt, val);
     }
-    free(pipe);
+    js_free_rt(rt, pipe);
 }
 
 static inline bool u8pipe_is(JSContext *ctx, struct U8Pipe_T* pipe, uint8_t flag) {
@@ -217,11 +217,11 @@ static inline bool u8pipe_is(JSContext *ctx, struct U8Pipe_T* pipe, uint8_t flag
 
 static inline bool u8pipe_locked(JSContext *ctx, struct U8Pipe_T* pipe, bool read){
     if(pipe->fdpipe){
+        return false;
+    }else{
         return read
             ? JS_IsFunction(ctx, pipe -> pipe.fdpipe -> read_rs)
             : JS_IsFunction(ctx, pipe -> pipe.fdpipe -> write_rs);
-    }else {
-        return false;
     }
 }
 
@@ -234,7 +234,7 @@ static inline bool u8pipe_closed(JSContext *ctx, struct U8Pipe_T* pipe) {
 }
 
 void free_malloc(JSRuntime *rt, void *opaque, void *ptr){
-    free(ptr);
+    js_free_rt(rt, ptr);
 }
 
 static inline bool is_uint8array(JSContext *ctx, JSValueConst val){
@@ -244,7 +244,7 @@ static inline bool is_uint8array(JSContext *ctx, JSValueConst val){
 }
 
 static void u8pipe_fill_by_callback(JSContext *ctx, struct Pipe_T* pipe, JSValueConst promise_callback[2], uint32_t expected_size){
-    uint8_t* buf = malloc(expected_size);
+    uint8_t* buf = js_malloc(ctx, expected_size);
 
     JSValue data;
     while (buffer_used(pipe -> read_buf) < expected_size){
@@ -269,7 +269,7 @@ static void u8pipe_fill_by_callback(JSContext *ctx, struct Pipe_T* pipe, JSValue
     JSValue arr[1] = { ret };
     JS_Call(ctx, promise_callback[0], JS_NULL, 1, arr);
     JS_FreeValue(ctx, data);
-    free(buf);
+    js_free(ctx, buf);
 }
 
 static void u8pipe_fill_once_by_callback(JSContext *ctx, struct Pipe_T* pipe, JSValueConst promise_callback[2]){
@@ -285,7 +285,7 @@ static void u8pipe_fill_once_by_callback(JSContext *ctx, struct Pipe_T* pipe, JS
     uint8_t *buf = JS_GetUint8Array(ctx, &readed, data);
     buffer_push(pipe -> read_buf, buf, readed);
     JS_FreeValue(ctx, data);
-    uint32_t bufsize;
+    uint32_t bufsize = 0;
     JSValue ret = JS_NewUint8Array(ctx,
         buffer_export(pipe -> read_buf, &bufsize),
         (size_t)bufsize,
@@ -339,10 +339,10 @@ static JSValue js_U8Pipe_read(JSContext *ctx, JSValueConst this_val, int argc, J
         pipe -> pipe.fdpipe -> read_rj = JS_DupValue(ctx, promise_callback[1]);
 
         if(expected_size == 0){
-            uint8_t* buf = malloc(PIPE_u8_buf_size);
+            uint8_t* buf = js_malloc(ctx, PIPE_u8_buf_size);
             LJS_evfd_read(pipe -> pipe.fdpipe -> fd, PIPE_u8_buf_size, buf, evread_callback, pipe -> pipe.fdpipe);
         }else{
-            uint8_t* buf = malloc(expected_size);
+            uint8_t* buf = js_malloc(ctx, expected_size);
             LJS_evfd_readsize(pipe -> pipe.fdpipe -> fd, expected_size, buf, evread_callback, pipe -> pipe.fdpipe);
         }
     }else{  // U8PIPE
@@ -389,7 +389,7 @@ static JSValue js_U8Pipe_write(JSContext *ctx, JSValueConst this_val, int argc, 
         }
     }
 
-    buffer = malloc(expected_size == 0 ? PIPE_u8_buf_size : expected_size);
+    buffer = js_malloc(ctx, expected_size == 0 ? PIPE_u8_buf_size : expected_size);
     if (pipe->fdpipe){
         // 发送数据
         pipe->pipe.fdpipe->write_buf = JS_DupValue(ctx, argv[0]);
@@ -438,7 +438,7 @@ static JSValue js_u8pipe_get_closed(JSContext *ctx, JSValueConst this_val) {
     return JS_NewBool(ctx, u8pipe_closed(ctx, pipe));
 }
 static void evclose_callback(int fd, void* opaque){
-    struct FDPipe_T* pipe = opaque;
+    struct FDPipe_T* pipe = ((struct U8Pipe_T*)opaque) -> pipe.fdpipe;
     JS_Call(pipe -> ctx, pipe -> close_rs, JS_NULL, 0, NULL);
     
     if(JS_IsFunction(pipe -> ctx, pipe -> read_rj)){
@@ -471,7 +471,7 @@ static JSValue js_U8Pipe_readline(JSContext *ctx, JSValueConst this_val, int arg
 
     uint32_t expected_size = 16 * 1024;
     if(argc == 1) JS_ToUint32(ctx, &expected_size, argv[0]);
-    uint8_t* buffer = malloc(expected_size);
+    uint8_t* buffer = js_malloc(ctx, expected_size);
 
     struct LJS_Promise_Proxy* promise = LJS_NewPromise(ctx);
     if(!promise){
@@ -499,9 +499,9 @@ static JSValue js_U8Pipe_constructor(JSContext *ctx, JSValueConst new_target, in
     }
 
     // 从constructor注册的pipe都是U8_PIPE
-    struct U8Pipe_T *pipe = malloc(sizeof(struct U8Pipe_T));
+    struct U8Pipe_T *pipe = js_malloc(ctx, sizeof(struct U8Pipe_T));
     pipe -> fdpipe = false;
-    pipe -> pipe.pipe = malloc(sizeof(struct Pipe_T));
+    pipe -> pipe.pipe = js_malloc(ctx, sizeof(struct Pipe_T));
     pipe -> pipe.pipe -> flag = PIPE_READ | PIPE_WRITE;
     pipe -> pipe.pipe -> pull_func = JS_DupValue(ctx, JS_GetPropertyStr(ctx, argv[0], "pull"));
     pipe -> pipe.pipe -> write_func = JS_DupValue(ctx, JS_GetPropertyStr(ctx, argv[0], "write"));
@@ -606,8 +606,11 @@ static JSValue js_iopipe_istty(JSContext *ctx, JSValueConst this_val){
 }
 
 static JSValue js_iopipe_flush(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-    int fdnum = get_fd_from_pipe(ctx, this_val);
-    if(fdnum == -1) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+    struct U8Pipe_T* pipe = JS_GetOpaque(this_val, U8Pipe_class_id);
+    if(!pipe) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+    EvFD* fd = pipe -> pipe.fdpipe -> fd;
+    if(LJS_evfd_isAIO(fd)) return JS_UNDEFINED; // 不支持异步IO
+    int fdnum = LJS_evfd_getfd(fd, NULL);
 
     if(isatty(fdnum)){
         if(tcflush(fdnum, TCIOFLUSH) == -1){
@@ -645,7 +648,7 @@ bool LJS_init_pipe(JSContext *ctx) {
 
     // U8Pipe
     JS_NewClassID(rt, &U8Pipe_class_id);
-    JS_NewClass(rt, U8Pipe_class_id, &U8Pipe_class);
+    if(-1 == JS_NewClass(rt, U8Pipe_class_id, &U8Pipe_class)) return false;
     JSValue u8pipe_proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, u8pipe_proto, U8Pipe_proto_funcs, countof(U8Pipe_proto_funcs));
     JS_SetPropertyStr(ctx, global_obj, "U8Pipe", u8pipe_proto);
@@ -657,7 +660,7 @@ bool LJS_init_pipe(JSContext *ctx) {
 
     // Pipe
     JS_NewClassID(rt, &Pipe_class_id);
-    JS_NewClass(rt, Pipe_class_id, &Pipe_class);
+    if(-1 == JS_NewClass(rt, Pipe_class_id, &Pipe_class)) return false;
     JSValue pipe_proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, pipe_proto, Pipe_proto_funcs, countof(Pipe_proto_funcs));
     JS_SetPropertyStr(ctx, global_obj, "Pipe", pipe_proto);
@@ -686,11 +689,14 @@ static inline JSValue u8pipe_new(JSContext *ctx, bool fdpipe, struct U8Pipe_T *p
     JSValue promise_callback[2];
     JSValue close_prom = JS_NewPromiseCapability(ctx, promise_callback);
     if(fdpipe){
-        pipe -> pipe.fdpipe = malloc(sizeof(struct FDPipe_T));
+        pipe -> pipe.fdpipe = js_malloc(ctx, sizeof(struct FDPipe_T));
         pipe -> pipe.fdpipe -> close_rs = JS_DupValue(ctx, promise_callback[0]);
         pipe -> pipe.fdpipe -> closed = false;
+        // not locked check
+        pipe -> pipe.fdpipe -> read_rs = JS_NULL;
+        pipe -> pipe.fdpipe -> write_rs = JS_NULL;
     }else{
-        pipe -> pipe.pipe = malloc(sizeof(struct Pipe_T));
+        pipe -> pipe.pipe = js_malloc(ctx, sizeof(struct Pipe_T));
         pipe -> pipe.pipe -> close_rs = JS_DupValue(ctx, promise_callback[0]);
         pipe -> pipe.pipe -> closed = false;
     }
@@ -707,9 +713,10 @@ static inline JSValue u8pipe_new(JSContext *ctx, bool fdpipe, struct U8Pipe_T *p
  * @param buf_size 缓冲区大小
  */
 JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, JSValue onclose){
-    struct U8Pipe_T *pipe = malloc(sizeof(struct U8Pipe_T));
+    if(!ctx) abort();
+    struct U8Pipe_T *pipe = js_malloc(ctx, sizeof(struct U8Pipe_T));
     JSValue obj = u8pipe_new(ctx, true, pipe);
-    EvFD* evfd = LJS_evfd_new(fd, flag & PIPE_READ, flag & PIPE_WRITE, buf_size, evclose_callback, pipe);
+    EvFD* evfd = LJS_evfd_new(fd, flag & PIPE_AIO, flag & PIPE_READ, flag & PIPE_WRITE, buf_size, evclose_callback, pipe);
 
     if (!evfd){
         JS_FreeValue(ctx, obj);
@@ -724,6 +731,7 @@ JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, 
     pipe -> pipe.fdpipe -> write_rs = JS_NULL;
     pipe -> pipe.fdpipe -> write_rj = JS_NULL;
     pipe -> pipe.fdpipe -> close_rs2 = onclose;
+    pipe -> pipe.fdpipe -> closed = false;
     return obj;
 }
 
@@ -749,7 +757,8 @@ JSValue LJS_NewU8Pipe(JSContext *ctx, uint32_t flag, uint32_t buf_size,
     PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb,
     void* user_data
 ){
-    struct U8Pipe_T *pipe = malloc(sizeof(struct U8Pipe_T));
+    if(!ctx) abort();
+    struct U8Pipe_T *pipe = js_malloc(ctx, sizeof(struct U8Pipe_T));
     JSValue obj = u8pipe_new(ctx, false, pipe);
 
     JSValue data[] = { 
@@ -785,7 +794,8 @@ JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag,
     PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb,
     void* user_data
 ){
-    struct Pipe_T *pipe = malloc(sizeof(struct Pipe_T));
+    if(!ctx) abort();
+    struct Pipe_T *pipe = js_malloc(ctx, sizeof(struct Pipe_T));
     JSValue obj = JS_NewObjectClass(ctx, Pipe_class_id);
     
     JSValue data[] = { 

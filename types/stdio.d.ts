@@ -27,6 +27,28 @@ declare module "stdio" {
      */
     type OpenFlag = "a" | "ax" | "a+" | "ax+" | "r" | "r+" | "w" | "wx" | "w+" | "wx+";
 
+    class SyncPipe{
+        constructor(fd: number);
+        write(data: Uint8Array | string, block: boolean): number;
+        read(max_size: number): Uint8Array;
+        close(): void;
+        seek(offset: number, whence: number): void;
+        tell(): number;
+        prealloc(size: number, mode: number): boolean;
+
+        // for seek()
+        static SEEK_CUR: number;
+        static SEEK_END: number;
+        static SEEK_SET: number;
+
+        // for prealloc()
+        static FL_KEEP_SIZE: number;
+        static FL_PUNCH_HOLE: number;
+
+        block: boolean; // setter and getter for blocking mode
+        readonly fd: number;
+    }
+
     export function write(filename: string, data: string | Uint8Array): void;
 
     export function read(filename: string, as_str?: false): Uint8Array;

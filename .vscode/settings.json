@@ -119,6 +119,7 @@
         "libregexp.h": "c",
         "test.h": "c",
         "inotify.h": "c",
-        "utils.h": "c"
+        "utils.h": "c",
+        "malloc.h": "c"
     }
 }

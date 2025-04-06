@@ -5,13 +5,221 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <limits.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <limits.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+
+// class SyncPipe
+static JSClassID js_syncpipe_class_id;
+struct SyncPipe {
+    int fd;
+    int size;  // -1 means unlimited size
+};
+
+static JSValue js_syncio_set_block(JSContext *ctx, JSValueConst this_val, JSValueConst val){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+
+    int flags = fcntl(pipe -> fd, F_GETFL);
+    if(flags < 0) return JS_EXCEPTION;
+
+    if(JS_ToBool(ctx, val))
+        flags &= ~O_NONBLOCK;
+    else
+        flags |= O_NONBLOCK;
+
+    if(fcntl(pipe -> fd, F_SETFL, flags) < 0)
+        return LJS_Throw(ctx, "failed to set blocking mode: %s", NULL, strerror(errno));
+
+    return JS_UNDEFINED;
+}
+
+static JSValue js_syncio_get_block(JSContext *ctx, JSValueConst this_val){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+
+    int flags = fcntl(pipe -> fd, F_GETFL);
+    if(flags < 0) return JS_EXCEPTION;
+
+    return JS_NewBool(ctx, flags & O_NONBLOCK);
+}
+
+static JSValue js_syncio_read(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+
+    uint32_t len = 0;
+    if(argc == 1) JS_ToUint32(ctx, &len, argv[0]);
+    uint8_t* buf = js_malloc(ctx, len ? BUFSIZ : len);
+
+    uint32_t recv = read(pipe -> fd, &buf, len);
+    return JS_NewUint8Array(ctx, buf, recv, free_malloc, NULL, true);
+}
+
+static JSValue js_syncio_write(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+
+    if(argc == 0 ){
+        return LJS_Throw(ctx, "missing argument", "SyncPipe.write(data: TypedArray | string): void");
+    }
+    bool wait_until_sent = false;
+    if(argc == 2) wait_until_sent = JS_ToBool(ctx, argv[1]);
+
+    size_t size;
+    uint8_t* buf = JS_IsString(argv[0])? (uint8_t*)JS_ToCStringLen(ctx, &size, argv[0]) : JS_GetUint8Array(ctx, &size, argv[0]);
+    if(!buf) return LJS_Throw(ctx, "invalid argument", "SyncPipe.write(data: TypedArray | string): void");
+
+    uint32_t sent = write(pipe -> fd, buf, size);
+    while(sent < size && wait_until_sent){
+        sent += write(pipe -> fd, buf + sent, size - sent);
+    }
+    return JS_NewInt32(ctx, sent);
+}
+
+static JSValue js_syncio_close(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+
+    close(pipe -> fd);
+    js_free(ctx, pipe);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_syncio_prealloc(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
+    struct SyncPipe *pipe = JS_GetOpaque(new_target, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+
+    if(argc <= 2 || !JS_IsNumber(argv[0]))
+        return LJS_Throw(ctx, "invalid arguments", "SyncPipe.prealloc(size: int, flag: preallocFlag): boolean");
+
+    uint32_t size = 0;
+    int flag;
+    JS_ToUint32(ctx, &size, argv[0]);
+    JS_ToInt32(ctx, &flag, argv[1]);
+    
+    if(0 == fallocate(pipe -> fd, flag, 0, size)){
+        return JS_TRUE;
+    }else if(0 == ftruncate(pipe -> fd, size)){
+        return JS_TRUE;
+    }else{
+        return JS_FALSE;
+    }
+}
+
+static JSValue js_syncio_seek(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+
+    int64_t offset;
+    int whence;
+    if(argc!= 2 || !JS_ToInt64(ctx, &offset, argv[0]) || !JS_ToInt32(ctx, &whence, argv[1]))
+        return LJS_Throw(ctx, "invalid arguments", "SyncPipe.seek(offset: int, whence: int): void");
+
+    if(lseek(pipe -> fd, offset, whence) < 0)
+        return LJS_Throw(ctx, "failed to seek: %s", NULL, strerror(errno));
+
+    return JS_UNDEFINED;
+}
+
+static JSValue js_syncio_tell(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+
+    off_t pos = lseek(pipe -> fd, 0, SEEK_CUR);
+    if(pos < 0)
+        return LJS_Throw(ctx, "failed to tell: %s", NULL, strerror(errno));
+
+    return JS_NewInt64(ctx, pos);
+}
+
+static JSValue js_syncio_eof(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+    if(pipe -> size == -1) return JS_FALSE;
+    off_t pos = lseek(pipe -> fd, 0, SEEK_CUR);
+    if(pos < 0)
+        return LJS_Throw(ctx, "failed to get position: %s", NULL, strerror(errno));
+    return JS_NewBool(ctx, pos >= pipe -> size);
+}
+
+static JSValue js_syncio_get_size(JSContext *ctx, JSValueConst this_val){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+    return JS_NewInt64(ctx, pipe -> size);
+}
+
+static JSValue js_syncio_get_fd(JSContext *ctx, JSValueConst this_val){
+    struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
+    if(!pipe) return JS_EXCEPTION;
+    return JS_NewInt32(ctx, pipe -> fd);
+}
+
+static void js_syncio_finalizer(JSRuntime *rt, JSValue val){
+    struct SyncPipe *pipe = JS_GetOpaque(val, js_syncpipe_class_id);
+    if(pipe){
+        close(pipe -> fd);
+        js_free_rt(rt, pipe);
+    }
+}
+
+static JSValue js_syncio_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv){
+    int fd;
+    if(argc == 0 || 0 != JS_ToInt32(ctx, &fd, argv[0]))
+        return LJS_Throw(ctx, "invalid arguments", "new stdio.SyncPipe(fd: int): SyncPipe");
+
+    if(fcntl(fd, F_GETFD) < 0)
+        return JS_ThrowReferenceError(ctx, "invalid file descriptor");
+
+    JSValue class = JS_NewObjectProtoClass(ctx, JS_GetClassProto(ctx, js_syncpipe_class_id), js_syncpipe_class_id);
+    if(JS_IsException(class)) return JS_EXCEPTION;
+    struct SyncPipe *pipe = js_malloc(ctx, sizeof(struct SyncPipe));
+    if(!pipe) return JS_ThrowOutOfMemory(ctx);
+    pipe -> fd = fd;
+
+    pipe -> size = -1;
+    if(fcntl(fd, F_GETFL) != -1){
+        // is file
+        struct stat st;
+        if(fstat(fd, &st)){
+            pipe -> size = st.st_size;
+        }
+    }
+
+    JS_SetOpaque(class, pipe);
+    return class;
+}
+
+static const JSClassDef js_syncpipe_class = {
+    "SyncPipe",
+    .finalizer = js_syncio_finalizer
+};
+
+static const JSCFunctionListEntry js_syncpipe_funcs[] = {
+    JS_CFUNC_DEF("read", 1, js_syncio_read),
+    JS_CFUNC_DEF("write", 1, js_syncio_write),
+    JS_CFUNC_DEF("close", 0, js_syncio_close),
+    JS_CFUNC_DEF("seek", 2, js_syncio_seek),
+    JS_CFUNC_DEF("tell", 0, js_syncio_tell),
+    JS_CFUNC_DEF("eof", 0, js_syncio_eof),
+    JS_CFUNC_DEF("prealloc", 2, js_syncio_prealloc),
+    JS_CGETSET_DEF("size", js_syncio_get_size, NULL),
+    JS_CGETSET_DEF("block", js_syncio_get_block, js_syncio_set_block),
+    JS_CGETSET_DEF("fd", js_syncio_get_fd, NULL),
+    JS_PROP_STRING_DEF("[Symbol.toStringTag]", "SyncPipe", JS_PROP_CONFIGURABLE),
+};
+
+static const JSCFunctionListEntry js_syncpipe_flags[] = {
+    C_CONST(SEEK_CUR),
+    C_CONST(SEEK_END),
+    C_CONST(SEEK_SET),
+
+    JS_PROP_INT32_DEF("FL_KEEP_SIZE", FALLOC_FL_KEEP_SIZE, JS_PROP_CONFIGURABLE),
+    JS_PROP_INT32_DEF("FL_PUNCH_HOLE", FALLOC_FL_PUNCH_HOLE, JS_PROP_CONFIGURABLE)
+};
 
 static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     const char *filename;
@@ -51,13 +259,13 @@ static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValu
 
     // 读取文件内容
     buf_len = lret;
-    buf = malloc(buf_len + 1);
+    buf = js_malloc(ctx, buf_len + 1);
     if (!buf) {
         fclose(fd);
         return LJS_Throw(ctx, "out of memory", NULL);
     }
     if (fread(buf, 1, buf_len, fd) != buf_len) {
-        free(buf);
+        js_free(ctx, buf);
         fclose(fd);
         return LJS_Throw(ctx, "failed to read file: %s", NULL, strerror(errno));
     }
@@ -68,7 +276,7 @@ static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValu
         ? JS_NewStringLen(ctx, (char *)buf, buf_len)
         : JS_NewUint8Array(ctx, buf, buf_len, free_malloc, NULL, true);
 
-    if(to_str) free(buf);
+    if(to_str) js_free(ctx, buf);
     return ret;
 }
 
@@ -120,11 +328,11 @@ static JSValue js_stdio_stat(JSContext *ctx, JSValueConst self, int argc, JSValu
         JS_SetPropertyStr(ctx, obj, "isSocket", JS_NewBool(ctx, true));
     } else if(S_ISLNK(st.st_mode)) {
         JS_SetPropertyStr(ctx, obj, "isSymbolicLink", JS_NewBool(ctx, true));
-        char* link_target = malloc(PATH_MAX + 1);
+        char* link_target = js_malloc(ctx, PATH_MAX + 1);
         if (readlink(filename, link_target, PATH_MAX) >= 0) {
             JS_SetPropertyStr(ctx, obj, "target", JS_NewString(ctx, link_target));
         }
-        free(link_target);
+        js_free(ctx, link_target);
     }
     return obj;
 }
@@ -185,7 +393,9 @@ static JSValue js_stdio_mkdir(JSContext *ctx, JSValueConst self, int argc, JSVal
     return JS_UNDEFINED;
 }
 
-static bool get_all_files_or_dirs(const char* path, 
+static bool get_all_files_or_dirs(
+    JSContext *ctx, 
+    const char* path, 
     char*** list, uint32_t* list_length, uint32_t* list_used,
     char*** dir_list, uint32_t* dir_list_length, uint32_t* dir_list_used, 
     bool stop_when_error
@@ -205,24 +415,25 @@ static bool get_all_files_or_dirs(const char* path,
 
         // is dir?
         if (ent->d_type == DT_DIR) {
-            char* new_path = malloc(strlen(path) + strlen(ent->d_name) + 2);
+            char* new_path = js_malloc(ctx, strlen(path) + strlen(ent->d_name) + 2);
             strcpy(new_path, path);
             strcat(new_path, "/");
             strcat(new_path, ent->d_name);
-            if (!get_all_files_or_dirs(new_path, 
+            if (!get_all_files_or_dirs(
+                ctx, new_path, 
                 list, list_length, list_used,
                 dir_list, dir_list_length, dir_list_used,
                 stop_when_error
             )){ 
                 if (stop_when_error){
-                    free(new_path);
+                    js_free(ctx, new_path);
                     closedir(dir);
                     return false;
                 }else{
                     error = true;
                 }
             }
-            free(new_path);
+            js_free(ctx, new_path);
             // add to dir_list
             if (*dir_list_used >= *dir_list_length) {
                 *dir_list_length += 16;
@@ -283,65 +494,66 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
         return JS_EXCEPTION;
     }
     if (S_ISDIR(st.st_mode)) {
-        char** list = malloc(16 * sizeof(char*));
+        char** list = js_malloc(ctx, 16 * sizeof(char*));
         uint32_t list_length = 16;
         uint32_t list_used = 0;
-        char** dir_list = malloc(16 * sizeof(char*));
+        char** dir_list = js_malloc(ctx, 16 * sizeof(char*));
         uint32_t dir_list_length = 16;
         uint32_t dir_list_used = 0;
-        if (!get_all_files_or_dirs(path, 
+        if (!get_all_files_or_dirs(
+            ctx, path, 
             &list, &list_length, &list_used, 
             &dir_list, &dir_list_length, &dir_list_used, 
             true
         )) {
             LJS_Throw(ctx, "failed to get subfiles in this directory: %s", NULL, strerror(errno));
-            free(list);
-            free(dir_list);
+            js_free(ctx, list);
+            js_free(ctx, dir_list);
             JS_FreeCString(ctx, path);
             return JS_EXCEPTION;
         }
 
         // delete all subfiles
         for (uint32_t i = 0; i < list_used; i++) {
-            char* sub_path = malloc(strlen(path) + strlen(list[i]) + 2);
+            char* sub_path = js_malloc(ctx, strlen(path) + strlen(list[i]) + 2);
             strcpy(sub_path, path);
             strcat(sub_path, "/");
             strcat(sub_path, list[i]);
             if (unlink(sub_path) < 0) {
                 LJS_Throw(ctx, "failed to remove file %s: %s", NULL, sub_path, strerror(errno));
-                free(sub_path);
-                free(list);
-                free(dir_list);
+                js_free(ctx, sub_path);
+                js_free(ctx, list);
+                js_free(ctx, dir_list);
                 JS_FreeCString(ctx, path);
                 return JS_EXCEPTION;
             }
-            free(sub_path);
+            js_free(ctx, sub_path);
         }
-        free(list);
+        js_free(ctx, list);
 
         // delete subdirs
         for (uint32_t i = 0; i < dir_list_used; i++) {
-            char* sub_path = malloc(strlen(path) + strlen(dir_list[i]) + 2);
+            char* sub_path = js_malloc(ctx, strlen(path) + strlen(dir_list[i]) + 2);
             strcpy(sub_path, path);
             strcat(sub_path, "/");
             strcat(sub_path, dir_list[i]);
             if (rmdir(sub_path) < 0) {
                 LJS_Throw(ctx, "failed to remove directory: %s", NULL, strerror(errno));
-                free(sub_path);
-                free(list);
-                free(dir_list);
+                js_free(ctx, sub_path);
+                js_free(ctx, list);
+                js_free(ctx, dir_list);
                 JS_FreeCString(ctx, path);
                 return JS_EXCEPTION;
             }
-            free(sub_path);
+            js_free(ctx, sub_path);
         }
-        free(dir_list);
+        js_free(ctx, dir_list);
 
         // delete dir
         if (rmdir(path) < 0) {
             LJS_Throw(ctx, "failed to remove directory: %s", NULL, strerror(errno));
-            free(list);
-            free(dir_list);
+            js_free(ctx, list);
+            js_free(ctx, dir_list);
             return JS_EXCEPTION;
         }
 
@@ -391,7 +603,7 @@ static JSValue js_stdio_chmod(JSContext *ctx, JSValueConst self, int argc, JSVal
         return JS_EXCEPTION;
 
     uint32_t mode;
-    if(!JS_ToUint32(ctx, &mode, argv[1]) || mode > 07777)
+    if(-1 == JS_ToUint32(ctx, &mode, argv[1]) || mode > 07777)
         return LJS_Throw(ctx, "invalid mode", NULL);
 
     if (chmod(path, mode) < 0) {
@@ -419,7 +631,7 @@ static JSValue js_stdio_realpath(JSContext *ctx, JSValueConst self, int argc, JS
     }
 
     JSValue ret = JS_NewString(ctx, real_path);
-    free(real_path);
+    js_free(ctx, real_path);
     return ret;
 }
 
@@ -483,7 +695,7 @@ static JSValue js_stdio_rename(JSContext *ctx, JSValueConst self, int argc, JSVa
 // open
 static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc < 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.open(path: string, flags: string, mode?: number): Pipe");
+        return LJS_Throw(ctx, "invalid arguments", "stdio.open(path: string, flags: string, mode?: number, sync?: boolean): Pipe|SyncPipe");
     
     size_t path_len;
     uint32_t mode = 0666;
@@ -496,6 +708,9 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
         if(flags) JS_FreeCString(ctx, flags);
         return LJS_Throw(ctx, "invalid arguments", NULL);
     }
+
+    bool sync = false;
+    if(argc == 4) sync = JS_ToBool(ctx, argv[3]);
 
     // parse flags
     // flag1: r, w, a, x
@@ -532,7 +747,19 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
 
     JS_FreeCString(ctx, path);
     JS_FreeCString(ctx, flags);
-    return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE, PIPE_BUF, JS_NULL);
+    if(sync){
+        struct stat st;
+
+        // construct SyncPipe
+        JSValue pipe = JS_NewObjectClass(ctx, js_syncpipe_class_id);
+        struct SyncPipe* piped = js_malloc(ctx, sizeof(struct SyncPipe));
+        JS_SetOpaque(pipe, piped);
+        piped->fd = fd;
+        piped->size = fstat(fd, &st) == 0 ? st.st_size : -1;
+        return pipe;
+    }else{
+        return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, PIPE_BUF, JS_NULL);
+    }
 
     error:{
         JS_FreeCString(ctx, path);
@@ -557,6 +784,21 @@ static const JSCFunctionListEntry js_stdio_funcs[] = {
 
 static int js_mod_stdio_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetModuleExportList(ctx, m, js_stdio_funcs, countof(js_stdio_funcs));
+    JS_NewClassID(JS_GetRuntime(ctx), &js_syncpipe_class_id);
+    
+    // class SyncPipe
+    if(-1 == JS_NewClass(JS_GetRuntime(ctx), js_syncpipe_class_id, &js_syncpipe_class)) 
+        return false;
+    JSValue proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, proto, js_syncpipe_funcs, countof(js_syncpipe_funcs));
+    JS_SetClassProto(ctx, js_syncpipe_class_id, proto);
+    JSValue constructor = JS_NewCFunction2(ctx, js_syncio_constructor, "SyncPipe", 1, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, constructor, proto);
+    JS_SetModuleExport(ctx, m, "SyncPipe", constructor);
+
+    // proto
+    JSValue proto_ctor = JS_GetPrototype(ctx, constructor);
+    JS_SetPropertyFunctionList(ctx, proto_ctor, js_syncpipe_flags, countof(js_syncpipe_flags));
 
     return 0;
 }
@@ -565,6 +807,7 @@ bool LJS_init_stdio(JSContext *ctx){
     JSModuleDef *m = JS_NewCModule(ctx, "stdio", js_mod_stdio_init);
     if (!m) return false;
     JS_AddModuleExportList(ctx, m, js_stdio_funcs, countof(js_stdio_funcs));
+    JS_AddModuleExport(ctx, m, "SyncPipe");
 
     return true;
 }

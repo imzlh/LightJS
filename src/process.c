@@ -15,6 +15,7 @@
 #include <libgen.h>
 #include <pty.h>
 #include <errno.h>
+#include <unistd.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <sys/ioctl.h>
@@ -41,7 +42,7 @@ static int js_re_get_prop_exists(JSContext *ctx, JSPropertyDescriptor *desc, JSV
     if(!re) return -1;
     const char* name = JS_AtomToCString(ctx, prop);
     for(size_t i = 0; i < re->env_count; i++){
-        if(strcmp(name, re->env_names[i]) == 0){
+        if(prop == re->env_names_atom[i] || strcmp(name, re->env_names[i]) == 0){
             desc->flags = JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE;
             desc->value = JS_NewString(ctx, re->env_values[i]);
             return true;
@@ -53,7 +54,7 @@ static int js_re_get_prop_exists(JSContext *ctx, JSPropertyDescriptor *desc, JSV
 static int js_re_get_prop_names(JSContext *ctx, JSPropertyEnum **ptab, uint32_t *plen, JSValue obj){
     struct ReactiveEnviron* re = JS_GetOpaque(obj, js_reactive_environ_class_id);
     if(!re) return -1;
-    *ptab = malloc(re->env_count * sizeof(JSPropertyEnum));
+    *ptab = js_malloc(ctx, re->env_count * sizeof(JSPropertyEnum));
     *plen = re->env_count;
     for(size_t i = 0; i < re->env_count; i++){
         (*ptab)[i].atom = re->env_names_atom[i];
@@ -68,8 +69,8 @@ static int js_re_del_prop(JSContext *ctx, JSValue obj, JSAtom prop){
     const char* name = JS_AtomToCString(ctx, prop);
     for(size_t i = 0; i < re->env_count; i++){
         if(strcmp(name, re->env_names[i]) == 0){
-            free(re->env_names[i]);
-            free(re->env_values[i]);
+            js_free(ctx, re->env_names[i]);
+            js_free(ctx, re->env_values[i]);
             re->env_count--;
 
             // move from end to fill the gap
@@ -109,7 +110,7 @@ static int js_re_set_prop(JSContext *ctx, JSValue obj, JSAtom atom, JSValue valu
     const char* name = JS_AtomToCString(ctx, atom);
     for(size_t i = 0; i < re->env_count; i++){
         if(strcmp(name, re->env_names[i]) == 0){
-            free(re->env_values[i]);
+            js_free(ctx, re->env_values[i]);
             re->env_values[i] = strdup(JS_ToCString(ctx, value));
 
             setenv(name, re->env_values[i], true);
@@ -133,26 +134,29 @@ static int js_re_set_prop(JSContext *ctx, JSValue obj, JSAtom atom, JSValue valu
 }
 
 static JSValue js_create_reactive_environ(JSContext* ctx){
-    struct ReactiveEnviron* re = malloc(sizeof(struct ReactiveEnviron));
+    struct ReactiveEnviron* re = js_malloc(ctx, sizeof(struct ReactiveEnviron));
     char** envp = environ;
 
     // measure env count
     size_t env_count = 0;
     while(envp[env_count]) env_count++;
+    re -> env_count = env_count;
 
     // allocate memory
-    re->env_names = malloc(env_count * sizeof(char*));
-    re->env_values = malloc(env_count * sizeof(char*));
-    re->env_names_atom = malloc(env_count * sizeof(JSAtom));
+    re->env_names = js_malloc(ctx, env_count * sizeof(char*));
+    re->env_values = js_malloc(ctx, env_count * sizeof(char*));
+    re->env_names_atom = js_malloc(ctx, env_count * sizeof(JSAtom));
 
     // parse env
     for(uint32_t i = 0; i < env_count; i++){
-        char* eq_pos = strchr(envp[i], /* = */ 0x3D);
+        char* eq_pos = strchr(envp[i], '=');
         if(eq_pos == NULL) continue;
-        *eq_pos = '\0';
+        uint32_t name_len = eq_pos - envp[i];
 
-        re->env_names[i] = strdup(envp[i]);
+        re->env_names[i] = js_malloc(ctx, name_len + 1);
         re->env_values[i] = strdup(eq_pos + 1);
+        memcpy(re->env_names[i], envp[i], name_len);
+        re->env_names[i][name_len] = '\0';
         re->env_names_atom[i] = JS_NewAtom(ctx, re->env_names[i]);
     }
     
@@ -166,13 +170,13 @@ static void js_re_finalizer(JSRuntime *rt, JSValue val){
     struct ReactiveEnviron* re = JS_GetOpaque(val, js_reactive_environ_class_id);
     if(!re) return;
     for(size_t i = 0; i < re->env_count; i++){
-        free(re->env_names[i]);
-        free(re->env_values[i]);
+        js_free_rt(rt, re->env_names[i]);
+        js_free_rt(rt, re->env_values[i]);
     }
-    free(re->env_names);
-    free(re->env_values);
-    free(re->env_names_atom);
-    free(re);
+    js_free_rt(rt, re->env_names);
+    js_free_rt(rt, re->env_values);
+    js_free_rt(rt, re->env_names_atom);
+    js_free_rt(rt, re);
 }
 
 static JSClassDef js_re_class_def = {
@@ -183,13 +187,17 @@ static JSClassDef js_re_class_def = {
 JSValue js_exit(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     uint32_t exit_code = 0;
     if (argc == 1) {
-        if(! JS_ToUint32(ctx, &exit_code, argv[0]) || exit_code > 255){
+        if(-1 == JS_ToUint32(ctx, &exit_code, argv[0]) || exit_code > 255){
             return JS_ThrowTypeError(ctx, "invalid exit code");
         }
     }
 
     // 调用事件
-    LJS_dispatch_ev("exit", JS_NewInt32(ctx, exit_code));
+    LJS_dispatch_ev(ctx, "exit", JS_NewInt32(ctx, exit_code));
+
+#ifdef LJS_DEBUG
+    printf("jsvm: exit with code %d\n", exit_code);
+#endif
 
     exit(exit_code);
     return JS_UNDEFINED;
@@ -199,13 +207,13 @@ typedef struct {
     JSValue handler;
     JSContext* ctx;
     int sig;
-    struct list_head* list;
+    struct list_head list;
 } signal_data;
-static struct list_head* signal_list;
+static struct list_head signal_list;
 
 static void js_signal_handler(int sig){
     struct list_head *el, *el1;
-    list_for_each_safe(el, el1, signal_list){
+    list_for_each_safe(el, el1, &signal_list){
         signal_data* data = list_entry(el, signal_data, list);
         if(data -> sig == sig){
             JSValue handler = data->handler;
@@ -223,17 +231,18 @@ static JSValue js_set_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
     if (argc!= 2) {
         return LJS_Throw(ctx, "Invalid arguments", "Process.signal(signal: number, handler: () => any)");
     }
-    const int sig = JS_ToInt32(ctx, NULL, argv[0]);
+    uint32_t sig;
+    if(-1 == JS_ToUint32(ctx, &sig, argv[0])) return JS_EXCEPTION;
     if( signal(sig, js_signal_handler) ){
         return JS_ThrowTypeError(ctx, "Set signal handler failed");
     }
 
     // 加入signal表
-    signal_data* data = malloc(sizeof(signal_data));
+    signal_data* data = js_malloc(ctx, sizeof(signal_data));
     data->handler = JS_DupValue(ctx, argv[1]);
     data->ctx = ctx;
     data->sig = sig;
-    list_add_tail(data -> list, signal_list);
+    list_add_tail(&data -> list, &signal_list);
 
     return JS_UNDEFINED;
 }
@@ -248,7 +257,7 @@ static JSValue js_del_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
 
     // 遍历signal表
     struct list_head* el, *el1;
-    list_for_each_safe(el, el1, signal_list){
+    list_for_each_safe(el, el1, &signal_list){
         signal_data* data = list_entry(el, signal_data, list);
         if(data -> sig == sig || sig == -1){
             if(
@@ -256,8 +265,8 @@ static JSValue js_del_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
                 JS_VALUE_GET_PTR(data -> handler) == JS_VALUE_GET_PTR(handler) &&
                 (sig == -1 ? true : data -> sig == sig)
             ){
-                list_del(data -> list);
-                free(data);
+                list_del(&data -> list);
+                js_free(ctx, data);
                 return JS_TRUE;
             }
         }
@@ -320,7 +329,7 @@ static JSValue js_process_kill(JSContext *ctx, JSValueConst this_val, int argc, 
     }
     int32_t sig = SIGTERM;
     if(argc > 0){
-        if(!JS_ToInt32(ctx, &sig, argv[0])){
+        if(-1 == JS_ToInt32(ctx, &sig, argv[0])){
             return LJS_Throw(ctx, "Invalid signal", "Process.kill(signal: number)");
         }
     }
@@ -395,7 +404,7 @@ static void js_process_finalizer(JSRuntime* rt, JSValue val){
     if(obj -> exit_code < 0){
         close(obj->pty_fd);
     }
-    free(obj);
+    js_free_rt(rt, obj);
 }
 
 static JSValue pipe_close_cb(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValue *func_data){
@@ -431,7 +440,7 @@ static inline JSValue create_pipe(JSContext* ctx, struct process_class* obj){
 
 static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
     JSValue proto, class_obj;
-    struct process_class *obj = malloc(sizeof(struct process_class));
+    struct process_class *obj = js_malloc(ctx, sizeof(struct process_class));
     
     if (JS_IsUndefined(new_target)) {
         proto = JS_GetClassProto(ctx, js_process_class_id);
@@ -454,14 +463,14 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     if(!JS_IsArray(args) || !JS_GetLength(ctx, args, &len) || len < 1){
         goto fail;
     }
-    char** _argv = malloc(len * sizeof(char*));
+    char** _argv = js_malloc(ctx, len * sizeof(char*));
     for(int i = 0; i < len; i++){
         JSValue val = JS_GetPropertyUint32(ctx, args, i);
         if(JS_IsException(val)){
             goto fail;
         }
         const char* str = JS_ToCString(ctx, val);
-        _argv[i] = malloc(strlen(str) + 1);
+        _argv[i] = js_malloc(ctx, strlen(str) + 1);
         strcpy(_argv[i], str);
         JS_FreeCString(ctx, str);
         JS_FreeValue(ctx, val);
@@ -533,9 +542,9 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
 
         // free
         for(int i = 0; i < len; i++){
-            free(_argv[i]);
+            js_free(ctx, _argv[i]);
         }
-        free(_argv);
+        js_free(ctx, _argv);
         exit(127);
     } else {
         // 父进程
@@ -652,10 +661,10 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
 
     // class Process
     JSValue process = JS_NewCFunction2(ctx, js_process_constructor, "Process", 1, JS_CFUNC_constructor, 0);
-    JSValue proc_proto = JS_NewObject(ctx);
+    JSValue proc_proto = JS_GetPrototype(ctx, process);
     JS_SetPropertyFunctionList(ctx, proc_proto, js_process_proto_funcs, countof(js_process_proto_funcs));
     JS_SetClassProto(ctx, js_process_class_id, proc_proto);
-    JS_SetConstructor(ctx, process, process);
+    JS_SetConstructor(ctx, process, JS_GetClassProto(ctx, js_process_class_id));
 
     JS_SetModuleExport(ctx, m, "Process", process);
 
@@ -683,11 +692,11 @@ bool LJS_init_process(JSContext* ctx,
     char* _entry, uint32_t _argc, char** _argv
 ){
     const char* base = ((App*)JS_GetContextOpaque(ctx)) -> script_path;
-    entry = LJS_resolve_path(_entry, base);
+    entry = _entry ? LJS_resolve_path(_entry, base) : getcwd(NULL, 0);
     argc = _argc;
 
     // parse argv
-    argv = malloc(sizeof(JSValue) * _argc);
+    argv = _argc == 0 ? NULL : js_malloc(ctx, sizeof(JSValue) * _argc);
     if(_argc != 0)
         for(int i = 0; i < _argc; i++){
             argv[i] = JS_NewString(ctx, _argv[i]);
@@ -707,7 +716,7 @@ bool LJS_init_process(JSContext* ctx,
     JS_SetClassProto(ctx, js_process_class_id, proto);
 
     // preconfigure ReactiveEnviron
-    js_re_class_def.exotic = malloc(sizeof(JSClassExoticMethods));
+    js_re_class_def.exotic = js_malloc(ctx, sizeof(JSClassExoticMethods));
     js_re_class_def.exotic->get_own_property = js_re_get_prop_exists;
     js_re_class_def.exotic->get_own_property_names = js_re_get_prop_names;
     js_re_class_def.exotic->define_own_property = js_re_set_own_prop;
@@ -724,6 +733,7 @@ bool LJS_init_process(JSContext* ctx,
     JS_AddModuleExport(ctx, m, "exit");
 
     // signal
+    init_list_head(&signal_list);
     JS_AddModuleExport(ctx, m, "signals");
 
     // stdin/out/err

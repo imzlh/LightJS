@@ -6,6 +6,7 @@
 #include <threads.h>
 #include <stdio.h>
 #include <linux/aio_abi.h>
+#include <sys/ioctl.h>
 #include <sys/epoll.h>
 #include <sys/timerfd.h>
 #include <sys/eventfd.h>
@@ -75,6 +76,7 @@ struct TimerList{
 
 static thread_local int epoll_fd = -1;
 static thread_local struct list_head timer_list;
+static thread_local ssize_t evloop_events = 0;
 static int is_aio_supported = -1;
 
 // linux_kernel aio syscall
@@ -99,31 +101,31 @@ static inline int io_cancel(aio_context_t ctx, struct iocb *iocb, struct io_even
 } 
 
 static inline int aio_supported() {
-    int ret = 0;
-    int fd = open("/proc/sys/fs/aio-max-nr", O_RDONLY);
-    if (fd >= 0) {
-        char buf[100];
-        int n = read(fd, buf, sizeof(buf));
-        if (n > 0) {
-            int max_nr = atoi(buf);
-            if (max_nr < 1024) {
-                ret = -1;
-            }
-        }
-        close(fd);
-    }
-    return ret;
+    aio_context_t test_ctx;
+    if(!io_setup(0, &test_ctx)) return false;
+    io_destroy(test_ctx);
+    return true;
 }
 
 // 内部辅助函数
 // 在handle_read/handle_write中添加队列状态检查
 static void check_queue_status(EvFD* evfd, int fd) {
     uint32_t new_events = EPOLLHUP | EPOLLET;
-    if (!list_empty(&evfd -> read_tasks)) new_events |= EPOLLIN;
-    if (!list_empty(&evfd -> write_tasks)) new_events |= EPOLLOUT;
+    if (    // aio中，任何一个队列有任务都需要EPOLLIN
+        (evfd -> type != EVFD_AIO && !list_empty(&evfd -> read_tasks)) ||
+        (evfd -> type == EVFD_AIO && (!list_empty(&evfd -> read_tasks) || !list_empty(&evfd -> write_tasks)))
+    ) 
+        new_events |= EPOLLIN;
+    if (evfd -> type == EVFD_NORM && !list_empty(&evfd -> write_tasks)) 
+        new_events |= EPOLLOUT;
+        
     
     if (evfd -> epoll_flags != new_events) {
         evfd -> epoll_flags = new_events;
+
+#ifdef LJS_DEBUG
+        printf("epoll_ctl: fd=%d, events=%d, r=%d, w=%d\n", fd, new_events, new_events & EPOLLIN, new_events & EPOLLOUT);
+#endif
         
         // 修改epoll事件
         struct epoll_event ev;
@@ -158,12 +160,18 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
             }else{
                 perror("timerfd read");
             }
+#ifdef LJS_DEBUG
+            printf("timerfd resolved %ld\n", val);
+#endif
             continue;
+
         }
 
         uint32_t n = 0;
         if(evfd -> type == EVFD_NORM){
             n = buffer_read(evfd->read_buffer, fd, UINT32_MAX);
+            if(n == -1) perror("evfd_read");    // error
+            if(n <= 0) return;
         }else if(evfd -> type == EVFD_AIO/* && iocb */){
             n = iocb -> aio_nbytes;
             buffer_push(evfd->read_buffer, (uint8_t*)iocb->aio_buf, n);
@@ -171,15 +179,17 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
 
         switch(task -> type){
             case EV_TASK_READ: // readsize
-                if (buffer_is_full(evfd -> read_buffer)) {
+                if (task -> buffer -> size == buffer_used(evfd -> read_buffer)) {
+                    // 导出
+                    buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
+                    buffer_clear(evfd -> read_buffer);
                     task -> cb.read(evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque);
                     goto _continue;
-                } else if (n == 0 || errno == EAGAIN) {
-                    goto _break;
-                } else {
+                } else if(!n) {
                     perror("evfd_readsize");
                     goto _break;
                 }
+                goto _break;
 
             case EV_TASK_READLINE: while (1) {
                 // 确保line_buffer有足够空间
@@ -191,6 +201,7 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
                 }
                 
                 // 扫描换行符
+                buffer_expand(evfd->read_buffer);
                 uint32_t start = evfd->read_buffer->start;
                 uint32_t end = start + evfd->read_buffer->end;
                 uint8_t* p = start + evfd->read_buffer->buffer;
@@ -199,7 +210,8 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
                     if(i > evfd -> read_buffer -> size) p -= evfd -> read_buffer -> size;
 
                     if (*p == '\n') {
-                        if(*(p-1) == '\r') p -= 1;
+                        // CRLF换行符
+                        if(i != 0 && *(p-1) == '\r') p -= 1;
                         
                         // 复制到用户buffer
                         uint32_t readed;
@@ -216,10 +228,10 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
                 }
                 
                 // 缓冲区满但未找到换行符
-                if (buffer_is_full(evfd -> read_buffer)) {
-                    uint32_t size;
-                    uint8_t* buf = buffer_export(evfd -> read_buffer, &size);
-                    task->cb.read(evfd, buf, size, task->opaque);
+                if (buffer_used(evfd -> read_buffer) >= task -> buffer -> size) {
+                    buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
+                    task->cb.read(evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque);
+                    buffer_clear(evfd -> read_buffer);
                     goto _continue;
                 }
             }
@@ -229,17 +241,20 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
                 // ioctl(fd, FIONREAD, &available);
                 // available = available > task->total_size ? task->total_size : available;
 
-                uint32_t size;
-                uint8_t* buf = buffer_export(evfd -> read_buffer, &size);
-                task -> cb.read(evfd, buf, size, task -> opaque);
+                buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
+                task->cb.read(evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque);
+                buffer_clear(evfd -> read_buffer);
+                goto _continue;
 
             _continue:
                 list_del(&task->list);
+                evloop_events --;
                 free(task);
                 continue;
 
             _break:
                 list_del(&task->list);
+                evloop_events --;
                 free(task);
                 break;
 
@@ -251,22 +266,137 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
     check_queue_status(evfd, fd);
 }
 
+static inline int blksize_get(int fd){
+    int blksize;
+    if(ioctl(fd, BLKSSZGET, &blksize) == -1) return 1024;
+    return blksize;
+}
+
+static bool check_aio_alignment(EvFD* evfd, struct Buffer* buf, off_t offset) {
+    int blksize = blksize_get(evfd->fd[1]);
+    
+    if ((uintptr_t)buf->buffer % blksize != 0 || offset % blksize != 0)
+        return false;
+    
+    buf->size = (buf->size / blksize) * blksize;
+    return true;
+}
+
+static bool check_and_read_direct(EvFD* evfd, struct Task* task) {
+    int blksize = blksize_get(evfd->fd[1]);
+    
+    // 仅处理小于块大小的读取
+    if (task->buffer->size >= blksize) 
+        return false;
+
+    ssize_t n = read(evfd->fd[1], task->buffer->buffer, task->buffer->size);
+    if (n == task->buffer->size) {
+        task->cb.read(evfd, task->buffer->buffer, n, task->opaque);
+        return true;
+    } else if (n > 0) {
+        // 部分读取需要重新调整任务
+        task->buffer->start += n;
+        task->buffer->size -= n;
+    }
+    return false;
+}
+
+static void merge_read_tasks(EvFD* evfd) {
+    struct list_head *cur, *next;
+    struct Task *prev = NULL;
+    int blksize = blksize_get(evfd->fd[1]);
+    
+    list_for_each_safe(cur, next, &evfd->read_tasks) {
+        struct Task* task = list_entry(cur, struct Task, list);
+        
+        if (prev && (prev->buffer->start + prev->buffer->size == task->buffer->start)) {
+            // 合并缓冲区（需要确保是线性buffer）
+            if ((prev->buffer->size + task->buffer->size) % blksize == 0) {
+                buffer_merge(prev->buffer, task->buffer);
+                list_del(&task->list);
+                free(task);
+                evloop_events--;
+            } else {
+                prev = task;
+            }
+        } else {
+            prev = task;
+        }
+    }
+}
+
+static void merge_write_tasks(EvFD* evfd) {
+    struct list_head *cur, *next;
+    struct Task *prev = NULL;
+    
+    list_for_each_safe(cur, next, &evfd->write_tasks) {
+        struct Task* task = list_entry(cur, struct Task, list);
+        
+        if (prev && (prev->buffer->end + prev->buffer->start == task->buffer->start)) {
+            // 合并缓冲区
+            buffer_merge(prev->buffer, task->buffer);
+            list_del(&task->list);
+            free(task);
+            evloop_events--;
+        } else {
+            prev = task;
+        }
+    }
+}
+
+static inline int submit_aio_read(EvFD* evfd, struct Task* task){
+    // buffer对齐
+    buffer_aligned(task -> buffer, blksize_get(evfd->fd[1]));
+
+    // 提交io事务
+    struct iocb iocb = {
+        .aio_fildes = evfd->fd[1],
+        .aio_lio_opcode = IOCB_CMD_PREAD,
+        .aio_buf = (unsigned long long)task -> buffer -> buffer,
+        .aio_nbytes = task -> buffer -> size,
+        .aio_offset = task -> buffer -> start,
+        .aio_data = (uint64_t)task,
+        .aio_flags = IOCB_FLAG_RESFD,
+        .aio_resfd = evfd->fd[0],
+    };
+    int ret = io_submit(evfd -> aio_ctx, 1, (struct iocb*[1]){&iocb});
+#ifdef LJS_DEBUG
+    printf("submit_aio_read: fd=%d, size=%d, ret=%d\n", evfd->fd[1], task->buffer->size, ret);
+    if(ret == -1) perror("io_submit");
+#endif
+    return ret;
+}
+
 // 注意这里的buffer不能circular
-static inline void submit_aio_write(EvFD* evfd, struct Task* task){
-    // buffer连续化，适配aio
-    buffer_expand(task -> buffer);
+static inline int submit_aio_write(EvFD* evfd, struct Task* task) {
+    // buffer对齐，适配aio
+    buffer_aligned(task -> buffer, blksize_get(evfd->fd[1]));
     task -> aio_write_remain = task -> buffer -> size;
+    
+    // 检查最终对齐有效性
+#ifdef LJS_DEBUG
+    if (!check_aio_alignment(evfd, task->buffer, task->buffer->start)) {
+        printf("buffer not aligned, start=%d, size=%d\n", task->buffer->start, task->buffer->size);
+        return -1;
+    }
+#endif
 
     struct iocb iocb = {
         .aio_fildes = evfd->fd[1],
         .aio_lio_opcode = IOCB_CMD_PWRITE,
         .aio_buf = (unsigned long long)task -> buffer -> buffer,
         .aio_nbytes = task -> buffer -> end,
-        .aio_offset = 0,
+        .aio_offset = task -> buffer -> start,
         .aio_data = (uint64_t)task,
-        .aio_flags = 0,
+        .aio_flags = IOCB_FLAG_RESFD,
+        .aio_resfd = evfd->fd[0],
     };
-    io_submit(evfd -> aio_ctx, 1, (struct iocb*[1]){&iocb});
+    int ret = io_submit(evfd -> aio_ctx, 1, (struct iocb*[1]){&iocb});
+
+#ifdef LJS_DEBUG
+    printf("submit_aio_write: fd=%d, remain=%d, ret=%d\n", evfd->fd[1], task->aio_write_remain, ret);
+#endif
+    return ret;
 }
 
 static void handle_write(int fd, EvFD* evfd, struct iocb* iocb) {
@@ -281,6 +411,7 @@ static void handle_write(int fd, EvFD* evfd, struct iocb* iocb) {
             if(task -> aio_write_remain == 0){
                 task -> cb.write(evfd, task -> opaque);
 
+                evloop_events --;
                 list_del(&task->list);
                 free(task);
                 
@@ -296,9 +427,15 @@ static void handle_write(int fd, EvFD* evfd, struct iocb* iocb) {
 
         ssize_t n = buffer_write(task -> buffer, fd, UINT32_MAX);
         if (n > 0) {
+
+#ifdef LJS_DEBUG
+            printf("evfd_write: fd=%d, n=%ld, remain=%d\n", fd, n, buffer_used(task -> buffer));
+#endif
+
             if(buffer_is_empty(task -> buffer)){
                 // 全部写入
                 task -> cb.write(evfd, task -> opaque);
+                evloop_events --;
                 list_del(&task->list);
                 free(task);
             }
@@ -320,12 +457,14 @@ static void handle_close(int fd, void* _evfd) {
     list_for_each_safe(cur, tmp, &evfd->read_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
         free(task);
+        evloop_events --;
     }
 
     // write queue
     list_for_each_safe(cur, tmp, &evfd->write_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
         free(task);
+        evloop_events --;
     }
 
     // close queue
@@ -333,6 +472,7 @@ static void handle_close(int fd, void* _evfd) {
         struct Task* task = list_entry(cur, struct Task, list);
         task -> cb.close(fd, task -> opaque);
         free(task);
+        evloop_events --;
     }
 
     // 关闭fd
@@ -358,6 +498,7 @@ static void handle_sync(EvFD* evfd){
         struct Task* task = list_entry(cur, struct Task, list);
         task -> cb.sync(evfd, task -> opaque);
         if(task -> type == EV_TASK_SYNCONCE) {
+            evloop_events --;
             list_del(&task->list);
             free(task);
         }
@@ -384,16 +525,22 @@ bool LJS_evcore_init() {
 bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
     struct epoll_event events[MAX_EVENTS];
     while (1) {
+        if ((evloop_abort_check ? evloop_abort_check(user_data) : true) && evloop_events <= 0){
+#ifdef LJS_DEBUG
+            printf("evloop_abort_check: abort\n");
+#endif
+            return true; // no events
+        }
+
+#ifdef LJS_DEBUG
+        printf("epoll_wait: enter, events=%ld\n", evloop_events);
+#endif
+
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         if (nfds == -1) {
             if (errno == EINTR) continue;
             perror("epoll_wait");
-            break;
         }
-        // }else if (nfds == 0 && (evloop_abort_check ? evloop_abort_check(user_data) : false)){
-        //     printf("evloop_abort_check return true, exit loop\n");
-        //     return true; // no events
-        // }
         
         for (int i = 0; i < nfds; ++i) {
             struct EvFD* evfd = events[i].data.ptr;
@@ -460,7 +607,7 @@ int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback 
     // O_DIRECT
     if(use_aio) fcntl(fd, F_SETFL, O_DIRECT | fcntl(fd, F_GETFL, 0));
 
-    EvFD* evfd = calloc(1, sizeof(EvFD));
+    EvFD* evfd = malloc(sizeof(EvFD));
     if (!evfd) return -1;
 
     // 初始化任务队列
@@ -485,7 +632,7 @@ int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback 
 
     // 注册到epoll
     uint32_t evflag = EPOLLET;
-    if (rcb) evflag |= EPOLLIN;
+    if (rcb) evflag |= EPOLLIN; // TODO: evloop_events ++
     if (wcb) evflag |= EPOLLOUT;
     if (ccb) evflag |= EPOLLERR | EPOLLHUP;
     struct epoll_event ev = {
@@ -513,8 +660,8 @@ int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback 
 
 // 分离事件监听
 bool LJS_evcore_detach(int fd, uint8_t type) {
-    struct epoll_event dummy;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &dummy) == -1) {
+    struct epoll_event ev;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &ev) == -1) {
         perror("epoll_ctl del");
         return false;
     }
@@ -522,9 +669,9 @@ bool LJS_evcore_detach(int fd, uint8_t type) {
 }
 
 // 创建新的evfd对象
-EvFD* LJS_evfd_new(int fd, bool readable, bool writeable, uint32_t bufsize,
+EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize,
                    EvCloseCallback close_callback, void* close_opaque) {
-    EvFD* evfd = calloc(1, sizeof(EvFD));
+    EvFD* evfd = malloc(sizeof(struct EvFD));
     if (!evfd) return NULL;
 
     // 初始化任务队列
@@ -539,8 +686,11 @@ EvFD* LJS_evfd_new(int fd, bool readable, bool writeable, uint32_t bufsize,
 
     // 设置基础参数
     evfd->fd[0] = fd;
+    evfd->fd[1] = -1;
     evfd->type = EVFD_NORM;
     evfd->active = true;
+    evfd->eof = false;
+    evfd->epoll_flags = EPOLLET;
 
     // 注册关闭回调
     if (close_callback) {
@@ -551,10 +701,11 @@ EvFD* LJS_evfd_new(int fd, bool readable, bool writeable, uint32_t bufsize,
     }
 
     // 判断是否为文件IO, aio
-    if (fcntl(fd, F_GETFL, 0) != -1) {
+    if (use_aio) {
         evfd -> type = EVFD_AIO;
-        fd = evfd -> fd[1] = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        if (evfd -> fd[1] == -1) {
+        evfd -> fd[1] = fd;
+        fd = evfd -> fd[0] = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (evfd -> fd[0] == -1) {
             perror("eventfd");
             free(evfd);
             return NULL;
@@ -574,6 +725,10 @@ EvFD* LJS_evfd_new(int fd, bool readable, bool writeable, uint32_t bufsize,
         return NULL;
     }
 
+#ifdef LJS_DEBUG
+    printf("new evfd fd:%d, aio:%d, bufsize:%d\n", fd, use_aio, bufsize);
+#endif
+
     return evfd;
 }
 
@@ -591,9 +746,33 @@ bool LJS_evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
     task->buffer = buf;
     task->cb.read = callback;
     task->opaque = user_data;
-    list_add(&task->list, &evfd->read_tasks);
 
+    if(evfd -> type == EVFD_AIO) {
+        // 尝试直接读取
+        if (check_and_read_direct(evfd, task)) {
+            free(task);
+            buffer_free(buf);
+            return true;
+        }
+        
+        // 合并相邻任务
+        merge_read_tasks(evfd);
+        
+        // 提交AIO
+        if (submit_aio_read(evfd, task)) {
+            free(task);
+            buffer_free(buf);
+            return false;
+        }
+    }
+    list_add(&task->list, &evfd->read_tasks);
     check_queue_status(evfd, evfd->fd[0]);
+    evloop_events ++;
+
+#ifdef LJS_DEBUG
+    printf("new readsize task fd:%d, bufsize:%d\n", evfd->fd[0], buf_size);
+#endif
+
     return true;
 }
 
@@ -610,15 +789,31 @@ bool LJS_evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
     task->buffer = buf;
     task->cb.read = callback;
     task->opaque = user_data;
+    
+    if(evfd -> type == EVFD_AIO && submit_aio_read(evfd, task)){
+        free(task);
+        buffer_free(buf);
+        return false;
+    }
     list_add(&task->list, &evfd->read_tasks);
-
     check_queue_status(evfd, evfd->fd[0]);
+    evloop_events ++;
+
+#ifdef LJS_DEBUG
+    printf("new readline task fd:%d, bufsize:%d\n", evfd->fd[0], buf_size);
+#endif
+
     return true;
 }
 
 // 通用读取请求
 bool LJS_evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
                    EvReadCallback callback, void* user_data) {
+    if(buf_size == 0){
+        callback(evfd, buffer, buf_size, user_data);
+        return true;
+    }
+    
     struct Task* task = malloc(sizeof(struct Task));
     if (!task) return false;
 
@@ -631,13 +826,48 @@ bool LJS_evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
     task->opaque = user_data;
     list_add(&task->list, &evfd->read_tasks);
 
+#ifdef LJS_DEBUG
+    if(evfd -> type == EVFD_AIO)
+        printf("warn: aio is not supported for readonce\n");
+#endif
+
+    if(evfd -> type == EVFD_AIO) {
+        // 尝试直接读取
+        if (check_and_read_direct(evfd, task)) {
+            free(task);
+            buffer_free(buf);
+            return true;
+        }
+        
+        // 合并相邻任务
+        merge_read_tasks(evfd);
+        
+        // 提交AIO
+        if (submit_aio_read(evfd, task)) {
+            free(task);
+            buffer_free(buf);
+            return false;
+        }
+    }
+    list_add(&task->list, &evfd->read_tasks);
     check_queue_status(evfd, evfd->fd[0]);
+    evloop_events ++;
+
+#ifdef LJS_DEBUG
+    printf("new readonce task fd:%d, bufsize:%d\n", evfd->fd[0], buf_size);
+#endif
+
     return true;
 }
 
 // 提交写请求
 bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
                    EvWriteCallback callback, void* user_data) {
+    if(size == 0){
+        callback(evfd, user_data);
+        return true;
+    }
+
     struct Task* task = malloc(sizeof(struct Task));
     if (!task) return false;
 
@@ -652,8 +882,36 @@ bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
     task->opaque = user_data;
     list_add(&task->list, &evfd->write_tasks);
 
-    // 立即尝试写入
-    handle_write(evfd->fd[0], evfd, NULL);
+    evloop_events ++;
+    if (evfd->type == EVFD_AIO) {
+        // 小数据直接同步写入
+        if (size < blksize_get(evfd->fd[1])) {
+            ssize_t n = write(evfd->fd[1], data, size);
+            if (n == size) {
+                callback(evfd, user_data);
+                free(task);
+                return true;
+            }
+        }
+        
+        // 合并相邻任务
+        merge_write_tasks(evfd);
+        
+        // 提交AIO
+        if (!submit_aio_write(evfd, task)) {
+            buffer_free(buf);
+            list_del(&task->list);
+            free(task);
+            return false;
+        }
+    }else{
+        handle_write(evfd->fd[0], evfd, NULL);
+    }
+
+#ifdef LJS_DEBUG
+    printf("new write task fd:%d, bufsize:%d\n", evfd->fd[0], size);
+#endif
+
     return true;
 }
 
@@ -661,6 +919,7 @@ bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
 bool LJS_evfd_close(EvFD* evfd) {
     if (!evfd || !evfd->active) return false;
     handle_close(evfd->fd[0], evfd);
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, evfd->fd[0], NULL);
     evfd->active = false;
     return true;
 }
@@ -717,6 +976,10 @@ static inline EvFD* timer_new(unsigned long milliseconds, EvTimerCallback callba
 
     // 注册
     list_add(&evfd -> list, &timer_list);
+
+#ifdef LJS_DEBUG
+    printf("new timer fd:%d, s:%ld, ns:%ld, once:%d\n", fd, itss.tv_sec, itss.tv_nsec, once);
+#endif
     
     return evfd;
 }
@@ -729,6 +992,7 @@ static inline bool timer_task(struct EvFD* evfd, EvTimerCallback callback, void*
     task->cb.timer = callback;
     task->opaque = user_data;
     list_add(&task->list, &evfd->read_tasks);
+    evloop_events ++;
     return true;
 }
 
@@ -753,7 +1017,11 @@ bool LJS_evcore_clearTimer(int timer_fd) {
         struct EvFD* evfd = list_entry(pos, struct EvFD, list);
         if(evfd -> fd[0] == timer_fd){
             // 从epoll注销
-            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, timer_fd, NULL);
+            if(!epoll_ctl(epoll_fd, EPOLL_CTL_DEL, timer_fd, NULL)) return false;
+
+#ifdef LJS_DEBUG
+            printf("clear timer fd:%d\n", timer_fd);
+#endif
 
             // 关闭文件描述符
             close(timer_fd);
@@ -763,6 +1031,7 @@ bool LJS_evcore_clearTimer(int timer_fd) {
             list_for_each_safe(pos, tmp, &evfd->read_tasks) {
                 struct Task* task = list_entry(pos, struct Task, list);
                 list_del(pos);
+                evloop_events --;
                 free(task);
             }
 
@@ -771,6 +1040,7 @@ bool LJS_evcore_clearTimer(int timer_fd) {
             free(evfd);
 
             // 从链表中删除
+            evloop_events --;
             list_del(pos);
             return true;
         }
@@ -822,7 +1092,11 @@ EvFD* LJS_evcore_inotify(EvINotifyCallback callback, void* user_data) {
         free(evfd);
         return NULL;
     }
+#ifdef LJS_DEBUG
+    printf("inotify fd:%d\n", inotify_fd);
+#endif
 
+    evloop_events ++;
     return evfd;
 }
 
@@ -841,6 +1115,7 @@ bool LJS_evcore_stop_inotify(EvFD* evfd) {
     list_for_each_safe(pos, tmp, &evfd->read_tasks) {
         struct Task* task = list_entry(pos, struct Task, list);
         list_del(pos);
+        evloop_events --;
         free(task);
     }
 
@@ -877,12 +1152,16 @@ bool LJS_evcore_inotify_unwatch(EvFD* evfd, int wd) {
 
 int LJS_evfd_getfd(EvFD* evfd, int* timer_fd) {
     if(evfd -> type == EVFD_AIO){
-        *timer_fd = evfd -> fd[0];
+        if(timer_fd) *timer_fd = evfd -> fd[0];
         return evfd -> fd[1];
     }else if(evfd -> type == EVFD_NORM){
-        *timer_fd = -1;
+        if(timer_fd)*timer_fd = -1;
         return evfd -> fd[0];
     }else{
         return -1;  // not support
     }
+}
+
+bool LJS_evfd_isAIO(EvFD* evfd) {
+    return evfd -> type == EVFD_AIO;
 }

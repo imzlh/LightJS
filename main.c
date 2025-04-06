@@ -10,27 +10,69 @@
 static JSRuntime *runtime;
 static App* app;
 
-static bool check_promise_resolved(void* opaque){
-    // check if promise is resolved
-    int pending = JS_ExecutePendingJob(JS_GetRuntime(app -> ctx), &app -> ctx);
-    if(pending == -1){
-        LJS_dump_error(app -> ctx, JS_GetException(app -> ctx));
-        return true;
-    }else if(pending == 0){
-        return true;
+static inline void run_jobs(){
+#ifdef LJS_DEBUG
+    printf("run_jobs\n");
+#endif
+    int res = 1;
+    JSRuntime* rt = JS_GetRuntime(app -> ctx);
+    JSContext* ectx;
+    while(res == 1){
+        res = JS_ExecutePendingJob(rt, &ectx);
+        if(res < 0){    // error
+            LJS_dump_error(ectx, JS_GetException(ectx));
+        }
+#ifdef LJS_DEBUG
+        printf("JS_ExecutePendingJob: %d\n", res);
+#endif
     }
+}
 
+static bool check_promise_resolved(void* opaque){
     // check if global promise is resolved
     JSValue* prom = (JSValue*)opaque;
     JSPromiseStateEnum state = JS_PromiseState(app -> ctx, *prom);
     if(state == JS_PROMISE_FULFILLED){
+        if(JS_IsJobPending(JS_GetRuntime(app -> ctx)))
+            run_jobs();
         return true;
     }else if(state == JS_PROMISE_REJECTED){
         LJS_dump_error(app -> ctx, JS_PromiseResult(app -> ctx, *prom));
         return true;
+    }else{  // TIMING
+        run_jobs();
     }
 
     return false;
+}
+
+static size_t parse_limit(const char *arg) {
+    char *p;
+    unsigned long unit = 1024; /* default to traditional KB */
+    double d = strtod(arg, &p);
+
+    if (p == arg) {
+        fprintf(stderr, "Invalid limit: %s\n", arg);
+        return -1;
+    }
+
+    if (*p) {
+        switch (*p++) {
+        case 'b': case 'B': unit = 1UL <<  0; break;
+        case 'k': case 'K': unit = 1UL << 10; break; /* IEC kibibytes */
+        case 'm': case 'M': unit = 1UL << 20; break; /* IEC mebibytes */
+        case 'g': case 'G': unit = 1UL << 30; break; /* IEC gigibytes */
+        default:
+            fprintf(stderr, "Invalid limit: %s, unrecognized suffix, only k,m,g are allowed\n", arg);
+            return -1;
+        }
+        if (*p) {
+            fprintf(stderr, "Invalid limit: %s, only one suffix allowed\n", arg);
+            return -1;
+        }
+    }
+
+    return (size_t)(d * unit);
 }
 
 int main(int argc, char **argv) {
@@ -100,7 +142,6 @@ int main(int argc, char **argv) {
                 repl = true;
             }else if(strcmp(longopt, "stack-size") == 0){
                 if(opt_arg){
-                    opt_arg = argv[optind++];   // next argument
                     JS_SetMaxStackSize(runtime, atoi(opt_arg));
                 }else{
                     printf("Error: Missing argument for --stack-size\n");
@@ -108,8 +149,7 @@ int main(int argc, char **argv) {
                 }
             }else if(strcmp(longopt, "memory-limit") == 0){
                 if(opt_arg){
-                    opt_arg = argv[optind++];   // next argument
-                    JS_SetMemoryLimit(runtime, atoi(opt_arg));
+                    JS_SetMemoryLimit(runtime, parse_limit(opt_arg));
                 }else{
                     printf("Error: Missing argument for --memory-limit\n");
                     exit(1);
@@ -140,6 +180,11 @@ int main(int argc, char **argv) {
 
     // app init
     app = LJS_create_app(runtime, argc - optind -1, argv + optind +1, false, true, strdup(script_path), NULL);
+    if(!app){
+        printf("Failed to create app. Make sure you have enough memory.\n");
+        printf("You can use --memory-limit options to increase the stack and memory limits.\n");
+        LJS_panic("Failed to create app"); 
+    }
     LJS_init_context(app, NULL);
     LJS_evcore_init();  // epoll init
 
@@ -175,18 +220,21 @@ int main(int argc, char **argv) {
         exit(0);
     }
 
+#ifdef LJS_DEBUG
+    // JS_SetDumpFlags(runtime, JS_DUMP_FREE | JS_DUMP_GC | JS_DUMP_GC_FREE | JS_DUMP_LEAKS | JS_DUMP_PROMISE);
+#endif
+
     // eval
     JSValue ret_val = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE);
     if(JS_IsException(ret_val)){
         LJS_dump_error(app -> ctx, JS_GetException(app -> ctx));
         return 1;
     }
-    JS_FreeValue(app -> ctx, ret_val);
 
     // start!
-    if(check_promise_resolved(&ret_val)) return 0;
     JS_DupValue(app -> ctx, ret_val);
     LJS_evcore_run(check_promise_resolved, &ret_val);
+    
     // LJS_evcore_run(NULL, NULL);
     return 0;
 }

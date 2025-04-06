@@ -142,6 +142,7 @@ function termInit() {
     term_width = 80;
     if (stdin.isTTY) {
         tab = stdin.ttySize;
+        stdin.ttyRaw(true);
         if (tab)
             term_width = tab.cols;
     }
@@ -2126,7 +2127,10 @@ load_config();
 load_history();
 termInit();
 cmd_readline_start();
-while(true){
-    const data = await stdin.readline();
-    data && handle_cmd(String(data).trim());
-}
+(async function(){
+    while(true){
+        const data = await stdin.read(1);
+        console.log('Data: ', data);
+        data && handle_byte(data[0]);
+    }
+})();

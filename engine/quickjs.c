@@ -5865,9 +5865,8 @@ static void mark_children(JSRuntime *rt, JSGCObjectHeader *gp,
 
 static void gc_decref_child(JSRuntime *rt, JSGCObjectHeader *p)
 {
-    if(p->ref_count <= 0)
-        exit(0);
-    p->ref_count--;
+    if(p->ref_count > 0)    // crashed here
+        p->ref_count--;
     if (p->ref_count == 0 && p->mark == 1) {
         list_del(&p->link);
         list_add_tail(&p->link, &rt->tmp_obj_list);

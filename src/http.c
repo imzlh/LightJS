@@ -293,7 +293,6 @@ void LJS_free_url(URL_data *url_struct){
         free(url_struct -> query_string);
     }
     free(url_struct -> path);
-    free(url_struct);
 }
 
 char* LJS_format_url(URL_data *url_struct){
@@ -369,7 +368,7 @@ static JSValue js_headers_append(JSContext *ctx, JSValueConst this_val, int argc
         return LJS_Throw(ctx, "Invalid arguments", "Headers.append(key: string, value: string): void");
 
     // 新增
-    char **header = malloc(2 * sizeof(char*));
+    char **header = js_malloc(ctx, 2 * sizeof(char*));
     strcpy(header[0], key);
     strcpy(header[1], value);
     data -> headers[data -> header_count] = header;
@@ -589,12 +588,6 @@ static inline char* strtolower(char* str){
     return str;
 }
 
-static inline char* strclone(const char* str){
-    char* new_str = malloc(strlen(str) + 1);
-    strcpy(new_str, str);
-    return new_str;
-}
-
 static void parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, void* userdata){
     HTTP_data *data = userdata;
     char* line_data = (char*)_line_data;
@@ -623,8 +616,8 @@ static void parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len,
 
         // GET / HTTP/1.1
         if (data->is_client){
-            data->method = strclone(strtoupper (param1));
-            data->path = strclone(param2);
+            data->method = strdup(strtoupper (param1));
+            data->path = strdup(param2);
             data->version = parse_http_version (param3);
             if (data->version < 1.0){
                 goto error;
@@ -659,8 +652,8 @@ static void parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len,
             data->content_length = atoi (colon);
         }else{
             char **header = malloc(sizeof(char*) * 2);
-            header[0] = strclone(strtolower(line_data));
-            header[1] = strclone(colon);
+            header[0] = strdup(strtolower(line_data));
+            header[1] = strdup(colon);
             data->headers[data->header_count++] = header;
         }
     }
@@ -881,19 +874,6 @@ static JSCFunctionListEntry response_proto_funcs[] = {
     JS_CGETSET_DEF("locked", js_response_get_locked, NULL),
 };
 
-bool LJS_init_HTTP(JSContext *ctx){
-    JS_NewClassID(JS_GetRuntime(ctx), &response_class_id);
-    JS_NewClass(JS_GetRuntime(ctx), response_class_id, &response_class);
-    JS_SetClassProto(ctx, response_class_id, JS_NewObject(ctx));
-    JS_SetPropertyFunctionList(ctx, JS_GetClassProto(ctx, response_class_id), response_proto_funcs, countof(response_proto_funcs));
-
-    JSValue response_constructor = JS_NewCFunction2(ctx, js_response_constructor, "Response", 1, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, response_constructor, JS_GetClassProto(ctx, response_class_id));
-    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Response", response_constructor);
-
-    return true;
-}
-
 // --------------------- JAVASCRIPT URL API -----------------------------
 
 struct JS_URL_struct{
@@ -947,8 +927,8 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
                 return LJS_Throw(ctx, "Invalid base URL", NULL);
             }
             // 拷贝
-            char* base_url_copied = strclone(base_url_str);
-            char* url_copied = strclone(url);
+            char* base_url_copied = strdup(base_url_str);
+            char* url_copied = strdup(url);
             LJS_parse_url(base_url_copied, base_url, NULL);
             js_url_struct -> base = base_url;
             // 解析
@@ -1182,7 +1162,7 @@ JSValue js_url_setPort(JSContext *ctx, JSValueConst this_val, JSValueConst value
     }
     URL_data *url_struct = js_url_struct -> self;
     int32_t port;
-    if(!JS_ToInt32(ctx, &port, value))
+    if(-1 == JS_ToInt32(ctx, &port, value))
         return LJS_Throw(ctx, "Invalid port", NULL);
     if(port < 0 || port > 65535){
         return JS_ThrowRangeError(ctx, "port out of range");
@@ -1216,7 +1196,7 @@ JSValue js_url_setQueryStr(JSContext *ctx, JSValueConst this_val, JSValue value)
         return LJS_Throw(ctx, "Invalid query string", NULL);
     }
     URL_query_data* query_list = malloc(sizeof(URL_query_data) * MAX_QUERY_COUNT);
-    char* query_str = strclone(query);
+    char* query_str = strdup(query);
     if(!LJS_parse_query(query_str, &query_list, MAX_QUERY_COUNT)){
         return LJS_Throw(ctx, "Failed to parse query string", NULL);
     }
@@ -1244,7 +1224,7 @@ JSValue js_url_delQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
         }
     }else if(argc == 2){
         key = (char*)JS_ToCString(ctx, argv[0]);
-        if(!JS_ToUint32(ctx, &del_id, argv[1]) || key == NULL){
+        if(-1 == JS_ToUint32(ctx, &del_id, argv[1]) || key == NULL){
             return LJS_Throw(ctx, "Invalid arguments", NULL);
         }
     }else{
@@ -1383,7 +1363,45 @@ static void js_url_finalizer(JSRuntime *rt, JSValue val) {
     free(js_url_struct);
 };
 
-static const JSCFunctionListEntry js_url_proto_funcs[] = {
+static JSValue js_url_proto_canParse(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    if(argc == 0 || !JS_IsString(argv[0]))
+        return LJS_Throw(ctx, "Invalid arguments", "URL.canParse(url: string, baseURL?: string): boolean\n for more, please see https://developer.mozilla.org/zh-CN/docs/Web/API/URL/canParse_static");
+
+    // url
+    const char *url = JS_ToCString(ctx, argv[0]);
+    if(!url) return JS_EXCEPTION;
+    char* url_str = strdup(url);
+    JS_FreeCString(ctx, url);
+
+    // base url
+    URL_data url_base_struct;
+    char* base_url_str = NULL;
+    if(argc == 2){
+        const char* base_url = JS_ToCString(ctx, argv[1]);
+        if(base_url){
+            base_url_str = strdup(base_url);
+            JS_FreeCString(ctx, base_url);
+            if(!LJS_parse_url(base_url_str, &url_base_struct, NULL)){
+                free(base_url_str);
+                return JS_FALSE;
+            }
+        }
+    }
+    
+    // parse
+    URL_data url_struct;
+    bool result = LJS_parse_url(url_str, &url_struct, &url_base_struct);
+
+    // free
+    LJS_free_url(&url_struct);
+    LJS_free_url(&url_base_struct);
+    free(url_str);
+    if(base_url_str) free(base_url_str);
+    
+    return JS_NewBool(ctx, result);
+}
+
+static const JSCFunctionListEntry js_url_funcs[] = {
     JS_CFUNC_DEF("toString", 0, js_url_toString),
     JS_CGETSET_DEF("protocol", js_url_getProtocol, js_url_setProtocol),
     JS_CGETSET_DEF("host", js_url_getHost, js_url_setHost),
@@ -1398,22 +1416,50 @@ static const JSCFunctionListEntry js_url_proto_funcs[] = {
     JS_CGETSET_DEF("password", js_url_getPassword, js_url_setPassword),
 };
 
+static const JSCFunctionListEntry url_proto_funcs[] = {
+    JS_CFUNC_DEF("canParse", 1, js_url_proto_canParse)
+};
+
 static const JSClassDef js_url_class = {
     "URL",
     .finalizer = js_url_finalizer,
 };
 
-bool LJS_init_global_url(JSContext *ctx) {
+int init_http(JSContext *ctx, JSModuleDef *m){
+    JSValue headers_ctor = JS_NewCFunction2(ctx, headers_constructor, "Headers", 1, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, headers_ctor, JS_GetClassProto(ctx, headers_class_id));
+
+    JS_SetModuleExport(ctx, m, "Headers", headers_ctor);
+
+    return true;
+}
+
+bool LJS_init_http(JSContext *ctx){
+    JSModuleDef *m = JS_NewCModule(ctx, "http", init_http);
     JSRuntime *rt = JS_GetRuntime(ctx);
+    
+    JS_NewClassID(rt, &response_class_id);
+    JS_NewClass(rt, response_class_id, &response_class);
+    JS_SetClassProto(ctx, response_class_id, JS_NewObject(ctx));
+    JS_SetPropertyFunctionList(ctx, JS_GetClassProto(ctx, response_class_id), response_proto_funcs, countof(response_proto_funcs));
+
+    JSValue response_constructor = JS_NewCFunction2(ctx, js_response_constructor, "Response", 1, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, response_constructor, JS_GetClassProto(ctx, response_class_id));
 
     // URL
     JS_NewClassID(rt, &js_class_url_id);
     JS_NewClass(rt, js_class_url_id, &js_url_class);
     JSValue proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, proto, js_url_proto_funcs, countof(js_url_proto_funcs));
+    JS_SetPropertyFunctionList(ctx, proto, js_url_funcs, countof(js_url_funcs));
     JS_SetClassProto(ctx, js_class_url_id, proto);
 
-    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "URL", JS_NewCFunction2(ctx, js_url_constructor, "URL", 1, JS_CFUNC_constructor, 0));
+    JSValue url_ctor = JS_NewCFunction2(ctx, js_url_constructor, "URL", 1, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, url_ctor, proto);
+    JSValue url_ctro_proto = JS_NewObjectProto(ctx, JS_GetPrototype(ctx, url_ctor));
+    JS_SetPropertyFunctionList(ctx, url_ctro_proto, url_proto_funcs, countof(url_proto_funcs));
+    JS_SetPrototype(ctx, url_ctor, url_ctro_proto);
+
+    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "URL", url_ctor);
 
     // Headers
     JS_NewClassID(rt, &headers_class_id);
@@ -1422,10 +1468,7 @@ bool LJS_init_global_url(JSContext *ctx) {
     JSValue headers_proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, headers_proto, headers_proto_funcs, countof(headers_proto_funcs));
 
-    JSValue headers_ctor = JS_NewCFunction2(ctx, headers_constructor, "Headers", 1, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, headers_ctor, headers_proto);
-
-    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Headers", headers_ctor);
+    JS_AddModuleExport(ctx, m, "Headers");
 
     return true;
 }

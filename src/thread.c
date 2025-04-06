@@ -161,7 +161,7 @@ static JSModuleDef *js_module_loader(JSContext *_ctx,
         /* compile the module */
         func_val = JS_Eval(_ctx, buf, buf_len, module_name_copied,
                            JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-        js_free(_ctx, buf);
+        free(buf);
         if (JS_IsException(func_val))
             return NULL;
             
@@ -184,7 +184,7 @@ static JSModuleDef *js_module_loader(JSContext *_ctx,
                 JS_PROP_C_W_E);
             free(real_path);
         }
-
+        JS_FreeValue(_ctx, meta_obj);
         JS_FreeValue(_ctx, func_val);
     }
 
@@ -239,9 +239,8 @@ bool LJS_init_module(JSContext *ctx){
     JSValue proto_sethandler = JS_NewCFunction(ctx, js_module_set_handler, "setModuleResolver", 1);
     JSValue func_require = JS_NewCFunction(ctx, js_require, "require", 1);
     // require.prototype.setHandler = setModuleResolver;
-    JSValue func_proto = JS_NewObjectProto(ctx, JS_GetPrototype(ctx, func_require));
+    JSValue func_proto = JS_GetPrototype(ctx, func_require);
     JS_DefinePropertyValueStr(ctx, func_proto, "setHandler", proto_sethandler, JS_PROP_C_W_E);
-    JS_SetPrototype(ctx, func_require, func_proto);
     // globalThis.require = require;
     JS_SetPropertyStr(ctx, global_obj, "require", func_require);
 
@@ -352,6 +351,53 @@ App* LJS_create_app(
     self_app = app;
     return app;
 }
+
+void LJS_destroy_app(App* app) {
+    if (!app) return;
+
+    if (app->worker) {
+        // 关闭eventfd文件描述符
+        if (app->worker->efd_worker2main >= 0) {
+            close(app->worker->efd_worker2main);
+        }
+        if (app->worker->efd_main2worker >= 0) {
+            close(app->worker->efd_main2worker);
+        }
+        
+        // 释放消息队列
+        msgqueue_destroy(&app->worker->main_q);
+        msgqueue_destroy(&app->worker->worker_q);
+        
+        // 释放worker结构体
+        free(app->worker);
+    }
+
+    if (!JS_IsUndefined(app->module_loader)) {
+        JS_FreeValue(app->ctx, app->module_loader);
+    }
+    if (!JS_IsUndefined(app->module_format)) {
+        JS_FreeValue(app->ctx, app->module_format);
+    }
+    if (app->ctx) {
+        JS_FreeContext(app->ctx);
+    }
+
+    // if (app->script_path) free(app->script_path);
+    // if (app->argv) {
+    //     for (uint32_t i = 0; i < app->argc; i++) {
+    //         free(app->argv[i]);
+    //     }
+    //     free(app->argv);
+    // }
+
+    free(app -> script_path);
+    free(app);
+    
+    if (self_app == app) {
+        self_app = NULL;
+    }
+}
+
 
 // for worker thread
 static void worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* user_data){
@@ -497,7 +543,7 @@ void LJS_init_context(App* app, char** init_list){
         // 依赖项
         if(!init_list || in(init_list, "socket")){
             // socket: todo
-            LJS_init_HTTP(ctx);
+            LJS_init_http(ctx);
         }
         if(!init_list || in(init_list, "process")){
             LJS_init_process(ctx, app -> script_path, app -> argc, app -> argv);
@@ -507,9 +553,9 @@ void LJS_init_context(App* app, char** init_list){
             LJS_init_stdio(ctx);
     }
     if(!init_list || in(init_list, "console")) LJS_init_console(ctx);
-    if(!init_list || in(init_list, "event")) LJS_init_global_helper(ctx);
+    if(!init_list || in(init_list, "global")) LJS_init_global_helper(ctx);
     if(!init_list || in(init_list, "module")) LJS_init_module(ctx);
-    if(!init_list || in(init_list, "url")) LJS_init_global_url(ctx);
+    if(!init_list || in(init_list, "http")) LJS_init_http(ctx);
     if(!init_list || in(init_list, "timer")) LJS_init_timer(ctx);    // delay
 }
 
@@ -714,13 +760,25 @@ static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, i
     return obj;
 }
 
+static void js_sandbox_finalizer(JSRuntime* rt, JSValue val){
+    App* app = (App*)JS_GetOpaque(val, js_sandbox_class_id);
+    if(!app) return;
+    LJS_destroy_app(app);
+}
+
 static JSCFunctionListEntry js_sandbox_funcs[] = {
     JS_CFUNC_DEF("eval", 1, js_sandbox_eval),
     JS_CGETSET_DEF("context", js_sandbox_get_context, NULL)
 };
 
+static JSClassDef js_sandbox_def = {
+    "Sandbox",
+    .finalizer = js_sandbox_finalizer,
+};
+
 bool LJS_init_thread(JSContext* ctx){
     JSValue global_obj = JS_GetGlobalObject(ctx);
+    JSRuntime* rt = JS_GetRuntime(ctx);
 
     // worker
     JSValue worker_func = JS_NewCFunction(ctx, js_create_worker, "Worker", 1);
@@ -728,11 +786,16 @@ bool LJS_init_thread(JSContext* ctx){
     JS_FreeValue(ctx, worker_func);
 
     // sandbox
-    JS_NewClassID(JS_GetRuntime(ctx), &js_sandbox_class_id);
+    JS_NewClassID(rt, &js_sandbox_class_id);
+    if(-1 == JS_NewClass(rt, js_sandbox_class_id, &js_sandbox_def)) return false;
     JSValue sandbox_proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, sandbox_proto, js_sandbox_funcs, countof(js_sandbox_funcs));
-    JS_SetPropertyStr(ctx, global_obj, "Sandbox", JS_NewCFunction2(ctx, js_sandbox_constructor, "Sandbox", 1, JS_CFUNC_constructor, 0));
+
+    JSValue sandbox_ctor = JS_NewCFunction2(ctx, js_sandbox_constructor, "Sandbox", 1, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, sandbox_ctor, sandbox_proto);
+    JS_SetPropertyStr(ctx, global_obj, "Sandbox", sandbox_ctor);
     JS_FreeValue(ctx, sandbox_proto);
+    JS_FreeValue(ctx, sandbox_ctor);
     return true;
 }
 
@@ -768,7 +831,7 @@ static JSValue js_timer_delay(JSContext* ctx, JSValueConst this_val, int argc, J
         return LJS_Throw(ctx, "Timer.delay takes a non-zero delay_time", NULL);
     }
 
-    LJS_evcore_setTimeout(delay_time / 1000, timer_callback, timer);
+    LJS_evcore_setTimeout(delay_time, timer_callback, timer);
 
     return promise -> promise;
 }
@@ -789,7 +852,7 @@ static JSValue js_timer_set_timeout(JSContext* ctx, JSValueConst this_val, int a
     timer -> resolve = callback;
     timer -> once = true;
 
-    EvFD* fd = LJS_evcore_setTimeout(delay_time / 1000, timer_callback, timer);
+    EvFD* fd = LJS_evcore_setTimeout(delay_time, timer_callback, timer);
 
     return JS_NewUint32(ctx, LJS_evfd_getfd(fd, NULL));
 }
@@ -810,7 +873,7 @@ static JSValue js_timer_interval(JSContext* ctx, JSValueConst this_val, int argc
     timer -> resolve = callback;
     timer -> once = false;
 
-    EvFD* fd = LJS_evcore_interval(interval_time / 1000, timer_callback, timer);
+    EvFD* fd = LJS_evcore_interval(interval_time, timer_callback, timer);
 
     return JS_NewUint32(ctx, LJS_evfd_getfd(fd, NULL));
 }

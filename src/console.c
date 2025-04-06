@@ -1,5 +1,8 @@
+#include "core.h"
 #include "../engine/quickjs.h"
 #include "../engine/cutils.h"
+#include "../engine/quickjs-atom.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
@@ -25,7 +28,7 @@
 /**
  * 将字符串重复 n 次
  */
-static char* str_repeat(char* c, int n) {
+static inline char* str_repeat(char* c, int n) {
     char *s = malloc(n + 1);
     
     for (int i = 0; i < n; i++) {
@@ -41,15 +44,14 @@ static JSValue getClassName(JSContext *ctx, JSValue prototype) {
 
     // 从原型中获取构造函数
     constructor = JS_GetPropertyStr(ctx, prototype, "constructor");
-    JS_FreeValue(ctx, prototype);
+    JS_FreeValue(ctx, constructor);
     if (JS_IsException(constructor))
-        return constructor;
+        return JS_UNDEFINED;
 
     // 从构造函数中获取name属性
     name = JS_GetPropertyStr(ctx, constructor, "name");
-    JS_FreeValue(ctx, constructor);
     if (JS_IsException(name))
-        return name;
+        return JS_UNDEFINED;
 
     return name;
 }
@@ -58,10 +60,13 @@ static JSValue getClassName(JSContext *ctx, JSValue prototype) {
  * 打印 JSValue 值
  */
 void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visited[], FILE* target_fd) {
+    JS_DupValue(ctx, val); // 复制值，防止被修改
+    
     // 防止递归过深
     int free_visited = 0;
     if (NULL == visited) {
-        visited = malloc(MAX_OUTPUT_LEN * sizeof(JSValue));
+        visited = js_malloc(ctx, MAX_OUTPUT_LEN * sizeof(JSValue));
+        if(!visited) return;
         free_visited = 1;
     }
 
@@ -69,7 +74,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
     static thread_local JSValue cached_object;
     if (JS_IsUndefined(cached_object)) {
         JSValue global_obj = JS_GetGlobalObject(ctx);
-        cached_object = JS_DupValue(ctx, JS_GetProperty(ctx, global_obj, JS_NewAtom(ctx, "Object")));
+        cached_object = JS_GetProperty(ctx, global_obj, JS_ATOM_Object);
         JS_FreeValue(ctx, global_obj);
     }
 
@@ -81,8 +86,10 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
         fprintf(target_fd, ANSI_BOLD "%s" ANSI_RESET, JS_ToBool(ctx, val) ? "true" : "false");
     } else if (JS_IsNumber(val)) {
         double num;
-        JS_ToFloat64(ctx, &num, val);
-        fprintf(target_fd, ANSI_CYAN "%g" ANSI_RESET, num);
+        if(0 != JS_ToFloat64(ctx, &num, val))
+            fprintf(target_fd, ANSI_CYAN "NaN" ANSI_RESET);
+        else
+            fprintf(target_fd, ANSI_CYAN "%g" ANSI_RESET, num);
     } else if (JS_IsBigInt(ctx, val)) {
         const char *str = JS_ToCString(ctx, val);
         fprintf(target_fd, ANSI_CYAN "%s" ANSI_RESET ANSI_GREEN "n" ANSI_RESET, str);
@@ -104,6 +111,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
             fprintf(target_fd, ANSI_RED ANSI_ITALIC "f" ANSI_RESET ANSI_MAGENTA " (" ANSI_RESET "%s" ANSI_MAGENTA ")" ANSI_RESET, name_str);
         }
         JS_FreeCString(ctx, name_str);
+        JS_FreeValue(ctx, name);
     } else if (JS_IsArray(val)) {
         if(depth >= MAX_DEPTH){
             fprintf(target_fd, ANSI_RED "Array()" ANSI_RESET);
@@ -122,7 +130,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
         visited[depth] = &val;
 
         int length;
-        JSValue length_val = JS_GetProperty(ctx, val, JS_NewAtom(ctx, "length"));
+        JSValue length_val = JS_GetPropertyStr(ctx, val, "length");
         JS_ToInt32(ctx, &length, length_val);
         JS_FreeValue(ctx, length_val);
         
@@ -189,6 +197,10 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
             JS_FreeCString(ctx, message_str);
             JS_FreeCString(ctx, js_stack_str);
             free(stack_str_raw);
+            JS_FreeValue(ctx, name);
+            JS_FreeValue(ctx, message);
+            JS_FreeValue(ctx, stack);
+            JS_FreeValue(ctx, help);
             goto end;
         }
 
@@ -233,10 +245,12 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
         if(JS_IsRegisteredClass(JS_GetRuntime(ctx), class_id)){
             JSValue class_name = getClassName(ctx, val);
             const char *class_name_str = JS_ToCString(ctx, class_name);
-
-            if(strcmp(class_name_str, "Object") != 0)
-                fprintf(target_fd, ANSI_MAGENTA "%s" ANSI_RESET, class_name_str);
-            JS_FreeCString(ctx, class_name_str);
+            if(!class_name_str) fprintf(target_fd, ANSI_MAGENTA "Object(Unknown)" ANSI_RESET);
+            else{
+                if(strcmp(class_name_str, "Object") != 0)
+                    fprintf(target_fd, ANSI_MAGENTA "%s" ANSI_RESET, class_name_str);
+                JS_FreeCString(ctx, class_name_str);
+            }
         }
 
         // 读取对象键名
@@ -296,8 +310,9 @@ end1:
     }
 
     if (free_visited) {
-        free(visited);
+        js_free(ctx, visited);
     }
+    JS_FreeValue(ctx, val);
 }
 
 // console.log 实现
@@ -489,24 +504,26 @@ static JSValue js_console_timeLog(JSContext *ctx, JSValueConst this_val, int arg
     return JS_UNDEFINED;
 }
 
+static const JSCFunctionListEntry console_funcs[] = {
+    JS_CFUNC_DEF("log", 1, js_console_log),
+    JS_CFUNC_DEF("error", 1, js_console_error),
+    JS_CFUNC_DEF("info", 1, js_console_info),
+    JS_CFUNC_DEF("debug", 1, js_console_debug),
+    JS_CFUNC_DEF("assert", 2, js_console_assert),
+    JS_CFUNC_DEF("warn", 1, js_console_warn),
+    JS_CFUNC_DEF("clear", 0, js_console_clear),
+    JS_CFUNC_DEF("count", 0, js_console_count),
+    JS_CFUNC_DEF("countReset", 0, js_console_countReset),
+    JS_CFUNC_DEF("time", 1, js_console_time),
+    JS_CFUNC_DEF("timeEnd", 1, js_console_timeEnd),
+    JS_CFUNC_DEF("timeLog", 1, js_console_timeLog),
+};
+
 // 初始化 console 模块
 bool LJS_init_console(JSContext *ctx) {
     JSValue console = JS_NewObject(ctx);
     JSValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, console, "time", JS_NewCFunction(ctx, js_console_time, "time", 1));
-    JS_SetPropertyStr(ctx, console, "timeEnd", JS_NewCFunction(ctx, js_console_timeEnd, "timeEnd", 1));
-    JS_SetPropertyStr(ctx, console, "timeLog", JS_NewCFunction(ctx, js_console_timeLog, "timeLog", 1));
-    JS_SetPropertyStr(ctx, console, "log", JS_NewCFunction(ctx, js_console_log, "log", 1));
-    JS_SetPropertyStr(ctx, console, "error", JS_NewCFunction(ctx, js_console_error, "error", 1));
-    JS_SetPropertyStr(ctx, console, "info", JS_NewCFunction(ctx, js_console_info, "info", 1));
-    JS_SetPropertyStr(ctx, console, "warn", JS_NewCFunction(ctx, js_console_warn, "warn", 1));
-    JS_SetPropertyStr(ctx, console, "debug", JS_NewCFunction(ctx, js_console_debug, "debug", 1));
-    JS_SetPropertyStr(ctx, console, "assert", JS_NewCFunction(ctx, js_console_assert, "assert", 2));
-    JS_SetPropertyStr(ctx, console, "clear", JS_NewCFunction(ctx, js_console_clear, "clear", 0));
-    JS_SetPropertyStr(ctx, console, "count", JS_NewCFunction(ctx, js_console_count, "count", 0));
-    JS_SetPropertyStr(ctx, console, "countReset", JS_NewCFunction(ctx, js_console_countReset, "countReset", 0));
-    
-    
+    JS_SetPropertyFunctionList(ctx, console, console_funcs, countof(console_funcs));
     JS_DefinePropertyValueStr(ctx, global, "console", console, JS_PROP_C_W_E);
     return true;
 }

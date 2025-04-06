@@ -9,6 +9,7 @@
 // 环形缓冲区
 struct Buffer {
     uint8_t* buffer;
+    uint8_t* __aligned_ptr;
     uint32_t start;
     uint32_t end;
     uint32_t size;
@@ -27,12 +28,15 @@ static inline void buffer_init(struct Buffer** buf, uint8_t* data, uint32_t size
     buffer->start = 0;
     buffer->end = 0;
     buffer->size = size;
+    buffer->__aligned_ptr = NULL;
 }
 
 // 释放环形缓冲区
 static inline void buffer_free(struct Buffer* buffer) {
-    if(buffer->is_dynamic)
-        free(buffer->buffer);
+    if(buffer->is_dynamic){
+        if(buffer->__aligned_ptr) free(buffer->__aligned_ptr);
+        else free(buffer->buffer);
+    }
     free(buffer);
 }
 
@@ -201,6 +205,35 @@ static inline uint8_t* buffer_export(struct Buffer* buffer, uint32_t* size) {
     return copy;
 }
 
+/**
+ * 将环形缓冲区数据拷贝到指定缓冲区
+ * @param buffer 源环形缓冲区
+ * @param dest 目标缓冲区
+ * @param dest_size 目标缓冲区大小
+ * @return 实际拷贝的字节数
+ */
+static inline uint32_t buffer_copyto(struct Buffer* buffer, 
+                                   uint8_t* dest, 
+                                   uint32_t dest_size) {
+    if (!buffer || !dest || dest_size == 0) return 0;
+
+    uint32_t used = buffer_used(buffer);
+    if (used == 0) return 0;
+
+    uint32_t can_copy = MIN(used, dest_size);
+    uint32_t read_pos = buffer->start % buffer->size;
+
+    // 分两段拷贝
+    uint32_t first_chunk = MIN(buffer->size - read_pos, can_copy);
+    memcpy(dest, buffer->buffer + read_pos, first_chunk);
+    
+    if (can_copy > first_chunk) {
+        memcpy(dest + first_chunk, buffer->buffer, can_copy - first_chunk);
+    }
+
+    return can_copy;
+}
+
 // 导出指定范围的数据副本 [start, end)
 static inline uint8_t* buffer_sub_export(struct Buffer* buffer, 
                                        uint32_t start,
@@ -288,5 +321,72 @@ static inline bool buffer_expand(struct Buffer* buffer) {
     buffer->buffer = new_buf;
     buffer->start = 0;
     buffer->end = used;
+    return true;
+}
+
+static inline void* aligned_malloc(size_t size, int alignment, void** raw) {
+    const int pointerSize = sizeof(void*);
+    const int requestedSize = size + alignment - 1 + pointerSize;
+    *raw = malloc(requestedSize);
+    if(!raw) abort();
+    uintptr_t start = (uintptr_t)raw + pointerSize;
+    void* aligned = (void*)((start + alignment - 1) & ~(alignment - 1));
+    *(void**)((uintptr_t)aligned - pointerSize) = raw;
+    return aligned;
+}
+
+// static inline bool buffer_aligned(struct Buffer* buffer, size_t blk_size) {
+//     if (!buffer) return false;
+    
+//     size_t alloc = (buffer->size + blk_size - 1) & ~(blk_size - 1);
+//     uint8_t* old = buffer->buffer;
+    
+//     uint8_t* raw_ptr;
+//     uint8_t* new_buf = posix_memalign(alloc, blk_size, (void**)&raw_ptr);
+//     if (!new_buf) return false;
+    
+//     // 确保不会拷贝超过新旧缓冲区中较小的那个大小
+//     size_t copy_size = MIN(buffer->size, alloc);
+//     if (old) {
+//         memcpy(new_buf, old, copy_size);
+//         free(old);
+//     }
+    
+//     buffer->buffer = new_buf;
+//     buffer->is_dynamic = true;
+//     buffer->size = alloc;
+//     buffer->__aligned_ptr = raw_ptr;
+//     return true;
+// }
+
+static inline void buffer_aligned(struct Buffer* buffer, size_t blk_size) {
+    if (!buffer) return;
+    uint8_t* raw_ptr = buffer->buffer;
+    buffer->size = (buffer->size + blk_size - 1) & ~(blk_size - 1);
+    posix_memalign((void**)&buffer->buffer, blk_size, buffer->size);
+    if(raw_ptr){ 
+        memcpy(buffer->buffer, raw_ptr, buffer->size);
+        if(buffer->is_dynamic) free(raw_ptr);
+    }
+    buffer->is_dynamic = true;
+    
+}
+
+static inline bool buffer_merge(struct Buffer* buffer, struct Buffer* other) {
+    if (!buffer || !other) return false;
+    size_t ot_size = buffer_used(other);
+    size_t self_size = buffer_used(buffer);
+    if(buffer_available(buffer) < ot_size){
+        if(buffer -> is_dynamic) 
+            buffer -> buffer = realloc(buffer -> buffer, self_size + ot_size);
+        else
+            return false;
+    }
+
+    buffer_expand(buffer);
+    buffer_expand(other);
+    memcpy(buffer -> buffer + buffer -> end, other -> buffer, ot_size);
+    buffer -> end += ot_size;
+    buffer_free(other);
     return true;
 }

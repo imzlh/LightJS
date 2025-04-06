@@ -19,13 +19,16 @@ test("stat", () => {
 });
 
 await test("open", async () => {
-    const pipe = open("test2.txt", "r+"),
-        res = await pipe.read("Hello World".length);
+    const pipe = open("test2.txt", "r+");
+    console.log(pipe);
+    const res = await pipe.read("Hello World".length);
     console.log(res);
     assert(isEqual(res, encodeStr("Hello World")), "Read mismatch with write");
-    assert(pipe.closed, "Pipe should be closed after read");
+    
     pipe.write(encodeStr("Goodbye World"));
     pipe.close();
+    
+    assert(pipe.closed, "Pipe should be closed after read");
 });
 
 test("unlink", () => unlink("test2.txt"));
