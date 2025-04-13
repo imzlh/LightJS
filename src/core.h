@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <sys/inotify.h>
+#include <arpa/inet.h>
 
 // once include
 #pragma once
@@ -23,6 +24,12 @@ enum {
 #undef DEF
     JS_ATOM_END,
 };
+
+// mbedtls
+#ifdef LJS_MBEDTLS
+#include "../lib/mbedtls_config.h"
+#include <mbedtls/ssl.h>
+#endif
 
 #define MAX_EVENTS 64
 #define MAX_QUERY_COUNT 32
@@ -48,6 +55,7 @@ typedef void (*EvCloseCallback)(int fd, void* opaque);
 typedef void (*EvINotifyCallback)(struct inotify_event* event, void* user_data);
 typedef void (*EvSyncCallback)(EvFD* evfd, void* user_data);
 typedef void (*EvTimerCallback)(uint64_t count, void* user_data);
+typedef void (*EvSSLHandshakeCallback)(EvFD* evfd, void* user_data);
 
 typedef struct{
     char *key;
@@ -78,7 +86,6 @@ typedef enum{
 struct HTTP_data {
     EvFD* fd;
     bool is_client;
-    bool write_to_fd;
     HTTP_rw_state state;
 
     char *method;
@@ -111,7 +118,7 @@ typedef struct {
 
 typedef struct {
     JSValue* message[MAX_MESSAGE_COUNT];
-    struct LJS_Promise_Proxy* promise[MAX_MESSAGE_COUNT];
+    struct promise* promise[MAX_MESSAGE_COUNT];
     uint8_t start;
     uint8_t end;
 } Worker_Message_Queue;
@@ -149,9 +156,54 @@ typedef struct {
     JSContext* module_ctx;
 } App;
 
+typedef enum {
+    DNS_A = 1,
+    DNS_NS = 2,
+    DNS_CNAME = 5,
+    DNS_SOA = 6,
+    DNS_MX = 15,
+    DNS_TXT = 16,
+    DNS_AAAA = 28,
+    DNS_SRV = 33
+} DnsRecordType;
+
+// 通用DNS记录结构
+typedef struct {
+    DnsRecordType type;
+    uint32_t ttl;
+    uint16_t data_len;
+    union {
+        struct in_addr a;
+        struct in6_addr aaaa;
+        struct {
+            uint16_t priority;
+            char exchange[256];
+        } mx;
+        char cname[256];
+        char txt[256];
+        char ns[256];
+        struct {
+            char mname[256];
+            char rname[256];
+            uint32_t serial;
+            uint32_t refresh;
+            uint32_t retry;
+            uint32_t expire;
+            uint32_t minimum;
+        } soa;
+        struct {
+            uint16_t priority;
+            uint16_t weight;
+            uint16_t port;
+            char target[256];
+        } srv;
+    } data;
+} dns_record;
+
 typedef void (*HTTP_Callback)(HTTP_data* data, uint8_t* buffer, uint32_t size, void* userdata);
 typedef void (*HTTP_ParseCallback)(HTTP_data *data, uint8_t *buffer, uint32_t len, void* ptr);
-
+typedef void (*DnsResponseCallback)(int total_records, dns_record** records, void* user_data);
+typedef void (*DnsErrorCallback)(const char* error_msg, void* user_data);
 
 // Core events
 void LJS_dispatch_ev(JSContext *ctx, const char * name, JSValue data);
@@ -179,6 +231,7 @@ bool LJS_init_process(JSContext* ctx, char* _entry, uint32_t _argc, char** _argv
 JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, JSValue onclose);
 JSValue LJS_NewU8Pipe(JSContext *ctx, uint32_t flag, uint32_t buf_size, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
 JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
+EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj);
 
 // Core event loop
 bool LJS_evcore_init();
@@ -186,13 +239,30 @@ bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data
 int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback wcb, EvCloseCallback ccb, void* opaque);
 bool LJS_evcore_detach(int fd, uint8_t type);
 EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
+void LJS_evfd_setup_udp(EvFD* evfd);
 bool LJS_evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool LJS_evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool LJS_evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size, EvWriteCallback callback, void* user_data);
+bool LJS_evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size, const struct sockaddr *addr, socklen_t addr_len, EvWriteCallback callback, void* user_data);
 bool LJS_evfd_close(EvFD* evfd);
+bool LJS_evfd_destroy(EvFD* evfd);
 int LJS_evfd_getfd(EvFD* evfd, int* timer_fd);
 bool LJS_evfd_isAIO(EvFD* evfd);
+
+#ifdef LJS_MBEDTLS
+bool LJS_evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, bool is_client, int protocol, int preset, EvSSLHandshakeCallback handshake_cb, void* user_data);
+void LJS_evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
+bool LJS_evfd_remove_sni(const char* name);
+bool LJS_evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config);
+#endif
+
+// socket
+bool LJS_dns_resolve(
+    JSContext* ctx, const char* hostname, const char* dns_server, 
+    DnsResponseCallback callback, DnsErrorCallback error_callback, void* user_data
+);
+
 EvFD* LJS_evcore_setTimeout(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
 EvFD* LJS_evcore_interval(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
 bool LJS_evcore_clearTimer(int timer_fd);
@@ -207,7 +277,7 @@ bool LJS_parse_query(char *query, URL_query_data *query_list[], int max_query_co
 bool LJS_parse_url(char *url, URL_data *url_struct, URL_data *base);
 void LJS_free_url(URL_data *url_struct);
 char* LJS_format_url(URL_data *url_struct);
-JSValue LJS_NewResponse(JSContext *ctx, HTTP_data *data, URL_data *url);
+JSValue LJS_NewResponse(JSContext *ctx, HTTP_data *data);
 void LJS_parse_from_fd(EvFD* fd, HTTP_data *data, bool is_client, HTTP_ParseCallback callback, void *userdata);
 
 // module
@@ -225,7 +295,8 @@ App* LJS_NewWorker(App* parent);
 bool LJS_init_thread(JSContext* ctx);
 
 // --------------- HELPER FUNCTIONS ------------------------
-void free_malloc(JSRuntime *rt, void *opaque, void *ptr);
+void free_js_malloc(JSRuntime *rt, void *opaque, void *ptr);
+void free_malloc(JSRuntime* rt, void* opaque, void* ptr);
 
 // --------------- BUILT-IN FUNCTIONS ---------------------
 /**
@@ -284,7 +355,7 @@ static inline void LJS_panic(const char *msg){
     exit(1);
 }
 
-struct LJS_Promise_Proxy{
+struct promise{
     JSContext* ctx;
     JSValue resolve;
     JSValue reject;
@@ -295,28 +366,35 @@ struct LJS_Promise_Proxy{
  * 创建一个Promise Proxy，方便在C中操作
  * @param ctx 运行时上下文
  */
-static inline struct LJS_Promise_Proxy* LJS_NewPromise(JSContext *ctx){
-    struct LJS_Promise_Proxy* proxy = js_malloc(ctx, sizeof(struct LJS_Promise_Proxy));
+static inline struct promise* LJS_NewPromise(JSContext *ctx){
+    struct promise* proxy = js_malloc(ctx, sizeof(struct promise));
     if(!proxy) return NULL;
     JSValue resolving_funcs[2];
     proxy -> ctx = ctx;
     proxy -> promise = JS_NewPromiseCapability(ctx, resolving_funcs);
-    proxy -> resolve = JS_DupValue(ctx, resolving_funcs[0]);
-    proxy -> reject = JS_DupValue(ctx, resolving_funcs[1]);
+    proxy -> resolve = resolving_funcs[0];
+    proxy -> reject = resolving_funcs[1];
     return proxy;
 }
 
-static inline void LJS_FreePromise(struct LJS_Promise_Proxy* proxy){
+static inline void LJS_FreePromise(struct promise* proxy){
     JS_FreeValue(proxy -> ctx, proxy -> resolve);
     JS_FreeValue(proxy -> ctx, proxy -> reject);
-    JS_FreeValue(proxy -> ctx, proxy -> promise);
+    // WARN: 此处应该由用户决策，所有权是否转移到JS层？
+    // JS_FreeValue(proxy -> ctx, proxy -> promise);
     js_free(proxy -> ctx, proxy);
 }
 
-static inline void LJS_Promise_Resolve(struct LJS_Promise_Proxy* proxy, JSValue value){
+static inline void LJS_Promise_Resolve(struct promise* proxy, JSValue value){
     JSValue args[1] = {value};
     if(!proxy) return;
     JS_Call(proxy -> ctx, proxy -> resolve, proxy -> promise, 1, args);
+}
+
+static inline void LJS_Promise_Reject(struct promise* proxy, const char* msg){
+    JSValue error = JS_NewError(proxy -> ctx);
+    JS_SetPropertyStr(proxy -> ctx, error, "message", JS_NewString(proxy -> ctx, msg));
+    JS_Call(proxy -> ctx, proxy -> reject, proxy -> promise, 1, (JSValueConst[]){error});
 }
 
 static inline bool JS_CopyObject(JSContext *ctx, JSValueConst from, JSValue to, uint32_t max_items){

@@ -259,7 +259,7 @@ static inline void worker_exit(int code, const char* message){
 }
 
 // queue
-static inline void msgqueue_push(Worker_Message_Queue* queue, JSValue* arg, struct LJS_Promise_Proxy* promise){
+static inline void msgqueue_push(Worker_Message_Queue* queue, JSValue* arg, struct promise* promise){
     // leak memory
     JSValue* message = (JSValue*)malloc(sizeof(JSValue));
     *message = *arg;    // copy
@@ -269,7 +269,7 @@ static inline void msgqueue_push(Worker_Message_Queue* queue, JSValue* arg, stru
     else queue -> end++;
 }
 
-static inline uint64_t msgqueue_pop(Worker_Message_Queue* queue, struct LJS_Promise_Proxy** promise){
+static inline uint64_t msgqueue_pop(Worker_Message_Queue* queue, struct promise** promise){
     if(queue -> start == queue -> end) return 0;  // 队列为空
     uint64_t value = (uint64_t)queue -> message[queue -> start];  // 出队
     *promise = queue -> promise[queue -> start];
@@ -423,7 +423,7 @@ static void worker_close_callback(int fd, void* user_data){
 // for worker thread
 static void worker_writeable_callback(EvFD* __, void* opaque){
     App* data = opaque;
-    struct LJS_Promise_Proxy* promise = NULL;
+    struct promise* promise = NULL;
     uint64_t value = msgqueue_pop(&data -> worker -> worker_q, &promise);
 
     if(value == 0 || promise == NULL) return;  // 队列为空
@@ -456,7 +456,7 @@ static void main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size,
 // for main thread
 static void main_writeable_callback(EvFD* __, void* opaque){
     App* data = opaque;
-    struct LJS_Promise_Proxy* promise = NULL;
+    struct promise* promise = NULL;
     uint64_t value = msgqueue_pop(&data -> worker -> worker_q, &promise);
     if(value == 0 || promise == NULL) return;  // 队列为空
     if(write(data -> worker -> efd_main2worker, &value, sizeof(uint64_t)) == sizeof(uint64_t)){
@@ -606,7 +606,7 @@ App* LJS_NewWorker(App* parent){
 
 static JSValue worker_poll(JSContext* ctx, void* ptr, JSValue __){
     App* app = (App*)ptr;
-    struct LJS_Promise_Proxy* promise = LJS_NewPromise(app -> ctx);
+    struct promise* promise = LJS_NewPromise(app -> ctx);
     if(JS_IsFunction(app -> ctx, app -> worker -> message_callback)) 
         JS_FreeValue(app -> ctx, app -> worker -> message_callback);
     app -> worker -> message_callback = JS_DupValue(app -> ctx, promise -> resolve);
@@ -616,7 +616,7 @@ static JSValue worker_poll(JSContext* ctx, void* ptr, JSValue __){
 static JSValue worker_write(JSContext* ctx, void* ptr, JSValue data){
     App* app = (App*)ptr;
 
-    struct LJS_Promise_Proxy* tmpdata = LJS_NewPromise(app -> ctx);
+    struct promise* tmpdata = LJS_NewPromise(app -> ctx);
     msgqueue_push(&app -> worker -> main_q, &data, tmpdata);
 
     return tmpdata -> promise;
@@ -820,7 +820,7 @@ static JSValue js_timer_delay(JSContext* ctx, JSValueConst this_val, int argc, J
         return LJS_Throw(ctx, "Timer.delay takes 1 argument: delay_time", "Timer.delay(delay_time: number): Promise<void>");
     }
 
-    struct LJS_Promise_Proxy* promise = LJS_NewPromise(ctx);
+    struct promise* promise = LJS_NewPromise(ctx);
     struct Timer_T* timer = (struct Timer_T*)malloc(sizeof(struct Timer_T));
     timer -> ctx = ctx;
     timer -> resolve = JS_DupValue(ctx, promise -> resolve);

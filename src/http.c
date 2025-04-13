@@ -1,4 +1,6 @@
 #include "../engine/quickjs.h"
+#include "../engine/cutils.h"
+#include "../engine/list.h"
 #include "core.h"
 
 #include <string.h>
@@ -8,6 +10,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
+#include <threads.h>
+#include <errno.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 
@@ -592,8 +596,6 @@ static void parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len,
     HTTP_data *data = userdata;
     char* line_data = (char*)_line_data;
     line_data[len] = '\0';
-    if (data->write_to_fd)
-        return;
     // 是第一行
     if (data->state == HTTP_INIT){
         // 找空格解析参数
@@ -686,7 +688,7 @@ static void parse_evloop_chunk_callback(EvFD* evfd, uint8_t* chunk_data, uint32_
 
 static void parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len, void* user_data){
     HTTP_data *data = user_data;
-    if (data->write_to_fd || data->state != HTTP_BODY)
+    if (data->state != HTTP_BODY)
         return;
     char* line_data = (char*)buffer;
     if (data->chunked){
@@ -744,7 +746,7 @@ void LJS_write_header_to_fd(int fd, HTTP_data *data){
 }
 
 static void http_promise_callback(HTTP_data *data, uint8_t *buffer, uint32_t len, void *userdata){
-    struct LJS_Promise_Proxy *promise = userdata;
+    struct promise *promise = userdata;
     if(NULL == buffer){
         if(data -> state == HTTP_ERROR)
             JS_Call(promise -> ctx, promise -> reject, JS_NewError(promise -> ctx), 0, NULL);
@@ -752,7 +754,7 @@ static void http_promise_callback(HTTP_data *data, uint8_t *buffer, uint32_t len
             JS_Call(promise -> ctx, promise -> resolve, JS_NULL, 0, NULL);
     }else{
         JS_Call(promise -> ctx, promise -> resolve, 
-            JS_NewUint8Array(promise -> ctx, buffer, len, free_malloc, NULL, true),    
+            JS_NewUint8Array(promise -> ctx, buffer, len, free_js_malloc, NULL, true),    
         0, NULL);
     }
 
@@ -778,7 +780,6 @@ void LJS_parse_from_fd(EvFD* fd, HTTP_data *data, bool is_client,
     init_http_data(data);
     data -> fd = fd;
     data -> is_client = is_client;
-    data -> write_to_fd = false;
     data -> cb = callback;
 
     // 第一行
@@ -789,7 +790,6 @@ void LJS_parse_from_fd(EvFD* fd, HTTP_data *data, bool is_client,
 // Request结构体
 struct HTTP_Response{
     HTTP_data *data;
-    URL_data *url;
 
     bool locked;
 };
@@ -810,7 +810,7 @@ static JSValue js_response_get_headers(JSContext *ctx, JSValueConst this_val) {
 }
 
 static JSValue response_poll(JSContext* ctx, void* ptr, JSValue __){
-    struct LJS_Promise_Proxy *promise = LJS_NewPromise(ctx);
+    struct promise *promise = LJS_NewPromise(ctx);
     struct HTTP_Response *response = ptr;
     LJS_read_body(response -> data, http_promise_callback, promise);
     return promise -> promise;
@@ -834,7 +834,6 @@ static void js_response_finalizer(JSRuntime *rt, JSValue val) {
     struct HTTP_Response *response = JS_GetOpaque(val, response_class_id);
     if(response){
         if(response -> data){
-            LJS_free_url(response -> url);
             LJS_free_http_data(response -> data);
         }
         free(response);
@@ -847,17 +846,15 @@ static JSValue js_response_constructor(JSContext *ctx, JSValueConst new_target, 
     JS_FreeValue(ctx, proto);
     struct HTTP_Response *response = malloc(sizeof(struct HTTP_Response));
     response -> data = NULL;
-    response -> url = NULL;
     response -> locked = false;
     JS_SetOpaque(obj, response);
     return obj;
 }
 
-JSValue LJS_NewResponse(JSContext *ctx, HTTP_data *data, URL_data *url){
+JSValue LJS_NewResponse(JSContext *ctx, HTTP_data *data){
     JSValue obj = JS_NewObjectClass(ctx, response_class_id);
     struct HTTP_Response *response = malloc(sizeof(struct HTTP_Response));
     response -> data = data;
-    response -> url = url;
     response -> locked = false;
     JS_SetOpaque(obj, response);
     return obj;
@@ -873,6 +870,149 @@ static JSCFunctionListEntry response_proto_funcs[] = {
     JS_CGETSET_DEF("body", js_response_get_body, NULL),
     JS_CGETSET_DEF("locked", js_response_get_locked, NULL),
 };
+
+// fetch API
+struct keepalive_connection{
+    int fd;
+    bool free;
+    struct list_head list;
+};
+
+static struct list_head keepalive_list = { 0, 0 };
+
+static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if(argc == 0)
+        return LJS_Throw(ctx, "Fetch requires at least 1 argument", "fetch(url: string, options?: FetchInit): Promise<Response>");
+    
+    // parse URL
+    const char *urlstr = JS_ToCString(ctx, argv[0]);
+    if(!urlstr) return JS_EXCEPTION;
+    char* url_str = strdup(urlstr);
+    JS_FreeCString(ctx, urlstr);
+    URL_data url;
+    if(!LJS_parse_url(url_str, &url, NULL) || url.protocol == NULL || url.host == NULL){
+        JS_FreeCString(ctx, url_str);
+        return LJS_Throw(ctx, "Invalid URL", NULL);
+    }
+    
+    if(strstr(url.protocol, "http") == NULL && strstr(url.protocol, "ws") == NULL){
+        LJS_free_url(&url);
+        return LJS_Throw(ctx, "Unsupported protocol %s", NULL, url.protocol);
+    }
+
+    // 获取连接
+    EvFD* fd = NULL;
+    if(keepalive_list.prev == NULL){
+        init_list_head(&keepalive_list);
+    }
+    struct list_head *cur, *tmp;
+    struct keepalive_connection *conn;
+    list_for_each_safe(cur, tmp, &keepalive_list){
+        conn = list_entry(cur, struct keepalive_connection, list);
+        if(!conn -> free) continue;
+        conn -> free = false;
+    }
+    if(!conn){
+        // open new connection
+        // bool ssl = url.protocol[strlen(url.protocol) - 1] == 's';
+        // todo...
+    }
+    if(!conn) return LJS_Throw(ctx, "Failed to open connection", NULL);
+
+    // 解析参数
+    JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
+
+    // GET / HTTP/1.1
+    char* method = (char*) JS_ToCString(ctx, JS_GetPropertyStr(ctx, obj, "method"));
+    if (!method) method = "GET";
+    size_t guess_len = strlen(method) + 1 + strlen(url.path) + 1 + 8 + 2 + 1;
+    char* buf = malloc(guess_len);
+    snprintf(buf, guess_len, "%s %s HTTP/1.1\r\n", method, url.path);
+    LJS_evfd_write(fd, (uint8_t*) buf, strlen(buf), NULL, NULL);
+
+    // keep-alive
+    bool keep_alive = JS_ToBool(ctx, JS_GetPropertyStr(ctx, obj, "keepAlive"));
+    if (keep_alive) {
+        LJS_evfd_write(fd, (uint8_t*) "Connection: keep-alive\r\n", 24, NULL, NULL);
+    }
+    else {
+        LJS_evfd_write(fd, (uint8_t*) "Connection: close\r\n", 19, NULL, NULL);
+    }
+
+    // referer
+    const char* referer = JS_ToCString(ctx, JS_GetPropertyStr(ctx, obj, "referer"));
+    if (referer) {
+        size_t guess_len = strlen(referer) + 16;
+        char* buf = malloc(guess_len);
+        snprintf(buf, guess_len, "Referer: %s\r\n", referer);
+        LJS_evfd_write(fd, (uint8_t*) buf, strlen(buf), NULL, NULL);
+    }
+
+    // host
+    if(JS_IsUndefined(JS_GetPropertyStr(ctx, obj, "host"))){
+        char* host = malloc(strlen(url.host) + 16);
+        snprintf(host, strlen(url.host) + 16, "Host: %s\r\n", url.host);
+        LJS_evfd_write(fd, (uint8_t*) host, strlen(host), NULL, NULL);
+    }
+
+    // headers
+    const char* headers = JS_ToCString(ctx, JS_GetPropertyStr(ctx, obj, "headers"));
+    if (headers) {
+        JSPropertyEnum* props;
+        uint32_t prop_count;
+        if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, obj, JS_GPN_STRING_MASK) == 0) {
+            for (int i = 0; i < prop_count; i++) {
+                const char* key = JS_AtomToCString(ctx, props[i].atom);
+                const char* value = JS_ToCString(ctx, JS_GetProperty(ctx, obj, props[i].atom));
+                if (key && value) {
+                    if (
+                        strcasecmp(key, "method") == 0 || 
+                        strcasecmp(key, "keepalive") == 0 || 
+                        strcasecmp(key, "referer") == 0
+                    ) {
+                        continue;
+                    }
+                    size_t guess_len = strlen(key) + 2 + strlen(value) + 2;
+                    char* buf = malloc(guess_len);
+                    snprintf(buf, guess_len, "%s: %s\r\n", key, value);
+                    LJS_evfd_write(fd, (uint8_t*) buf, strlen(buf), NULL, NULL);
+                }
+                JS_FreeCString(ctx, key);
+                JS_FreeCString(ctx, value);
+            }
+        }
+    }
+
+    // body
+    JSValue body = JS_GetPropertyStr(ctx, obj, "body");
+    // typedarray
+    if (JS_GetTypedArrayType(body) != -1) {
+        size_t data_len;
+        uint8_t* data = JS_GetArrayBuffer(ctx, &data_len, body);
+        if (data) {
+            size_t len = 22 + sizeof(size_t);
+            char* buf = malloc(len);
+            snprintf(buf, len, "Content-Length: %lu\r\n\r\n", data_len);
+            LJS_evfd_write(fd, (uint8_t*) buf, len, NULL, NULL);
+            free(buf);
+        }
+
+        // 写入数据
+        LJS_evfd_write(fd, data, data_len, NULL, NULL);
+    }else{
+        // 暂时不支持
+        LJS_evfd_write(fd, (uint8_t*) "Content-Length: 0\r\n\r\n", 26, NULL, NULL);
+    }
+
+    // 解析响应
+    HTTP_data *data = malloc(sizeof(HTTP_data));
+    LJS_parse_from_fd(fd, data, true, NULL, NULL);
+
+    // 创建Response对象
+    JSValue response_obj = LJS_NewResponse(ctx, data);
+    LJS_free_url(&url);
+    return response_obj;
+}
 
 // --------------------- JAVASCRIPT URL API -----------------------------
 
@@ -1460,6 +1600,10 @@ bool LJS_init_http(JSContext *ctx){
     JS_SetPrototype(ctx, url_ctor, url_ctro_proto);
 
     JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "URL", url_ctor);
+
+    // fetch
+    JSValue fetch_func = JS_NewCFunction2(ctx, js_fetch, "fetch", 1, JS_CFUNC_generic, 0);
+    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "fetch", fetch_func);
 
     // Headers
     JS_NewClassID(rt, &headers_class_id);

@@ -180,13 +180,8 @@ static inline uint8_t* buffer_export(struct Buffer* buffer, uint32_t* size) {
     if (used == 0) return NULL;
 
     const uint32_t start_pos = buffer->start % buffer->size;
+    bool loop = start_pos + used <= buffer->size;
     
-    // 数据连续的情况直接返回指针
-    if (start_pos + used <= buffer->size) {
-        return buffer->buffer + start_pos;
-    }
-    
-    // 环形数据需要拷贝连续化
     uint8_t* copy = (uint8_t*)malloc(used);
     if (!copy) {
         *size = 0;
@@ -195,7 +190,7 @@ static inline uint8_t* buffer_export(struct Buffer* buffer, uint32_t* size) {
     
     const uint32_t first_chunk = buffer->size - start_pos;
     memcpy(copy, buffer->buffer + start_pos, first_chunk);
-    memcpy(copy + first_chunk, buffer->buffer, used - first_chunk);
+    if(loop) memcpy(copy + first_chunk, buffer->buffer, used - first_chunk);
 
     // 更新缓冲区信息
     buffer->start = 0;

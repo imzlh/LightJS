@@ -92,7 +92,7 @@ if(CMAKE_BUILD_TYPE MATCHES "Debug")
     add_compile_options(-O0)
     xcheck_add_c_compiler_flag(-ggdb)
     xcheck_add_c_compiler_flag(-fno-omit-frame-pointer)
-    add_compile_definitions(LJS_DEBUG)
+    # add_compile_definitions(LJS_DEBUG)
 endif()
 
 macro(xoption OPTION_NAME OPTION_TEXT OPTION_DEFAULT)
@@ -181,7 +181,6 @@ add_link_options(
 )
 endif()
 
-
 # QuickJS library
 #
 
@@ -214,11 +213,18 @@ find_package(Threads)
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
     list(APPEND ljs_libs ${CMAKE_THREAD_LIBS_INIT})
 endif()
-
 # try to find libm
 find_library(M_LIBRARIES m)
 if(M_LIBRARIES OR CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
     list(APPEND ljs_libs m)
+endif()
+
+# mbedtls
+find_library(MBEDTLS_LIBRARIES mbedtls)
+if(MBEDTLS_LIBRARIES)
+    message(STATUS "Building with mbedtls support")
+    add_compile_definitions(LJS_MBEDTLS)
+    list(APPEND ljs_libs mbedtls)
 endif()
 
 add_library(ljs ${ljs_sources})

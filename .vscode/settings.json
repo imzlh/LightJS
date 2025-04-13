@@ -120,6 +120,17 @@
         "test.h": "c",
         "inotify.h": "c",
         "utils.h": "c",
-        "malloc.h": "c"
-    }
+        "malloc.h": "c",
+        "ssl.h": "c",
+        "platform_util.h": "c",
+        "build_info.h": "c",
+        "check_config.h": "c",
+        "ssl_ciphersuites.h": "c",
+        "mbedtls_config.h": "c",
+        "net_sockets.h": "c",
+        "entropy.h": "c",
+        "error.h": "c",
+        "stdatomic.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "enabled"
 }

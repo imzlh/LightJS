@@ -10,7 +10,7 @@ type IAddr = {
 };
 
 declare module 'socket'{
-    const bind: (addr: string, handler: (client: U8Pipe, addr: IAddr) => void, settings?: {
+    export const bind: (addr: string, handler: (client: U8Pipe, addr: IAddr) => void, settings?: {
         reuseaddr?: boolean,
         backlog?: number,
         bufferSize?: number,
@@ -19,5 +19,16 @@ declare module 'socket'{
         keepalive?: boolean,
         bindto?: string,
         onclose: () => void
-    }) => () => void
+    }) => () => void;
+
+    export const upgradeTLS: (client: U8Pipe, settings: {
+        server?: boolean,
+        ciphers?: Array<string>,
+        suiteb?: boolean
+    }) => Promise<void>;
+
+    export const resolveDNS: (host: string, dns_server?: string) => Promise<IAddr>;
+
+    export const regCert: (key: string, cert: string, ca: string) => void;
+    export const unregCert: (key: string) => boolean;
 }

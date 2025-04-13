@@ -1409,15 +1409,20 @@ void *js_calloc_rt(JSRuntime *rt, size_t count, size_t size)
     s = &rt->malloc_state;
     /* When malloc_limit is 0 (unlimited), malloc_limit - 1 will be SIZE_MAX. */
     if (unlikely(s->malloc_size + (count * size) > s->malloc_limit - 1))
-        return NULL;
+        goto memof;
 
     ptr = rt->mf.js_calloc(s->opaque, count, size);
     if (!ptr)
-        return NULL;
+        goto memof;
 
     s->malloc_count++;
     s->malloc_size += rt->mf.js_malloc_usable_size(ptr) + MALLOC_OVERHEAD;
     return ptr;
+
+memof:
+    printf("Fatal: memory exceeded maxium size\n");
+    printf("Help: you can increase the maximum heap size with the --memory-limit option\n");
+    exit(1);
 }
 
 void *js_malloc_rt(JSRuntime *rt, size_t size)
@@ -1431,15 +1436,20 @@ void *js_malloc_rt(JSRuntime *rt, size_t size)
     s = &rt->malloc_state;
     /* When malloc_limit is 0 (unlimited), malloc_limit - 1 will be SIZE_MAX. */
     if (unlikely(s->malloc_size + size > s->malloc_limit - 1))
-        return NULL;
+        goto memof;
 
     ptr = rt->mf.js_malloc(s->opaque, size);
     if (!ptr)
-        return NULL;
+        goto memof;
 
     s->malloc_count++;
     s->malloc_size += rt->mf.js_malloc_usable_size(ptr) + MALLOC_OVERHEAD;
     return ptr;
+
+memof:
+    printf("Fatal: memory exceeded maxium size\n");
+    printf("Help: you can increase the maximum heap size with the --memory-limit option\n");
+    exit(1);
 }
 
 void js_free_rt(JSRuntime *rt, void *ptr)

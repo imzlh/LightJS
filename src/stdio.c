@@ -56,7 +56,7 @@ static JSValue js_syncio_read(JSContext *ctx, JSValueConst this_val, int argc, J
     uint8_t* buf = js_malloc(ctx, len ? BUFSIZ : len);
 
     uint32_t recv = read(pipe -> fd, &buf, len);
-    return JS_NewUint8Array(ctx, buf, recv, free_malloc, NULL, true);
+    return JS_NewUint8Array(ctx, buf, recv, free_js_malloc, NULL, true);
 }
 
 static JSValue js_syncio_write(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
@@ -274,7 +274,7 @@ static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValu
 
     JSValue ret = to_str
         ? JS_NewStringLen(ctx, (char *)buf, buf_len)
-        : JS_NewUint8Array(ctx, buf, buf_len, free_malloc, NULL, true);
+        : JS_NewUint8Array(ctx, buf, buf_len, free_js_malloc, NULL, true);
 
     if(to_str) js_free(ctx, buf);
     return ret;

@@ -11,17 +11,33 @@
 #include <sys/timerfd.h>
 #include <sys/eventfd.h>
 #include <sys/syscall.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
 #include "../engine/cutils.h"
 #include "../engine/list.h"
 #include "utils.h"
 #include "core.h"
 
+#ifdef LJS_MBEDTLS
+#include "../lib/mbedtls_config.h"
+#include <mbedtls/ssl.h>
+#include <mbedtls/error.h>
+
+#ifndef MBEDTLS_X509_CRT_PARSE_C
+#error "The build of MbedTLS does not support X509 certificates."
+#endif
+
+#endif
+
 enum EvFDType {
     EVFD_NORM,
+    EVFD_UDP,
     EVFD_AIO,
     EVFD_INOTIFY,
     EVFD_TIMER,
+    EVFD_SSL,
+    EVFD_DTLS   // udp tls
 };
 
 enum EvTaskType {
@@ -31,7 +47,17 @@ enum EvTaskType {
     EV_TASK_READLINE,
     EV_TASK_READONCE,
     EV_TASK_SYNC,
-    EV_TASK_SYNCONCE
+    EV_TASK_SYNCONCE,
+    EV_TASK_READ_DGRAM,
+    EV_TASK_WRITE_DGRAM
+};
+
+struct UDPContext {
+    struct sockaddr_storage peer_addr;
+    socklen_t addr_len;
+#ifdef LJS_MBEDTLS
+    mbedtls_ssl_context *dtls_ctx;
+#endif
 };
 
 struct Task {
@@ -51,17 +77,48 @@ struct Task {
     uint32_t aio_write_remain;
 };
 
+#ifdef LJS_MBEDTLS
+struct EvFD_SSL {
+    mbedtls_ssl_context ctx;
+    mbedtls_ssl_config config;
+    struct Buffer* sendbuf;
+    struct Buffer* recvbuf;
+    bool ssl_handshaking;
+    bool ssl_read_wants_write;
+    bool ssl_write_wants_read;
+    EvSSLHandshakeCallback handshake_cb;
+    void* handshake_user_data;
+};
+#endif
+
 struct EvFD{
     int fd[2];  // 如果是aio，第二个则是原始fd
     enum EvFDType type;
-    aio_context_t aio_ctx;  // for aio
-    struct list_head list;  // for task list
-
-    struct list_head read_tasks;
-    struct list_head write_tasks;
-    struct list_head close_tasks;
+    aio_context_t aio_ctx;          // for aio
+    struct list_head list;          // for task list
+    struct UDPContext* proto_ctx;   // udp
+#ifdef LJS_MBEDTLS
+    struct EvFD_SSL* ssl;           // for ssl
+#endif
+    bool task_based;  // 是否是基于任务的，如果是，则需要处理任务队列
+    union{
+        struct{
+            struct list_head read_tasks;
+            struct list_head write_tasks;
+            struct list_head close_tasks;
+        } task;
+        struct {
+            EvReadCallback read;
+            void* read_opaque;
+            EvWriteCallback write;
+            void* write_opaque;
+            EvCloseCallback close;
+            void* close_opaque;
+        } cb;
+    } u;
     
     struct Buffer* read_buffer;
+    bool strip_if_is_n; // readline可能已经截获\r，下一次读取开头的\n需要忽略
 
     bool eof;   // 代表已经关闭
     bool active;
@@ -70,7 +127,6 @@ struct EvFD{
 };
 
 struct TimerList{
-    
     struct EvFD* evfd;
 };
 
@@ -107,16 +163,19 @@ static inline int aio_supported() {
     return true;
 }
 
+static void handle_close(int fd, void* _evfd);
+
 // 内部辅助函数
+
 // 在handle_read/handle_write中添加队列状态检查
 static void check_queue_status(EvFD* evfd, int fd) {
     uint32_t new_events = EPOLLHUP | EPOLLET;
     if (    // aio中，任何一个队列有任务都需要EPOLLIN
-        (evfd -> type != EVFD_AIO && !list_empty(&evfd -> read_tasks)) ||
-        (evfd -> type == EVFD_AIO && (!list_empty(&evfd -> read_tasks) || !list_empty(&evfd -> write_tasks)))
+        (evfd -> type != EVFD_AIO && !list_empty(&evfd -> u.task.read_tasks)) ||
+        (evfd -> type == EVFD_AIO && (!list_empty(&evfd -> u.task.read_tasks) || !list_empty(&evfd -> u.task.write_tasks)))
     ) 
         new_events |= EPOLLIN;
-    if (evfd -> type == EVFD_NORM && !list_empty(&evfd -> write_tasks)) 
+    if (evfd -> type == EVFD_NORM && !list_empty(&evfd -> u.task.write_tasks)) 
         new_events |= EPOLLOUT;
         
     
@@ -143,7 +202,7 @@ static void check_queue_status(EvFD* evfd, int fd) {
 // 事件处理函数
 static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_event* inev) {
     struct list_head *cur, *tmp;
-    list_for_each_safe(cur, tmp, &evfd->read_tasks) {
+    list_for_each_safe(cur, tmp, &evfd->u.task.read_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
 
         // linux inotify文件更改事件
@@ -164,17 +223,38 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
             printf("timerfd resolved %ld\n", val);
 #endif
             continue;
-
         }
 
         uint32_t n = 0;
         if(evfd -> type == EVFD_NORM){
+            uint8_t* ptr_buffer = evfd -> read_buffer -> buffer + evfd -> read_buffer -> start;
             n = buffer_read(evfd->read_buffer, fd, UINT32_MAX);
             if(n == -1) perror("evfd_read");    // error
             if(n <= 0) return;
+
+            // strip_if_is_n
+            if(evfd -> strip_if_is_n && *ptr_buffer == '\n'){
+                evfd -> read_buffer -> start = (evfd -> read_buffer -> start + 1) % evfd -> read_buffer -> size;
+                if(n -- == 1) return;
+            }
+            evfd -> strip_if_is_n = false;
         }else if(evfd -> type == EVFD_AIO/* && iocb */){
             n = iocb -> aio_nbytes;
             buffer_push(evfd->read_buffer, (uint8_t*)iocb->aio_buf, n);
+        }else if(evfd -> type == EVFD_SSL){
+            // evfd SSL下，只有mbedtls处理后才有数据
+            n = buffer_used(evfd->read_buffer);
+        }else if(evfd -> type == EVFD_UDP || evfd -> type == EVFD_DTLS){
+            struct UDPContext *ctx = evfd->proto_ctx;
+            n = recvfrom(fd, evfd->read_buffer->buffer,
+                            buffer_available(evfd->read_buffer), 0,
+                            (struct sockaddr*)&ctx->peer_addr,
+                            &ctx->addr_len);
+            if(n == -1){
+                perror("recvfrom");
+                handle_close(fd, evfd);
+                return;
+            }else if(n == 0) return;
         }
 
         switch(task -> type){
@@ -187,16 +267,18 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
                     goto _continue;
                 } else if(!n) {
                     perror("evfd_readsize");
+                    handle_close(fd, evfd);
                     goto _break;
                 }
-                goto _break;
+                break;
 
-            case EV_TASK_READLINE: while (1) {
+            case EV_TASK_READLINE:
                 // 确保line_buffer有足够空间
                 if (!evfd->read_buffer) buffer_init(&evfd->read_buffer, NULL, EVFD_BUFSIZE);
                 
                 if (n <= 0) {
                     if (n == 0) evfd->eof = true;
+                    handle_close(fd, evfd);
                     goto _break;
                 }
                 
@@ -205,8 +287,9 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
                 uint32_t start = evfd->read_buffer->start;
                 uint32_t end = start + evfd->read_buffer->end;
                 uint8_t* p = start + evfd->read_buffer->buffer;
+                uint32_t i2 = 0, i = 0;
 
-                for (uint32_t i = 0; i < end; i ++, p++) {
+                for (; i < end; i ++, p++) {
                     if(i > evfd -> read_buffer -> size) p -= evfd -> read_buffer -> size;
 
                     if (*p == '\n') {
@@ -214,17 +297,29 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
                         if(i != 0 && *(p-1) == '\r') p -= 1;
                         
                         // 复制到用户buffer
-                        uint32_t readed;
-                        uint8_t* buf = buffer_sub_export(evfd -> read_buffer, 
-                            evfd -> read_buffer -> start, (i - start), &readed);
+                        uint32_t readed = buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
 
                         // 修改buffer状态
                         buffer_seek(evfd -> read_buffer, i - start + 1);
                         
                         // 触发回调
-                        task->cb.read(evfd, buf, readed, task->opaque);
+                        task->cb.read(evfd, task -> buffer -> buffer, readed, task->opaque);
                         goto _continue;
+                    } else if(*p == '\r'){
+                        i2 = i; // 记录\r位置，备用
                     }
+                }
+
+                // 检查\r
+                if(i2){
+                    if(i2 == i) evfd -> strip_if_is_n = true;
+
+                    // 导出并出发回调
+                    uint32_t readed = buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
+                    task->cb.read(evfd, task -> buffer -> buffer, readed, task->opaque);
+                    buffer_seek(evfd -> read_buffer, i2);
+                    
+                    goto _continue;
                 }
                 
                 // 缓冲区满但未找到换行符
@@ -234,7 +329,9 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
                     buffer_clear(evfd -> read_buffer);
                     goto _continue;
                 }
-            }
+
+                // 没有换行符
+                break;
         
             case EV_TASK_READONCE: // readonce
                 // int available;
@@ -249,12 +346,14 @@ static void handle_read(int fd, EvFD* evfd, struct iocb* iocb, struct inotify_ev
             _continue:
                 list_del(&task->list);
                 evloop_events --;
+                free(task -> buffer);   // 释放buffer结构体，实际buffer需要自己释放
                 free(task);
                 continue;
 
             _break:
                 list_del(&task->list);
                 evloop_events --;
+                free(task -> buffer);
                 free(task);
                 break;
 
@@ -272,6 +371,8 @@ static inline int blksize_get(int fd){
     return blksize;
 }
 
+#ifdef LJS_DEBUG
+// debug: AIO buffer对齐检查
 static bool check_aio_alignment(EvFD* evfd, struct Buffer* buf, off_t offset) {
     int blksize = blksize_get(evfd->fd[1]);
     
@@ -281,6 +382,7 @@ static bool check_aio_alignment(EvFD* evfd, struct Buffer* buf, off_t offset) {
     buf->size = (buf->size / blksize) * blksize;
     return true;
 }
+#endif
 
 static bool check_and_read_direct(EvFD* evfd, struct Task* task) {
     int blksize = blksize_get(evfd->fd[1]);
@@ -306,7 +408,7 @@ static void merge_read_tasks(EvFD* evfd) {
     struct Task *prev = NULL;
     int blksize = blksize_get(evfd->fd[1]);
     
-    list_for_each_safe(cur, next, &evfd->read_tasks) {
+    list_for_each_safe(cur, next, &evfd->u.task.read_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
         
         if (prev && (prev->buffer->start + prev->buffer->size == task->buffer->start)) {
@@ -329,7 +431,7 @@ static void merge_write_tasks(EvFD* evfd) {
     struct list_head *cur, *next;
     struct Task *prev = NULL;
     
-    list_for_each_safe(cur, next, &evfd->write_tasks) {
+    list_for_each_safe(cur, next, &evfd->u.task.write_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
         
         if (prev && (prev->buffer->end + prev->buffer->start == task->buffer->start)) {
@@ -399,10 +501,16 @@ static inline int submit_aio_write(EvFD* evfd, struct Task* task) {
     return ret;
 }
 
+static inline void free_task(struct Task* task) {
+    free(task -> buffer -> buffer);
+    free(task -> buffer);
+    free(task);
+}
+
 static void handle_write(int fd, EvFD* evfd, struct iocb* iocb) {
     struct list_head *cur, *tmp;
     // 只考虑aio、fd write
-    list_for_each_safe(cur, tmp, &evfd->write_tasks) {
+    list_for_each_safe(cur, tmp, &evfd->u.task.write_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
 
         if(evfd -> type == EVFD_AIO){
@@ -413,11 +521,11 @@ static void handle_write(int fd, EvFD* evfd, struct iocb* iocb) {
 
                 evloop_events --;
                 list_del(&task->list);
-                free(task);
+                free_task(task);
                 
                 // 添加io事务：下一个io
-                if(!list_empty(&evfd->write_tasks)){
-                    struct Task* next_task = list_entry(evfd->write_tasks.next, struct Task, list);
+                if(!list_empty(&evfd->u.task.write_tasks)){
+                    struct Task* next_task = list_entry(evfd->u.task.write_tasks.next, struct Task, list);
                     submit_aio_write(evfd, next_task);
                 }
 
@@ -437,7 +545,7 @@ static void handle_write(int fd, EvFD* evfd, struct iocb* iocb) {
                 task -> cb.write(evfd, task -> opaque);
                 evloop_events --;
                 list_del(&task->list);
-                free(task);
+                free_task(task);
             }
         } else if (errno == EAGAIN) {
             break;
@@ -454,21 +562,21 @@ static void handle_close(int fd, void* _evfd) {
     EvFD* evfd = (EvFD*)_evfd;
     struct list_head *cur, *tmp;
     // read queue
-    list_for_each_safe(cur, tmp, &evfd->read_tasks) {
+    list_for_each_safe(cur, tmp, &evfd->u.task.read_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
         free(task);
         evloop_events --;
     }
 
     // write queue
-    list_for_each_safe(cur, tmp, &evfd->write_tasks) {
+    list_for_each_safe(cur, tmp, &evfd->u.task.write_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
         free(task);
         evloop_events --;
     }
 
     // close queue
-    list_for_each_safe(cur, tmp, &evfd->close_tasks) {
+    list_for_each_safe(cur, tmp, &evfd->u.task.close_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
         task -> cb.close(fd, task -> opaque);
         free(task);
@@ -486,6 +594,22 @@ static void handle_close(int fd, void* _evfd) {
         case EVFD_INOTIFY:
             io_destroy(evfd -> aio_ctx);
         break;
+
+        case EVFD_SSL:
+#ifdef LJS_MBEDTLS
+            if (evfd->ssl) {
+                buffer_free(evfd->ssl->sendbuf);
+                buffer_free(evfd->ssl->recvbuf);
+                mbedtls_ssl_free(&evfd->ssl->ctx);
+                mbedtls_ssl_config_free(&evfd->ssl->config);
+                free(evfd->ssl);
+            }
+#endif
+        break;
+
+        default:
+            abort();
+        break;
     }
     if(evfd -> read_buffer) buffer_free(evfd -> read_buffer);
     free(evfd);
@@ -494,7 +618,7 @@ static void handle_close(int fd, void* _evfd) {
 static void handle_sync(EvFD* evfd){
     struct list_head *cur, *tmp;
     // read queue
-    list_for_each_safe(cur, tmp, &evfd->read_tasks) {
+    list_for_each_safe(cur, tmp, &evfd->u.task.read_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
         task -> cb.sync(evfd, task -> opaque);
         if(task -> type == EV_TASK_SYNCONCE) {
@@ -504,6 +628,142 @@ static void handle_sync(EvFD* evfd){
         }
     }
 }
+
+#ifdef LJS_MBEDTLS
+static int handle_ssl_send(void* ctx, const unsigned char* buf, size_t len) {
+    EvFD* evfd = (EvFD*)ctx;
+    struct Buffer* sendbuf = evfd->ssl->sendbuf;
+    
+    if (buffer_available(sendbuf) < len) {
+        return MBEDTLS_ERR_SSL_WANT_WRITE;
+    }
+    
+    if (buffer_push(sendbuf, buf, len) != len) {
+        return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+    }
+    
+    return (int)len;
+}
+
+static int handle_ssl_recv(void* ctx, unsigned char* buf, size_t len) {
+    EvFD* evfd = (EvFD*)ctx;
+    size_t copied = buffer_copyto(evfd->ssl->recvbuf, buf, len);
+    handle_read(evfd->fd[0], evfd, NULL, NULL);
+    return copied;
+}
+
+static inline void update_ssl_events(EvFD* evfd) {
+    uint32_t events = EPOLLET | EPOLLERR | EPOLLHUP;
+    
+    if (evfd->ssl->ssl_handshaking) {
+        if (evfd->ssl->ssl_read_wants_write) {
+            events |= EPOLLOUT;
+        } else {
+            events |= EPOLLIN;
+        }
+    } else {
+        if (!buffer_is_empty(evfd->ssl->sendbuf)) {
+            events |= EPOLLOUT;
+        }
+        if (buffer_available(evfd->ssl->recvbuf) > 0) {
+            events |= EPOLLIN;
+        }
+    }
+    
+    struct epoll_event ev = { .events = events, .data.ptr = evfd };
+    epoll_ctl(epoll_fd, EPOLL_CTL_MOD, evfd->fd[0], &ev);
+}
+
+static void ssl_handle_handshake(EvFD* evfd) {
+    int ret;
+    while ((ret = mbedtls_ssl_handshake(&evfd->ssl->ctx)) != 0) {
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            evfd->ssl->ssl_read_wants_write = false;
+            update_ssl_events(evfd);
+            return; // 退出循环等待事件
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            evfd->ssl->ssl_write_wants_read = false;
+            update_ssl_events(evfd);
+            return;
+        } else {
+            // 处理致命错误
+            handle_close(evfd->fd[0], evfd);
+            return;
+        }
+    }
+    
+    // 握手成功
+    evfd->ssl->ssl_handshaking = false;
+    evfd->ssl->handshake_cb(evfd, evfd->ssl->handshake_user_data);
+    update_ssl_events(evfd);
+}
+
+struct SSL_data {
+    char *name;
+    char* server_name; // optional
+    mbedtls_x509_crt *cacert;
+    mbedtls_pk_context *cakey;
+    struct list_head link;
+};
+
+static struct list_head* certs = NULL;
+
+int ssl_sni_callback(void *ssl, const unsigned char *name, size_t len) {
+    if(certs == NULL) return -1;
+
+    struct list_head *cur, *tmp;
+    list_for_each_safe(cur, tmp, certs) {
+        struct SSL_data *data = list_entry(cur, struct SSL_data, link);
+        if (len == strlen(data->name) && memcmp(name, data->name, len) == 0) {
+            if(data -> server_name)
+                mbedtls_ssl_set_hostname(&((EvFD*)ssl)->ssl->ctx, data->name);
+            return mbedtls_ssl_set_hs_own_cert(&((EvFD*)ssl)->ssl->ctx, data->cacert, data->cakey);
+        }
+    }
+    return -1;
+}
+
+static int udp_packet_send(void *ctx, const unsigned char *buf, size_t len) {
+    EvFD *evfd = (EvFD*)ctx;
+    struct UDPContext *uctx = evfd->proto_ctx;
+    
+    // 获取UDP套接字fd（假设存放在fd[0]）
+    int sockfd = evfd->fd[0];
+    
+    ssize_t sent = sendto(sockfd, buf, len, MSG_DONTWAIT,
+                        (struct sockaddr*)&uctx->peer_addr, 
+                        uctx->addr_len);
+    
+    if (sent < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return MBEDTLS_ERR_SSL_WANT_WRITE;
+        return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+    }
+    return (int)sent;
+}
+
+static int udp_packet_recv(void *ctx, unsigned char *buf, size_t len) {
+    EvFD *evfd = (EvFD*)ctx;
+    struct UDPContext *uctx = evfd->proto_ctx;
+    
+    // 接收时自动填充对端地址
+    socklen_t addr_len = sizeof(struct sockaddr_storage);
+    int sockfd = evfd->fd[0];
+    
+    ssize_t recvd = recvfrom(sockfd, buf, len, MSG_DONTWAIT,
+                           (struct sockaddr*)&uctx->peer_addr,
+                           &addr_len);
+    
+    if (recvd < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return MBEDTLS_ERR_SSL_WANT_READ;
+        return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+    }
+    
+    uctx->addr_len = addr_len; // 保存最新对端地址
+    return (int)recvd;
+}
+#endif
 
 // 公共接口实现
 bool LJS_evcore_init() {
@@ -544,46 +804,95 @@ bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data
         
         for (int i = 0; i < nfds; ++i) {
             struct EvFD* evfd = events[i].data.ptr;
+
+            if(evfd -> task_based){
                 
-            if (events[i].events & EPOLLIN) switch(evfd->type){
-                case EVFD_NORM:
-                case EVFD_TIMER:
-                    handle_read(evfd->fd[0], evfd, NULL, NULL);
-                break;
+                if (events[i].events & EPOLLIN) switch(evfd->type){
+                    case EVFD_NORM:
+                    case EVFD_TIMER:
+                    case EVFD_UDP:
+                    case EVFD_DTLS:
+                        handle_read(evfd->fd[0], evfd, NULL, NULL);
+                    break;
 
-                case EVFD_AIO:
-                    struct io_event events[MAX_EVENTS];
-                    struct timespec timeout = {0, 0};
-                    int ret = io_getevents(evfd->aio_ctx, 1, MAX_EVENTS, events, &timeout);
-                    if (ret < 0) {
-                        perror("io_getevents");
-                        break;
+                    case EVFD_AIO:
+                        struct io_event events[MAX_EVENTS];
+                        struct timespec timeout = {0, 0};
+                        int ret = io_getevents(evfd->aio_ctx, 1, MAX_EVENTS, events, &timeout);
+                        if (ret < 0) {
+                            perror("io_getevents");
+                            break;
+                        }
+                        for (int j = 0; j < ret; ++j) {
+                            struct iocb* iocb = (struct iocb*)events[j].obj;
+                            if(iocb -> aio_flags & IOCB_CMD_PREAD)
+                                handle_read(evfd->fd[0], evfd, iocb, NULL);
+                            else if(iocb -> aio_flags & IOCB_CMD_PWRITE)
+                                handle_write(evfd->fd[1], evfd, iocb);
+                            else if(iocb -> aio_flags & IOCB_CMD_FSYNC)
+                                handle_sync(evfd);
+                            else    // ?
+                                handle_close(evfd->fd[0], evfd);
+                        }
+                    break;
+
+                    case EVFD_INOTIFY:
+                        struct inotify_event inev;
+                        while (read(evfd->fd[0], &inev, sizeof(inev)) == sizeof(inev)) {
+                            handle_read(evfd->fd[0], evfd, NULL, &inev);
+                        }
+                    break;
+
+                    case EVFD_SSL:
+#ifdef LJS_MBEDTLS
+                        struct EvFD_SSL *ssl_evfd = evfd->ssl;
+                        
+                        while (1) {
+                            uint8_t tmp[4096];
+                            int ret = mbedtls_ssl_read(&ssl_evfd->ctx, tmp, sizeof(tmp));
+                            
+                            if (ret > 0) {
+                                buffer_push(ssl_evfd->recvbuf, tmp, ret);
+                                handle_read(evfd->fd[0], evfd, NULL, NULL); // 触发用户回调
+                            } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+                                break; // 等待下次事件
+                            } else {
+                                handle_close(evfd->fd[0], evfd);
+                                break;
+                            }
+                        }
+                        update_ssl_events(evfd);
+#endif
+                    break;
+                }
+                
+                if (events[i].events & EPOLLOUT){
+                    if(evfd -> type == EVFD_NORM){
+                        handle_write(evfd -> fd[0], evfd, NULL);
                     }
-                    for (int j = 0; j < ret; ++j) {
-                        struct iocb* iocb = (struct iocb*)events[j].obj;
-                        if(iocb -> aio_flags & IOCB_CMD_PREAD)
-                            handle_read(evfd->fd[0], evfd, iocb, NULL);
-                        else if(iocb -> aio_flags & IOCB_CMD_PWRITE)
-                            handle_write(evfd->fd[1], evfd, iocb);
-                        else if(iocb -> aio_flags & IOCB_CMD_FSYNC)
-                            handle_sync(evfd);
-                        else    // ?
+#ifdef LJS_MBEDTLS
+                    else if(evfd -> type == EVFD_SSL){
+                        ssize_t n = buffer_write(evfd->ssl->sendbuf, evfd->fd[0], UINT32_MAX);
+                            
+                        if (n == -1 && errno != EAGAIN) {
                             handle_close(evfd->fd[0], evfd);
-                    }
-                break;
+                            break;
+                        }
 
-                case EVFD_INOTIFY:
-                    struct inotify_event inev;
-                    while (read(evfd->fd[0], &inev, sizeof(inev)) == sizeof(inev)) {
-                        handle_read(evfd->fd[0], evfd, NULL, &inev);
+                        update_ssl_events(evfd);
                     }
-                break;
+#endif
+                }
+                if (events[i].events & (EPOLLERR | EPOLLHUP))
+                    handle_close(LJS_evfd_getfd(evfd, NULL), evfd);
+            }else{
+                if (events[i].events & EPOLLIN) evfd -> u.cb.read(evfd, NULL, 0, evfd -> u.cb.read_opaque);
+                if (events[i].events & EPOLLOUT) evfd -> u.cb.write(evfd, evfd -> u.cb.write_opaque);
+                if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+                    evfd -> u.cb.close(LJS_evfd_getfd(evfd, NULL), evfd -> u.cb.close_opaque);
+                    evloop_events --;
+                }
             }
-
-            if (events[i].events & EPOLLOUT)
-                handle_write(evfd -> fd[0], evfd, NULL);
-            if (events[i].events & (EPOLLERR | EPOLLHUP))
-                handle_close(evfd->fd[0], evfd);
         }
     }
 
@@ -611,9 +920,9 @@ int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback 
     if (!evfd) return -1;
 
     // 初始化任务队列
-    init_list_head(&evfd->read_tasks);
-    init_list_head(&evfd->write_tasks);
-    init_list_head(&evfd->close_tasks);
+    init_list_head(&evfd->u.task.read_tasks);
+    init_list_head(&evfd->u.task.write_tasks);
+    init_list_head(&evfd->u.task.close_tasks);
 
     // 设置文件类型
     if (use_aio) {
@@ -646,14 +955,10 @@ int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback 
     }
 
     // 设置默认回调
-    if (rcb) LJS_evfd_read(evfd, 4096, NULL, rcb, opaque);
-    if (wcb) LJS_evfd_write(evfd, NULL, 0, wcb, opaque);
-    if (ccb) {
-        struct Task* task = malloc(sizeof(struct Task));
-        task->cb.close = ccb;
-        task->opaque = opaque;
-        list_add(&task->list, &evfd->close_tasks);
-    }
+    evfd -> task_based = false;
+    evfd -> u.cb.read = rcb;
+    evfd -> u.cb.write = wcb;
+    evfd -> u.cb.close = ccb;
 
     return use_aio ? evfd->aio_ctx : 0;
 }
@@ -675,9 +980,9 @@ EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t
     if (!evfd) return NULL;
 
     // 初始化任务队列
-    init_list_head(&evfd->read_tasks);
-    init_list_head(&evfd->write_tasks);
-    init_list_head(&evfd->close_tasks);
+    init_list_head(&evfd->u.task.read_tasks);
+    init_list_head(&evfd->u.task.write_tasks);
+    init_list_head(&evfd->u.task.close_tasks);
 
     // 初始化缓冲区
     if (bufsize > 0) {
@@ -685,6 +990,7 @@ EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t
     }
 
     // 设置基础参数
+    evfd->task_based = true;
     evfd->fd[0] = fd;
     evfd->fd[1] = -1;
     evfd->type = EVFD_NORM;
@@ -697,7 +1003,7 @@ EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t
         struct Task* task = malloc(sizeof(struct Task));
         task->cb.close = close_callback;
         task->opaque = close_opaque;
-        list_add(&task->list, &evfd->close_tasks);
+        list_add(&task->list, &evfd->u.task.close_tasks);
     }
 
     // 判断是否为文件IO, aio
@@ -732,6 +1038,107 @@ EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t
     return evfd;
 }
 
+void LJS_evfd_setup_udp(EvFD* evfd) {
+    evfd->type = EVFD_UDP;
+    evfd->proto_ctx = malloc(sizeof(struct UDPContext));
+    evfd->proto_ctx->dtls_ctx = NULL;
+}
+
+#ifdef LJS_MBEDTLS
+bool LJS_evfd_initssl(
+    EvFD* evfd, mbedtls_ssl_config** config,
+    bool is_client, int protocol, int preset,
+    EvSSLHandshakeCallback handshake_cb, void* user_data
+) {
+    evfd->type = EVFD_SSL;
+    
+    // 初始化mbedtls结构
+    evfd -> ssl = malloc(sizeof(struct EvFD_SSL));
+    mbedtls_ssl_init(&evfd->ssl->ctx);
+    mbedtls_ssl_config_init(&evfd->ssl->config);
+    mbedtls_ssl_config_defaults(&evfd->ssl->config, is_client ? MBEDTLS_SSL_IS_CLIENT : MBEDTLS_SSL_IS_SERVER, protocol, preset);
+    mbedtls_ssl_conf_authmode(&evfd->ssl->config, MBEDTLS_SSL_VERIFY_NONE);
+    if(config) *config = &evfd->ssl->config;
+    
+    if (mbedtls_ssl_setup(&evfd->ssl->ctx, &evfd->ssl->config) != 0)
+        goto error;
+    
+    mbedtls_ssl_conf_read_timeout(&evfd->ssl->config, 0);
+    mbedtls_ssl_set_bio(&evfd->ssl->ctx, evfd, handle_ssl_send, handle_ssl_recv, NULL);
+    
+    // 初始化加密/解密缓冲区
+    buffer_init(&evfd->ssl->sendbuf, NULL, 16384);
+    buffer_init(&evfd->ssl->recvbuf, NULL, 16384);
+
+    // callback
+    evfd->ssl->handshake_cb = handshake_cb;
+    evfd->ssl->handshake_user_data = user_data;
+    
+    // 开始握手
+    evfd->ssl->ssl_handshaking = true;
+    ssl_handle_handshake(evfd);
+    return evfd;
+
+error:
+    LJS_evfd_close(evfd);
+    return NULL;
+}
+
+bool LJS_evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config) {
+    if(!evfd -> proto_ctx) abort();
+    struct UDPContext *ctx = evfd->proto_ctx;
+    mbedtls_ssl_config* config = malloc(sizeof(mbedtls_ssl_config));
+    if(_config) *_config = config;
+    
+    mbedtls_ssl_init(ctx->dtls_ctx);
+    mbedtls_ssl_config_init(config);
+    mbedtls_ssl_config_defaults(config, MBEDTLS_SSL_IS_SERVER,
+                              MBEDTLS_SSL_TRANSPORT_DATAGRAM,
+                              MBEDTLS_SSL_PRESET_DEFAULT);
+    mbedtls_ssl_conf_authmode(&evfd->ssl->config, MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_read_timeout(&evfd->ssl->config, 0);
+    mbedtls_ssl_set_bio(ctx->dtls_ctx, evfd, 
+                       udp_packet_send, udp_packet_recv, NULL);
+    return true;
+}
+
+#ifdef LJS_DEBUG
+void debug_callback(void *ctx, int level, const char *file, int line, const char *str) {
+    printf("%s %s:%04d: %s\n", level == MBEDTLS_SSL_ALERT_LEVEL_FATAL ? "E:" : level == MBEDTLS_DEBUG_LEVEL_WARNING ? "W:" : "I:", file, line, str);
+}
+#endif
+
+bool LJS_evfd_remove_sni(const char* name) {
+    struct list_head* pos, *tmp;
+    list_for_each_safe(pos, tmp, certs) {
+        struct SSL_data* data = list_entry(pos, struct SSL_data, link);
+        if(strcmp(data -> name, name) == 0) {
+            list_del(pos);
+            free(data -> name);
+            if(data -> server_name) free(data -> server_name);
+            mbedtls_x509_crt_free(data -> cacert);
+            mbedtls_pk_free(data -> cakey);
+            free(data);
+            return true;
+        }
+    }
+    return false;
+}
+
+void LJS_evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey) {
+    struct SSL_data* data = malloc(sizeof(struct SSL_data));
+    if(!certs) init_list_head(certs = &data -> link);
+    else{ 
+        LJS_evfd_remove_sni(name);  // 先移除旧的
+        list_add(&data -> link, certs);
+    }
+    data -> name = name;
+    data -> server_name = server_name;
+    data -> cacert = cacert;
+    data -> cakey = cakey;
+}
+#endif
+
 // 提交读取固定大小的请求
 bool LJS_evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
                       EvReadCallback callback, void* user_data) {
@@ -765,7 +1172,7 @@ bool LJS_evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
             return false;
         }
     }
-    list_add(&task->list, &evfd->read_tasks);
+    list_add(&task->list, &evfd->u.task.read_tasks);
     check_queue_status(evfd, evfd->fd[0]);
     evloop_events ++;
 
@@ -795,7 +1202,7 @@ bool LJS_evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
         buffer_free(buf);
         return false;
     }
-    list_add(&task->list, &evfd->read_tasks);
+    list_add(&task->list, &evfd->u.task.read_tasks);
     check_queue_status(evfd, evfd->fd[0]);
     evloop_events ++;
 
@@ -824,7 +1231,7 @@ bool LJS_evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
     task->buffer = buf;
     task->cb.read = callback;
     task->opaque = user_data;
-    list_add(&task->list, &evfd->read_tasks);
+    list_add(&task->list, &evfd->u.task.read_tasks);
 
 #ifdef LJS_DEBUG
     if(evfd -> type == EVFD_AIO)
@@ -849,7 +1256,7 @@ bool LJS_evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
             return false;
         }
     }
-    list_add(&task->list, &evfd->read_tasks);
+    list_add(&task->list, &evfd->u.task.read_tasks);
     check_queue_status(evfd, evfd->fd[0]);
     evloop_events ++;
 
@@ -880,7 +1287,7 @@ bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
     task->buffer = buf;
     task->cb.write = callback;
     task->opaque = user_data;
-    list_add(&task->list, &evfd->write_tasks);
+    list_add(&task->list, &evfd->u.task.write_tasks);
 
     evloop_events ++;
     if (evfd->type == EVFD_AIO) {
@@ -915,9 +1322,31 @@ bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
     return true;
 }
 
+// UDP写
+bool LJS_evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size,
+                         const struct sockaddr *addr, socklen_t addr_len,
+                         EvWriteCallback callback, void* user_data) {
+    struct UDPContext *ctx = evfd->proto_ctx;
+    memcpy(&ctx->peer_addr, addr, addr_len);
+    ctx->addr_len = addr_len;
+    
+    // 复用原有write逻辑
+    return LJS_evfd_write(evfd, data, size, callback, user_data);
+}
+
 // 关闭evfd
 bool LJS_evfd_close(EvFD* evfd) {
     if (!evfd || !evfd->active) return false;
+    handle_close(evfd->fd[0], evfd);
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, evfd->fd[0], NULL);
+    evfd->active = false;
+    return true;
+}
+
+// 只销毁不关闭evfd
+bool LJS_evfd_destroy(EvFD* evfd) {
+    if (!evfd || !evfd->active) return false;
+    evfd -> eof = true; // 标记为非活跃
     handle_close(evfd->fd[0], evfd);
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, evfd->fd[0], NULL);
     evfd->active = false;
@@ -954,13 +1383,14 @@ static inline EvFD* timer_new(unsigned long milliseconds, EvTimerCallback callba
     if(evfd == NULL) LJS_panic("malloc failed");
 
     // 初始化任务队列
-    init_list_head(&evfd->read_tasks);
-    init_list_head(&evfd->write_tasks);
-    init_list_head(&evfd->close_tasks);
+    init_list_head(&evfd->u.task.read_tasks);
+    init_list_head(&evfd->u.task.write_tasks);
+    init_list_head(&evfd->u.task.close_tasks);
 
     // 设置基础参数
     evfd->fd[0] = fd;
     evfd->type = EVFD_TIMER;
+    evfd->task_based = false;
 
     // 添加到eventloop
     struct epoll_event ev = {
@@ -991,7 +1421,7 @@ static inline bool timer_task(struct EvFD* evfd, EvTimerCallback callback, void*
 
     task->cb.timer = callback;
     task->opaque = user_data;
-    list_add(&task->list, &evfd->read_tasks);
+    list_add(&task->list, &evfd->u.task.read_tasks);
     evloop_events ++;
     return true;
 }
@@ -1028,7 +1458,7 @@ bool LJS_evcore_clearTimer(int timer_fd) {
 
             // 清理任务队列
             struct list_head *pos, *tmp;
-            list_for_each_safe(pos, tmp, &evfd->read_tasks) {
+            list_for_each_safe(pos, tmp, &evfd->u.task.read_tasks) {
                 struct Task* task = list_entry(pos, struct Task, list);
                 list_del(pos);
                 evloop_events --;
@@ -1064,7 +1494,7 @@ EvFD* LJS_evcore_inotify(EvINotifyCallback callback, void* user_data) {
     }
 
     // 初始化任务队列
-    init_list_head(&evfd->read_tasks);
+    init_list_head(&evfd->u.task.read_tasks);
 
     // 创建缓冲区
     buffer_init(&evfd->read_buffer, NULL, 4096); 
@@ -1079,7 +1509,7 @@ EvFD* LJS_evcore_inotify(EvINotifyCallback callback, void* user_data) {
     task->type = EV_TASK_READ;
     task->cb.inotify = callback;
     task->opaque = user_data;
-    list_add(&task->list, &evfd->read_tasks);
+    list_add(&task->list, &evfd->u.task.read_tasks);
 
     // 注册到epoll
     struct epoll_event ev = {
@@ -1112,7 +1542,7 @@ bool LJS_evcore_stop_inotify(EvFD* evfd) {
 
     // 清理任务队列
     struct list_head *pos, *tmp;
-    list_for_each_safe(pos, tmp, &evfd->read_tasks) {
+    list_for_each_safe(pos, tmp, &evfd->u.task.read_tasks) {
         struct Task* task = list_entry(pos, struct Task, list);
         list_del(pos);
         evloop_events --;

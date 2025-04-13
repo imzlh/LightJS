@@ -123,6 +123,7 @@ declare class Pipe<T>{
     close(): void;
 
     readonly closed: boolean;
+    readonly onclose: Promise<void>;
 }
 
 /**
