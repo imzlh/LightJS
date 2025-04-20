@@ -1,4 +1,6 @@
 #include "../engine/quickjs.h"
+#include "../engine/list.h"
+#include "../engine/cutils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,35 +118,20 @@ typedef struct {
     int code;
 } Worker_Error;
 
-typedef struct {
-    JSValue* message[MAX_MESSAGE_COUNT];
-    struct promise* promise[MAX_MESSAGE_COUNT];
-    uint8_t start;
-    uint8_t end;
-} Worker_Message_Queue;
-
-struct Worker_Props{
-    JSContext* parent_ctx;
-    uint32_t worker_id;
-
-    int efd_worker2main;
-    int efd_main2worker;
-
-    JSValue message_callback;
-    Worker_Error* error;
-    // write queue, in worker for main thread and worker thread
-    Worker_Message_Queue main_q;
-    Worker_Message_Queue worker_q;
-};
-
+typedef struct Worker_Props Worker_Props;
 typedef struct {
     JSContext* ctx;
-    // in main thread, define workers
-    JSContext** workers;
-    int worker_count;
-
-    struct Worker_Props* worker;
     bool module;
+
+    // in main thread, define workers
+    struct list_head workers;
+
+    // in worker thread, define app
+    struct Worker_Props* worker;
+    struct list_head link;
+    
+    // sandbox(Apps)
+    struct list_head sandbox;
 
     char* script_path;
     char** argv;
@@ -153,7 +140,6 @@ typedef struct {
     // module
     JSValue module_loader;
     JSValue module_format;
-    JSContext* module_ctx;
 } App;
 
 typedef enum {
@@ -207,6 +193,7 @@ typedef void (*DnsErrorCallback)(const char* error_msg, void* user_data);
 
 // Core events
 void LJS_dispatch_ev(JSContext *ctx, const char * name, JSValue data);
+JSValue js_extends_evtarget(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 
 // console
 void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visited[], FILE* target_fd);
@@ -219,6 +206,7 @@ void LJS_dump_error(JSContext *ctx, JSValueConst exception);
 
 // exports
 bool LJS_init_global_helper(JSContext *ctx);
+bool LJS_init_vm(JSContext *ctx);
 bool LJS_init_console(JSContext *ctx);
 bool LJS_init_pipe(JSContext *ctx);
 bool LJS_init_http(JSContext *ctx);
@@ -284,6 +272,7 @@ void LJS_parse_from_fd(EvFD* fd, HTTP_data *data, bool is_client, HTTP_ParseCall
 uint8_t *LJS_tryGetJSFile(uint32_t *pbuf_len, char **filename);
 
 // threads
+void LJS_destroy_app(App* app);
 App* LJS_create_app(
     JSRuntime* rt,
     uint32_t argc, char** argv,
@@ -293,6 +282,9 @@ App* LJS_create_app(
 void LJS_init_context(App* app, char** init_list);
 App* LJS_NewWorker(App* parent);
 bool LJS_init_thread(JSContext* ctx);
+
+// ffi
+bool LJS_init_ffi(JSContext *ctx);
 
 // --------------- HELPER FUNCTIONS ------------------------
 void free_js_malloc(JSRuntime *rt, void *opaque, void *ptr);

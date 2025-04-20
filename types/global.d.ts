@@ -39,8 +39,16 @@ declare function atob(encoded: string): string;
 declare function btoa(raw: string): string;
 
 declare function encodeStr(str: string): Uint8Array;
+declare function decodeStr(data: Uint8Array): string;
 
-declare function Worker(scriptURL: string, module?: boolean): U8Pipe;
+declare class Worker {
+    constructor(url: string, module?: boolean);
+    onmessage: (data: any) => any;  // setter getter
+    onclose: () => any;  // setter getter
+    postMessage(data: any): void;
+    terminate(): void;
+}
+
 declare class Sandbox {
     constructor(opts?: {
         loader?: (input: string) => string;
@@ -145,7 +153,7 @@ declare class U8Pipe {
     read(length?: number): Promise<Uint8Array | null>;
     readline(): Promise<Uint8Array | null>;
     readonly closed: boolean;
-    readonly end: Promise<void>;
+    readonly onclose: Promise<void>;
 
     // features for tty
     ttyRaw(raw: boolean): boolean;

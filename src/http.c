@@ -356,7 +356,7 @@ void LJS_free_http_data(HTTP_data *data){
 }
 
 // Header class
-static JSClassID headers_class_id;
+static thread_local JSClassID headers_class_id;
 
 static JSValue headers_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
     return LJS_Throw(ctx, "Headers is not constructable in JS context", NULL);
@@ -754,7 +754,7 @@ static void http_promise_callback(HTTP_data *data, uint8_t *buffer, uint32_t len
             JS_Call(promise -> ctx, promise -> resolve, JS_NULL, 0, NULL);
     }else{
         JS_Call(promise -> ctx, promise -> resolve, 
-            JS_NewUint8Array(promise -> ctx, buffer, len, free_js_malloc, NULL, true),    
+            JS_NewUint8Array(promise -> ctx, buffer, len, free_js_malloc, NULL, false),    
         0, NULL);
     }
 
@@ -793,7 +793,7 @@ struct HTTP_Response{
 
     bool locked;
 };
-static JSClassID response_class_id;
+static thread_local JSClassID response_class_id;
 
 static JSValue js_response_get_status(JSContext *ctx, JSValueConst this_val) {
     struct HTTP_Response *response = JS_GetOpaque(this_val, response_class_id);
@@ -1024,7 +1024,7 @@ struct JS_URL_struct{
     uint8_t dup_count;
 };
 
-static JSClassID js_class_url_id;
+static thread_local JSClassID js_class_url_id;
 
 static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv){
     URL_data *url_struct = malloc(sizeof(URL_data));

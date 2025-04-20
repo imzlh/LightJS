@@ -3,15 +3,16 @@ declare module 'process'{
 
     class Process{
         constructor(args: string[], options: {
-            inheritPipe: boolean,
-            env: Record<string, string>,
-            cwd: string
+            inheritPipe?: boolean,
+            env?: Record<string, string>,
+            cwd?: string
         })
 
         readonly alive: boolean;
         readonly pid: number;
         readonly code: number;
         readonly title: string;
+        readonly pipe: U8Pipe;
         size: [number, number];
     }
 
@@ -95,4 +96,6 @@ declare module 'process'{
     export const stdin: U8Pipe;
     export const stdout: U8Pipe;
     export const stderr: U8Pipe;
+
+    export function sleep(ms: number): void;
 }

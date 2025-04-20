@@ -25,7 +25,7 @@ typedef struct {
     int default_prevented;
 } Event;
 
-static JSClassID evtarget_class_id;
+static thread_local JSClassID evtarget_class_id;
 
 // 初始化 EvTarget
 static EvTarget *evtarget_new(JSContext* ctx){
@@ -274,6 +274,92 @@ static JSValue js_str_to_u8array(JSContext *ctx, JSValueConst this_val, int argc
     return buf;
 }
 
+static bool is_utf16(const uint8_t* data, size_t len) {
+    if (len < 2 || (len % 2 != 0)) return false;
+
+    // BOM
+    if (len >= 2) {
+        if ((data[0] == 0xFF && data[1] == 0xFE) ||  // UTF-16LE BOM
+            (data[0] == 0xFE && data[1] == 0xFF)) {    // UTF-16BE BOM
+            return true;
+        }
+    }
+
+    size_t valid_pairs = 0;
+    for (size_t i = 0; i < len; i += 2) 
+        if (data[i+1] == 0 && data[i] != 0) 
+            valid_pairs++;
+
+    bool ret = (valid_pairs * 2) >= len;
+    return ret;
+}
+
+char* u16_to_u8(const uint16_t* utf16, size_t len) {
+    char* utf8 = malloc(len * 4 + 1);
+    char* p = utf8;
+    for (size_t i = 0; i < len; i++) {
+        uint32_t code = utf16[i];
+
+        // 处理代理对（Surrogate pairs，4字节UTF-16）
+        if (code >= 0xD800 && code <= 0xDBFF && i + 1 < len) {
+            uint32_t low = utf16[i+1];
+            if (low >= 0xDC00 && low <= 0xDFFF) {
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                i++;
+            }
+        }
+
+        // 转换为UTF-8
+        if (code <= 0x7F) {
+            *p++ = code;
+        } else if (code <= 0x7FF) {
+            *p++ = 0xC0 | (code >> 6);
+            *p++ = 0x80 | (code & 0x3F);
+        } else if (code <= 0xFFFF) {
+            *p++ = 0xE0 | (code >> 12);
+            *p++ = 0x80 | ((code >> 6) & 0x3F);
+            *p++ = 0x80 | (code & 0x3F);
+        } else {
+            *p++ = 0xF0 | (code >> 18);
+            *p++ = 0x80 | ((code >> 12) & 0x3F);
+            *p++ = 0x80 | ((code >> 6) & 0x3F);
+            *p++ = 0x80 | (code & 0x3F);
+        }
+    }
+
+    *p = '\0';
+    return utf8;
+}
+
+static JSValue js_u8array_to_str(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if(argc != 1 || JS_GetTypedArrayType(argv[0]) == -1){
+        return LJS_Throw(ctx, "decodeUint8Array() requires a TypedArray argument",
+            "decodeStr(arr: TypedArray):string"
+        );
+    }
+
+    size_t len = 0;
+    uint8_t *data = JS_GetUint8Array(ctx, &len, argv[0]);
+    if(!data) return JS_EXCEPTION;
+
+    while(*data == 0 && len != 0)
+        data++, len--;
+
+    if(data[len-1] == 0) len--; // 去掉结尾的\0
+    if(len == 0) return JS_NewStringLen(ctx, "", 0);
+
+    // U16判断
+    if(is_utf16(data, len)){
+        char* u8 = u16_to_u8((const uint16_t*)data, len/2);
+        JSValue ret = JS_NewString(ctx, u8);
+        free(u8);
+        return ret;
+    }
+    
+    JSValue ret = JS_NewStringLen(ctx, (char*)data, len);
+    return ret;
+}
+
 bool LJS_init_global_helper(JSContext *ctx) {
     JSRuntime *rt = JS_GetRuntime(ctx);
     JSValue global_obj = JS_GetGlobalObject(ctx);
@@ -300,8 +386,9 @@ bool LJS_init_global_helper(JSContext *ctx) {
     JS_SetPropertyStr(ctx, global_obj, "atob", JS_NewCFunction(ctx, js_atob, "atob", 1));
     JS_SetPropertyStr(ctx, global_obj, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));
 
-    // encodeStr
+    // encodeStr/decodeStr
     JS_SetPropertyStr(ctx, global_obj, "encodeStr", JS_NewCFunction(ctx, js_str_to_u8array, "encodeStr", 1));
+    JS_SetPropertyStr(ctx, global_obj, "decodeStr", JS_NewCFunction(ctx, js_u8array_to_str, "decodeStr", 1));
 
     JS_SetPropertyStr(ctx, global_obj, "event", global_ev);
     return true;
@@ -311,4 +398,102 @@ void LJS_dispatch_ev(JSContext *ctx, const char * name, JSValue data){
     // new Event()
     Event *event = event_new(ctx, name, data);
     evtarget_fire(JS_GetOpaque(global_ev, evtarget_class_id), event);
+}
+
+JSValue js_extends_evtarget(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JSValue obj = JS_NewObjectClass(ctx, evtarget_class_id);
+    JS_SetOpaque(obj, evtarget_new(ctx));
+
+    return obj;
+}
+
+//  ---------- VM features ----------
+static JSValue js_vm_gc(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JS_RunGC(JS_GetRuntime(ctx));
+    return JS_UNDEFINED;
+}
+
+static JSValue js_vm_dump(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if(argc != 1){
+        return LJS_Throw(ctx, "dump() requires at least one argument",
+            "dump(obj: any, strip?: boolean): Uin8Array"
+        );
+    }
+
+    int flag = JS_WRITE_OBJ_BYTECODE;
+    if(!(argc >= 2 && JS_ToBool(ctx, argv[1]))) flag |= JS_WRITE_OBJ_STRIP_DEBUG | JS_WRITE_OBJ_STRIP_SOURCE;
+    JSValue obj = argv[0];
+    size_t len = 0;
+    uint8_t *data = JS_WriteObject(ctx, &len, obj, flag);
+    if(!data) return JS_EXCEPTION;
+    return JS_NewUint8Array(ctx, data, len, free_js_malloc, NULL, false);
+}
+
+static JSValue js_vm_load(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if(argc != 1 || JS_GetTypedArrayType(argv[0]) != JS_TYPED_ARRAY_UINT8){
+        return LJS_Throw(ctx, "load() requires a Uint8Array argument",
+            "load(arr: Uint8Array): any"
+        );
+    }
+
+    size_t len = 0;
+    uint8_t *data = JS_GetUint8Array(ctx, &len, argv[0]);
+    if(!data) return JS_EXCEPTION;
+
+    JSValue obj = JS_ReadObject(ctx, data, len, JS_READ_OBJ_BYTECODE);
+    return obj;
+}
+
+static JSValue js_vm_compile(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if(argc == 0 || !JS_IsString(argv[0])){
+        return LJS_Throw(ctx, "compile() requires a string argument",
+            "compile(source: string, module_name?: string): Uint8Array"
+        );
+    }
+
+    size_t len;
+    int flag = JS_EVAL_FLAG_COMPILE_ONLY;
+    const char *source = JS_ToCStringLen(ctx, &len, argv[0]);
+    const char *module_name = argc >= 2 ? JS_ToCString(ctx, argv[1]) : NULL;
+    if(!source) return JS_EXCEPTION;
+
+    if(module_name) flag |= JS_EVAL_TYPE_MODULE;
+    else flag |= JS_EVAL_TYPE_GLOBAL;
+
+    JSValue compiled = JS_Eval(ctx, source, len, module_name ? module_name : "<eval>", flag);
+    if(JS_IsException(compiled)) goto fail;
+
+    size_t output_len;
+    uint8_t* output = JS_WriteObject(ctx, &output_len, compiled, JS_WRITE_OBJ_BYTECODE);
+    if(!output){ 
+        JS_FreeValue(ctx, compiled); 
+        goto fail; 
+    }
+
+    JS_FreeValue(ctx, compiled);
+    JS_FreeCString(ctx, source);
+    JS_FreeCString(ctx, module_name);
+    return JS_NewUint8Array(ctx, (uint8_t*)output, output_len, free_js_malloc, NULL, false);
+fail:
+    JS_FreeCString(ctx, source);
+    JS_FreeCString(ctx, module_name);
+    return JS_EXCEPTION;
+}
+
+const JSCFunctionListEntry js_vm_funcs[] = {
+    JS_CFUNC_DEF("gc", 0, js_vm_gc),
+    JS_CFUNC_DEF("dump", 1, js_vm_dump),
+    JS_CFUNC_DEF("load", 1, js_vm_load),
+    JS_CFUNC_DEF("compile", 1, js_vm_compile),
+};
+
+static int vm_init(JSContext *ctx, JSModuleDef *m) {
+    return JS_SetModuleExportList(ctx, m, js_vm_funcs, countof(js_vm_funcs));
+    // return 0;
+}
+
+bool LJS_init_vm(JSContext *ctx) {
+    JSModuleDef* m = JS_NewCModule(ctx, "vm", vm_init);
+    if (!m) return false;
+    return JS_AddModuleExportList(ctx, m, js_vm_funcs, countof(js_vm_funcs));
 }

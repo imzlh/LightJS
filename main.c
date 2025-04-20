@@ -4,6 +4,7 @@
 
 #include "src/core.h"
 #include "engine/quickjs.h"
+#include "lib/lrepl.h"
 
 #include <string.h>
 
@@ -161,25 +162,14 @@ int main(int argc, char **argv) {
         }
     }
 
-    if(argc - optind == 0 || repl){
-        if(check || compile){
-            printf("Could not use --check or --compile when running in REPL mode.\n");
-            printf("If you want to check syntax or compile, please provide script name\n");
-            exit(1);
-        }
-        // todo: repl mode
-        printf("LightJS %s with QuickJS-NG %s\n", LJS_VERSION, JS_GetVersion());
-        printf("Type \".help\" for usage. for more information, please access github wiki.\n");
-        exit(0);
-    }
-
-    char* script_path = argv[optind];
-
     // rt init
     LJS_init_runtime(runtime);
 
     // app init
-    app = LJS_create_app(runtime, argc - optind -1, argv + optind +1, false, true, strdup(script_path), NULL);
+    app = LJS_create_app(runtime, 
+        argc == optind ? 0 : argc - optind -1, argc == optind ? NULL : argv + optind +1, 
+        false, true, "<eval>", NULL
+    );
     if(!app){
         printf("Failed to create app. Make sure you have enough memory.\n");
         printf("You can use --memory-limit options to increase the stack and memory limits.\n");
@@ -188,6 +178,24 @@ int main(int argc, char **argv) {
     LJS_init_context(app, NULL);
     LJS_evcore_init();  // epoll init
 
+    if(argc - optind == 0 || repl){
+        if(check || compile){
+            printf("Could not use --check or --compile when running in REPL mode.\n");
+            printf("If you want to check syntax or compile, please provide script name\n");
+            exit(1);
+        }
+        printf("LightJS %s with QuickJS-NG %s\n", LJS_VERSION, JS_GetVersion());
+        printf("Type \".help\" for usage. for more information, please access github wiki.\n");
+
+        JSValue buf = JS_ReadObject(app -> ctx, code_lrepl, sizeof(code_lrepl), JS_READ_OBJ_BYTECODE);
+        JSValue val = JS_EvalFunction(app -> ctx, buf);
+        if(JS_IsException(val)) LJS_dump_error(app -> ctx, JS_GetException(app -> ctx));
+
+        goto run_evloop;
+    }
+
+    char* script_path = argv[optind];
+
     uint32_t buf_len;
     uint8_t* buf;
     if(eval_code){
@@ -195,6 +203,7 @@ int main(int argc, char **argv) {
         buf_len = strlen(script_path);
         app -> script_path = "<eval>";
     }else{
+        app -> script_path = script_path;
         buf = LJS_tryGetJSFile(&buf_len, &app -> script_path);
         if(!buf){
             printf("Failed to load script file: %s\n", app -> script_path);
@@ -233,8 +242,8 @@ int main(int argc, char **argv) {
 
     // start!
     JS_DupValue(app -> ctx, ret_val);
+run_evloop:
     LJS_evcore_run(check_promise_resolved, &ret_val);
-    
-    // LJS_evcore_run(NULL, NULL);
+    LJS_destroy_app(app);
     return 0;
 }

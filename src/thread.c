@@ -16,12 +16,7 @@
 
 #define BUFFER_SIZE 64 * 1024
 
-static thread_local App* self_app;
-static thread_local int worker_id;
-static thread_local JSValue msg_callback;
-
 // module
-
 static inline void clear_if_not_equal(char** a, char** b){
     if(*a != *b){
         free(*a);
@@ -118,21 +113,20 @@ fail:
 //     }
 // }
 
-static JSModuleDef *js_module_loader(JSContext *_ctx,
+static JSModuleDef *js_module_loader(JSContext *ctx,
                               const char *module_name, void *opaque)
 {
     JSModuleDef *m;
     char* buf;
     uint32_t buf_len;
-    App* app = JS_GetContextOpaque(_ctx);
-    JSContext *ctx = app -> module_ctx ? app -> module_ctx : _ctx;
+    App* app = JS_GetContextOpaque(ctx);
     bool use_loader = JS_IsFunction(ctx, app -> module_loader);
 
     if(use_loader){
         JSValue argv[1] = { JS_NewString(ctx, module_name) };
         JSValue ret = JS_Call(ctx, app -> module_loader, JS_UNDEFINED, 1, argv);
         if(JS_IsException(ret)){
-            LJS_ThrowWithError(_ctx, "failed to load module", NULL);
+            LJS_ThrowWithError(ctx, "failed to load module", NULL);
             return NULL;
         }
         if(JS_IsString(ret)){
@@ -141,7 +135,7 @@ static JSModuleDef *js_module_loader(JSContext *_ctx,
             buf_len = __len;
             goto compile;
         }else{
-            LJS_Throw(_ctx, "invaild return value of custom module loader",
+            LJS_Throw(ctx, "invaild return value of custom module loader",
                 "return value must be a string contains module contents. Sync io is required.");
         }
     }
@@ -152,14 +146,14 @@ static JSModuleDef *js_module_loader(JSContext *_ctx,
     char* module_name_copied = strdup(module_name);
     buf = (char*)LJS_tryGetJSFile(&buf_len, &module_name_copied);
     if (!buf){
-        JS_ThrowReferenceError(_ctx, "could not load module by name: %s",
+        JS_ThrowReferenceError(ctx, "could not load module by name: %s",
                                    module_name);
         return NULL;
     }
 
     compile: {
         /* compile the module */
-        func_val = JS_Eval(_ctx, buf, buf_len, module_name_copied,
+        func_val = JS_Eval(ctx, buf, buf_len, module_name_copied,
                            JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
         free(buf);
         if (JS_IsException(func_val))
@@ -167,25 +161,25 @@ static JSModuleDef *js_module_loader(JSContext *_ctx,
             
         // import meta
         m = JS_VALUE_GET_PTR(func_val);
-        JSValue meta_obj = JS_GetImportMeta(_ctx, m);
-        JS_DefinePropertyValueStr(_ctx, meta_obj, "name",
-            JS_NewString(_ctx, module_name_copied),
+        JSValue meta_obj = JS_GetImportMeta(ctx, m);
+        JS_DefinePropertyValueStr(ctx, meta_obj, "name",
+            JS_NewString(ctx, module_name_copied),
             JS_PROP_C_W_E);
         if(!use_loader){
             char* real_path = realpath(module_name_copied, NULL);
-            JS_DefinePropertyValueStr(_ctx, meta_obj, "path",
-                JS_NewString(_ctx, real_path),
+            JS_DefinePropertyValueStr(ctx, meta_obj, "path",
+                JS_NewString(ctx, real_path),
                 JS_PROP_C_W_E);
-            JS_DefinePropertyValueStr(_ctx, meta_obj, "filename",
-                JS_NewString(_ctx, basename(real_path)),
+            JS_DefinePropertyValueStr(ctx, meta_obj, "filename",
+                JS_NewString(ctx, basename(real_path)),
                 JS_PROP_C_W_E);
-            JS_DefinePropertyValueStr(_ctx, meta_obj, "dirname",
-                JS_NewString(_ctx, dirname(real_path)),
+            JS_DefinePropertyValueStr(ctx, meta_obj, "dirname",
+                JS_NewString(ctx, dirname(real_path)),
                 JS_PROP_C_W_E);
             free(real_path);
         }
-        JS_FreeValue(_ctx, meta_obj);
-        JS_FreeValue(_ctx, func_val);
+        JS_FreeValue(ctx, meta_obj);
+        JS_FreeValue(ctx, func_val);
     }
 
     return m;
@@ -249,7 +243,30 @@ bool LJS_init_module(JSContext *ctx){
 
 // predef
 static void LJS_init_timer(JSContext* ctx);
-static JSValue worker_close(JSContext* ctx, void* ptr, JSValue val);
+
+struct WorkerMessage {
+    struct list_head list;
+    JSValue arg;
+};
+
+typedef void (*WorkerCallback)(App* app, JSValueConst data);
+struct Worker_Props{
+    int efd_worker2main;
+    int efd_main2worker;
+
+    JSValue worker_msgcb;// for worker thread
+    JSValue main_msgcb;  // for main thread
+    JSValue destroy_cb;  // for main thread
+    Worker_Error* error; // for main thread
+
+    // write queue, in worker for main thread and worker thread
+    struct list_head main_msg;
+    struct list_head worker_msg;
+    uint64_t msg_id;    // for eventfd
+    pthread_mutex_t lock;
+
+    App* parent;
+};
 
 static inline void worker_exit(int code, const char* message){
     Worker_Error* error = (Worker_Error*)malloc(sizeof(Worker_Error));
@@ -258,39 +275,26 @@ static inline void worker_exit(int code, const char* message){
     pthread_exit((void*)error);
 }
 
-// queue
-static inline void msgqueue_push(Worker_Message_Queue* queue, JSValue* arg, struct promise* promise){
-    // leak memory
-    JSValue* message = (JSValue*)malloc(sizeof(JSValue));
-    *message = *arg;    // copy
-    queue -> message[queue -> end] = message;  // 入队
-    queue -> promise[queue -> end] = promise;
-    if(queue -> end == MAX_MESSAGE_COUNT - 1) queue -> end = 0;
-    else queue -> end++;
-}
+static inline void push_message(App* from, App* to, struct list_head* list, JSValue arg){
+    // clone arg
+    size_t size;
+    void* data = JS_WriteObject(from -> ctx, &size, arg, 
+        // all available options
+        JS_WRITE_OBJ_BYTECODE | JS_WRITE_OBJ_REFERENCE | JS_WRITE_OBJ_SAB
+    );
 
-static inline uint64_t msgqueue_pop(Worker_Message_Queue* queue, struct promise** promise){
-    if(queue -> start == queue -> end) return 0;  // 队列为空
-    uint64_t value = (uint64_t)queue -> message[queue -> start];  // 出队
-    *promise = queue -> promise[queue -> start];
-    if(queue -> start == MAX_MESSAGE_COUNT - 1) queue -> start = 0;
-    else queue -> start++;
-    return value;
-}
+    // write to target App
+    JSValue cloned_arg = JS_ReadObject(to -> ctx, data, size, 
+        JS_READ_OBJ_BYTECODE | JS_READ_OBJ_REFERENCE | JS_READ_OBJ_SAB
+    );
 
-static inline void msgqueue_init(Worker_Message_Queue* queue){
-    queue -> start = 0;
-    queue -> end = 0;
-}
-
-static inline void msgqueue_destroy(Worker_Message_Queue* queue){
-    uint8_t que_end = (queue -> start > queue -> end)? queue -> start : queue -> start + MAX_MESSAGE_COUNT;
-    for(uint8_t i = queue -> start; i < que_end; i++){
-        uint8_t j = (i + 1) % MAX_MESSAGE_COUNT;
-        free(queue -> message[j]);
-        LJS_FreePromise(queue -> promise[j]);
-    }
-}
+    // push to msgqueue
+    pthread_mutex_lock(&to -> worker -> lock);
+    struct WorkerMessage* msg = malloc(sizeof(struct WorkerMessage));
+    msg -> arg = cloned_arg;
+    list_add_tail(list, &msg -> list);
+    pthread_mutex_unlock(&to -> worker -> lock);
+} 
 
 App* LJS_create_app(
     JSRuntime* rt,
@@ -299,9 +303,7 @@ App* LJS_create_app(
     App* parent
 ){
     JSContext* ctx = JS_NewContextRaw(rt);
-    if(!ctx){
-        return NULL;
-    }
+    if(!ctx) return NULL;
     App* app = (App*)malloc(sizeof(App));
     app->ctx = ctx;
     app->module = module;
@@ -310,30 +312,29 @@ App* LJS_create_app(
     app->argc = argc;
     app->module_loader = JS_UNDEFINED;
     app->module_format = JS_UNDEFINED;
+    app->worker = NULL;
+
+    init_list_head(&app->workers);
 
     if(parent && worker){
         // 分配worker专用资源
-        app -> worker = malloc(sizeof(struct Worker_Props));
-        app -> worker -> parent_ctx = parent -> ctx;
-        app -> worker -> worker_id = worker_id;
-        app -> worker -> message_callback = JS_UNDEFINED;
-        app -> worker -> error = NULL;
+        struct Worker_Props* wel = app -> worker = malloc(sizeof(struct Worker_Props));
+        wel -> worker_msgcb = JS_UNDEFINED;
+        wel -> error = NULL;
 
-        msgqueue_init(&app->worker->main_q);
-        msgqueue_init(&app->worker->worker_q);
-
-        worker_id = parent -> worker_count++;
+        init_list_head(&wel -> main_msg);
+        init_list_head(&wel -> worker_msg);
+        pthread_mutex_init(&wel -> lock, NULL);
 
         // 添加到父进程的worker数组中
-        parent -> workers = (JSContext**)realloc(parent -> workers, sizeof(JSContext*) * parent -> worker_count);
-        parent -> workers[worker_id] = ctx;
+        list_add_tail(&parent -> workers, &app -> link);
 
-        // 添加.parent
-        JSValue global_obj = JS_GetGlobalObject(ctx);
-        JSValue parent_obj = JS_GetGlobalObject(parent -> ctx);
-        JS_SetPropertyStr(ctx, global_obj, "parent", JS_DupValue(ctx, parent_obj));
-        JS_FreeValue(ctx, parent_obj);
-        JS_FreeValue(ctx, global_obj);
+        // TODO: 添加parent
+        // JSValue global_obj = JS_GetGlobalObject(ctx);
+        // JSValue parent_obj = JS_GetGlobalObject(parent -> ctx);
+        // JS_SetPropertyStr(ctx, global_obj, "parent", JS_DupValue(ctx, parent_obj));
+        // JS_FreeValue(ctx, parent_obj);
+        // JS_FreeValue(ctx, global_obj);
 
         // 在worker线程
         int fd1 = eventfd(0, EFD_NONBLOCK),
@@ -345,11 +346,20 @@ App* LJS_create_app(
 
         app -> worker -> efd_worker2main = fd1;
         app -> worker -> efd_main2worker = fd2;
+        app -> worker -> parent = parent;
     }
 
     JS_SetContextOpaque(ctx, app);
-    self_app = app;
+    if(!parent) JS_SetRuntimeOpaque(rt, app);
     return app;
+}
+
+static inline void msglist_clear(JSContext* ctx, struct list_head* list){
+    struct list_head* pos, *tmp;
+    list_for_each_safe(pos, tmp, list){
+        struct WorkerMessage* msg = list_entry(pos, struct WorkerMessage, list);
+        JS_FreeValue(ctx, msg -> arg);
+    }
 }
 
 void LJS_destroy_app(App* app) {
@@ -364,12 +374,38 @@ void LJS_destroy_app(App* app) {
             close(app->worker->efd_main2worker);
         }
         
-        // 释放消息队列
-        msgqueue_destroy(&app->worker->main_q);
-        msgqueue_destroy(&app->worker->worker_q);
+        // remove lock
+        pthread_mutex_destroy(&app->worker->lock);
+
+        // free msgcallback
+        if(!JS_IsUndefined(app->worker-> worker_msgcb))
+            JS_FreeValue(app->ctx, app->worker-> worker_msgcb);
+        if(!JS_IsUndefined(app->worker->main_msgcb))
+            JS_FreeValue(app->worker->parent->ctx, app->worker->main_msgcb);
+        if(!JS_IsUndefined(app->worker->destroy_cb))
+            JS_FreeValue(app->worker->parent->ctx, app->worker->destroy_cb);
+
+        // free queue
+        msglist_clear(app->ctx, &app->worker->main_msg);
+        msglist_clear(app->ctx, &app->worker->worker_msg);
+
+        // free error
+        if(app->worker->error){
+            js_free(app->ctx, app->worker->error->message);
+            js_free(app->ctx, app->worker->error);
+        }
         
         // 释放worker结构体
-        free(app->worker);
+        js_free(app->ctx, app->worker);
+    }
+
+    // sandbox can be auto destroyed, however workers not.
+    if(!list_empty(&app->workers)){
+        struct list_head* pos, *tmp;
+        list_for_each_safe(pos, tmp, &app->workers){
+            App* child = list_entry(pos, App, link);
+            LJS_destroy_app(child);
+        }
     }
 
     if (!JS_IsUndefined(app->module_loader)) {
@@ -382,20 +418,16 @@ void LJS_destroy_app(App* app) {
         JS_FreeContext(app->ctx);
     }
 
-    // if (app->script_path) free(app->script_path);
-    // if (app->argv) {
-    //     for (uint32_t i = 0; i < app->argc; i++) {
-    //         free(app->argv[i]);
-    //     }
-    //     free(app->argv);
-    // }
-
-    free(app -> script_path);
-    free(app);
-    
-    if (self_app == app) {
-        self_app = NULL;
+    // free args
+    if (app->script_path) js_free(app->ctx, app->script_path);
+    if (app->argv) {
+        for (uint32_t i = 0; i < app->argc; i++) {
+            js_free(app->ctx, app->argv[i]);
+        }
+        js_free(app->ctx, app->argv);
     }
+
+    js_free(app->ctx, app);
 }
 
 
@@ -407,11 +439,21 @@ static void worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_siz
         worker_exit(1, "read from pipe failed");
     }
         
-    // 转换数据指针
-    JSValue* arg = (JSValue*)value;
-    JS_Call(app -> ctx, msg_callback, JS_UNDEFINED, 1, arg);
-    JS_FreeValue(app -> ctx, *arg);
-    free(arg);
+    // 读取队列
+    if(JS_IsFunction(app -> ctx, app -> worker -> worker_msgcb)){
+        pthread_mutex_lock(&app -> worker -> lock);
+        // if(list_empty(&app -> worker -> main_msg)) abort();
+        struct list_head* pos, *tmp;
+        list_for_each_safe(pos, tmp, &app -> worker -> worker_msg){
+            struct WorkerMessage* msg = list_entry(pos, struct WorkerMessage, list);
+            list_del(&msg -> list);
+
+            // call
+            JS_Call(app -> ctx, app -> worker -> worker_msgcb, JS_UNDEFINED, 1, &msg -> arg);
+            free(msg);
+        }
+        pthread_mutex_unlock(&app -> worker -> lock);
+    }
 }
 
 // for worker thread
@@ -422,61 +464,81 @@ static void worker_close_callback(int fd, void* user_data){
 
 // for worker thread
 static void worker_writeable_callback(EvFD* __, void* opaque){
-    App* data = opaque;
-    struct promise* promise = NULL;
-    uint64_t value = msgqueue_pop(&data -> worker -> worker_q, &promise);
+    App* app = opaque;
 
-    if(value == 0 || promise == NULL) return;  // 队列为空
-
-    // write to pipe
-    if(write(data -> worker -> efd_worker2main, &value, sizeof(uint64_t)) == sizeof(uint64_t)){
-        LJS_Promise_Resolve(promise, JS_UNDEFINED);
-    }else{
-        JS_Call(promise -> ctx, promise -> reject, JS_UNDEFINED, 0, NULL);
-    }
-
-    LJS_FreePromise(promise);
+    // message
+    write(
+        app -> worker -> efd_worker2main, 
+        (uint8_t*)app -> worker -> msg_id,
+        sizeof(uint64_t) 
+    );
 }
 
 // for main thread
 static void main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* opaque){
-    App* app = (App*)opaque;
+    App* app = (App*)opaque;    // worker APP, not main!
     uint64_t value;
-    if(read(app -> worker -> efd_worker2main, &value, sizeof(uint64_t)) != sizeof(uint64_t)){
-        worker_exit(1, "read from pipe failed");
-    }
+    if(read(app -> worker -> efd_worker2main, &value, sizeof(uint64_t)) != sizeof(uint64_t)) return;
         
-    // 转换数据指针
-    JSValue* arg = (JSValue*)value;
-    JS_Call(app -> ctx, app -> worker -> message_callback, JS_UNDEFINED, 1, arg);
-    JS_FreeValue(app -> ctx, *arg);
-    free(arg);
+    // read queue
+    JSContext *ctx = app -> worker -> parent -> ctx;
+    if(JS_IsFunction(ctx, app -> worker -> main_msgcb)){
+        pthread_mutex_lock(&app -> worker -> lock);
+        // if(list_empty(&app -> worker -> main_msg)) abort();
+        struct list_head* pos, *tmp;
+        list_for_each_safe(pos, tmp, &app -> worker -> main_msg){
+            struct WorkerMessage* msg = list_entry(pos, struct WorkerMessage, list);
+            list_del(&msg -> list);
+
+            // call
+            JS_Call(ctx, app -> worker -> main_msgcb, JS_UNDEFINED, 1, &msg -> arg);
+            free(msg);
+        }
+        pthread_mutex_unlock(&app -> worker -> lock);
+    }
 }
 
 // for main thread
 static void main_writeable_callback(EvFD* __, void* opaque){
     App* data = opaque;
-    struct promise* promise = NULL;
-    uint64_t value = msgqueue_pop(&data -> worker -> worker_q, &promise);
-    if(value == 0 || promise == NULL) return;  // 队列为空
-    if(write(data -> worker -> efd_main2worker, &value, sizeof(uint64_t)) == sizeof(uint64_t)){
-        LJS_Promise_Resolve(promise, JS_UNDEFINED);
-    }else{
-        JSValue err = JS_NewError(self_app -> ctx);
-        JS_DefinePropertyValueStr(self_app -> ctx, err, "message", JS_NewString(self_app -> ctx, "write to pipe failed"), JS_PROP_C_W_E);
-        JSValue arr[] = { err };
-        JS_Call(self_app -> ctx, promise -> reject, JS_UNDEFINED, 1, arr);
-    }
-
-    LJS_FreePromise(promise);
+    // message
+    write(
+        data -> worker -> efd_main2worker, 
+        (uint8_t*)data -> worker -> msg_id,
+        sizeof(uint64_t) 
+    );
 }
 
 // for main thread
 static void main_close_callback(int fd, void* user_data){
-    App* app = (App*)user_data;
+    App* app = (App*)user_data; // worker APP, not main!
+    JSContext* ctx = app -> worker -> parent -> ctx;
 
     // close
-    worker_close(app -> ctx, app, JS_UNDEFINED);
+    if(app -> worker -> error){
+        char* space = malloc(1024);
+#ifdef LJS_DEBUG
+        snprintf(space, 1024, "Worker thread exited with code %d: %s\n", app -> worker -> error -> code, app -> worker -> error -> message);
+#endif
+        if(JS_IsFunction(ctx, app -> worker -> destroy_cb)){
+            JSValue obj = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, obj, "code", JS_NewInt32(ctx, app -> worker -> error -> code));
+            JS_SetPropertyStr(ctx, obj, "message", JS_NewString(ctx, app -> worker -> error -> message));
+            JS_Call(ctx, app -> worker -> destroy_cb, JS_UNDEFINED, 1, (JSValueConst[]){ obj });
+            // obj will be freed by JS_Call
+        }
+
+        free(app -> worker -> error -> message);
+        free(app -> worker -> error);
+        free(space);
+    }
+
+    // close fd
+    close(app -> worker -> efd_worker2main);
+    close(app -> worker -> efd_main2worker);
+
+    // destroy
+    LJS_destroy_app(app);
 }
 
 static void LJS_worker_loop(App* app, JSValue func){
@@ -523,7 +585,7 @@ void LJS_init_context(App* app, char** init_list){
     JSContext* ctx = app -> ctx;
 
     // 基础JS语法
-    if(!init_list || in(init_list, "base")) JS_AddIntrinsicBaseObjects(ctx);
+    JS_AddIntrinsicBaseObjects(ctx);
     if(!init_list || in(init_list, "date")) JS_AddIntrinsicDate(ctx);
     if(!init_list || in(init_list, "eval")) JS_AddIntrinsicEval(ctx);
     if(!init_list || in(init_list, "regexp")) JS_AddIntrinsicRegExp(ctx);
@@ -551,17 +613,19 @@ void LJS_init_context(App* app, char** init_list){
         }
         if(!init_list || in(init_list, "stdio"))
             LJS_init_stdio(ctx);
+        if(!init_list || in(init_list, "http"))
+            LJS_init_http(ctx);
     }
     if(!init_list || in(init_list, "console")) LJS_init_console(ctx);
     if(!init_list || in(init_list, "global")) LJS_init_global_helper(ctx);
     if(!init_list || in(init_list, "module")) LJS_init_module(ctx);
-    if(!init_list || in(init_list, "http")) LJS_init_http(ctx);
     if(!init_list || in(init_list, "timer")) LJS_init_timer(ctx);    // delay
+    if(!init_list || in(init_list, "ffi")) LJS_init_ffi(ctx);
+    if(!init_list || in(init_list, "vm")) LJS_init_vm(ctx);
 }
 
 static void* pthread_main(void* arg){
     App* app = (App*)arg;
-    self_app = app;
 
     // 加载入口
     uint32_t buf_len;
@@ -571,10 +635,16 @@ static void* pthread_main(void* arg){
     }
     uint8_t flag = JS_EVAL_FLAG_COMPILE_ONLY;
     if(app -> module) flag |= JS_EVAL_TYPE_MODULE;
-    JS_UpdateStackTop(JS_GetRuntime(app -> ctx));
     JSValue func = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, flag);
 
-    LJS_worker_loop(self_app, func);
+    // import.meta
+    if(app -> module){
+        JSValue meta = JS_GetImportMeta(app -> ctx, (JSModuleDef*)JS_VALUE_GET_PTR(func));
+        JS_SetPropertyStr(app -> ctx, meta, "url", JS_NewString(app -> ctx, app -> script_path));
+        JS_SetPropertyStr(app -> ctx, meta, "main", JS_TRUE);
+    }
+
+    LJS_worker_loop(app, func);
 
     return NULL;
 }
@@ -604,52 +674,71 @@ App* LJS_NewWorker(App* parent){
     return app;
 }
 
-static JSValue worker_poll(JSContext* ctx, void* ptr, JSValue __){
-    App* app = (App*)ptr;
-    struct promise* promise = LJS_NewPromise(app -> ctx);
-    if(JS_IsFunction(app -> ctx, app -> worker -> message_callback)) 
-        JS_FreeValue(app -> ctx, app -> worker -> message_callback);
-    app -> worker -> message_callback = JS_DupValue(app -> ctx, promise -> resolve);
-    return promise -> promise;
-}
+// class Worker
+static thread_local JSClassID js_worker_class_id;
+#define GET_APP(varname) App* varname = JS_GetOpaque(this_val, js_worker_class_id);\
+    if(!varname) return LJS_Throw(ctx, "Worker is destroyed", NULL);
 
-static JSValue worker_write(JSContext* ctx, void* ptr, JSValue data){
-    App* app = (App*)ptr;
-
-    struct promise* tmpdata = LJS_NewPromise(app -> ctx);
-    msgqueue_push(&app -> worker -> main_q, &data, tmpdata);
-
-    return tmpdata -> promise;
-}
-
-static JSValue worker_close(JSContext* ctx, void* ptr, JSValue val){
-    App* app = (App*)ptr;
-
-    if(app -> worker -> error){
-        char* space = malloc(1024);
-        snprintf(space, 1024, "Worker thread exited with code %d: %s\n", app -> worker -> error -> code, app -> worker -> error -> message);
-        free(app -> worker -> error -> message);
-        free(app -> worker -> error);
-        LJS_Throw(app -> ctx, space, NULL);
-        free(space);
-    }
+static JSValue js_worker_close(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    App* app = JS_GetOpaque(this_val, js_worker_class_id);  // worker APP, not main!
+    if(!app) return JS_UNDEFINED;
 
     LJS_evcore_detach(app -> worker -> efd_worker2main, EV_REMOVE_ALL);
     LJS_evcore_detach(app -> worker -> efd_main2worker, EV_REMOVE_ALL);
-    close(app -> worker -> efd_worker2main);
-    close(app -> worker -> efd_main2worker);
-    msgqueue_destroy(&app -> worker -> main_q);
-    msgqueue_destroy(&app -> worker -> worker_q);
-    JS_FreeContext(app -> ctx);
-    if(app -> worker -> error) {
-        free(app -> worker -> error -> message);
-        free(app -> worker -> error);
-    }
-    free(app -> worker);
-    free(app);
+    LJS_destroy_app(app);
 
+    JS_SetOpaque(this_val, NULL);
     return JS_UNDEFINED;
 }
+
+static JSValue js_worker_send(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    GET_APP(app);
+
+    if(argc == 0){
+        return LJS_Throw(ctx, "postMessage requires at least one argument",
+            "Worker.postMessage(message: any): void"
+        );
+    }
+
+    // add to queue
+    push_message((App*)JS_GetContextOpaque(ctx), app, &app -> worker -> worker_msg, argv[0]);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_worker_set_onmessage(JSContext* ctx, JSValueConst this_val, JSValueConst val){
+    GET_APP(app);
+
+    app -> worker -> worker_msgcb = JS_DupValue(ctx, val);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_worker_get_onmessage(JSContext* ctx, JSValueConst this_val){
+    GET_APP(app);
+
+    return JS_DupValue(ctx, app -> worker -> worker_msgcb);
+}
+
+static JSValue js_worker_set_ondestroy(JSContext* ctx, JSValueConst this_val, JSValueConst val){
+    GET_APP(app);
+
+    app -> worker -> destroy_cb = JS_DupValue(ctx, val);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_worker_get_ondestroy(JSContext* ctx, JSValueConst this_val){
+    GET_APP(app);
+
+    return JS_DupValue(ctx, app -> worker -> destroy_cb);
+}
+
+
+static JSCFunctionListEntry js_worker_props[] = {
+    JS_CGETSET_DEF("onmessage", js_worker_get_onmessage, js_worker_set_onmessage),
+    JS_CGETSET_DEF("ondestroy", js_worker_get_ondestroy, js_worker_set_ondestroy),
+    JS_CFUNC_DEF("terminate", 0, js_worker_close),
+    JS_CFUNC_DEF("postMessage", 1, js_worker_send),
+    JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Worker", JS_PROP_CONFIGURABLE),
+};
 
 static JSValue js_create_worker(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
     char* script_path;
@@ -666,22 +755,26 @@ static JSValue js_create_worker(JSContext* ctx, JSValueConst new_target, int arg
         );
     }
 
-    App* app = LJS_NewWorker(self_app);
+    App* app = LJS_NewWorker((App*)JS_GetContextOpaque(ctx));
 
     // evloop
     LJS_evcore_attach(app -> worker -> efd_worker2main, false, main_message_callback, NULL, main_close_callback, app);
     LJS_evcore_attach(app -> worker -> efd_main2worker, false, NULL, main_writeable_callback, NULL, app);
 
-    // Pipe
-    return LJS_NewU8Pipe(app -> ctx, PIPE_READ | PIPE_WRITE, BUFFER_SIZE,
-        worker_poll, worker_write, worker_close, app
-    );
+    // construct class
+    JSValue obj = JS_NewObjectClass(ctx, js_worker_class_id);
+    JS_SetOpaque(obj, app);
+    return obj;
 }
 
+static JSClassDef js_worker_def = {
+    "Worker",
+    .finalizer = NULL,  // worker can run in background
+};
 
 // class Sandbox
 // 使用线程内JSContext隔离执行JS代码
-static JSClassID js_sandbox_class_id;
+static thread_local JSClassID js_sandbox_class_id;
 
 static JSValue js_sandbox_eval(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     App* app = (App*)JS_GetOpaque(this_val, js_sandbox_class_id);
@@ -696,6 +789,7 @@ static JSValue js_sandbox_eval(JSContext* ctx, JSValueConst this_val, int argc, 
     const char* code = JS_ToCString(ctx, argv[0]);
     if(!code) return LJS_Throw(ctx, "code argument is not a string", NULL);
     JSValue func;
+    JS_UpdateStackTop(JS_GetRuntime(ctx));
     if(argc == 2 && JS_IsObject(argv[1])){
         func = JS_Eval(ctx, code, strlen(code), "<eval>", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
         if(!JS_IsException(func) && JS_IsModule(func)){
@@ -721,13 +815,14 @@ static JSValue js_sandbox_get_context(JSContext* ctx, JSValueConst this_val){
     return JS_GetGlobalObject(ctx);
 }
 
+static JSValue sandbox_func_proxy(JSContext* _ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValue* func_data){
+    JSContext* ctx = JS_VALUE_GET_PTR(func_data[0]);
+    JSValue real_func = func_data[magic];
+    return JS_Call(ctx, real_func, this_val, argc, argv);
+}
+
 static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
-    JSValue proto = JS_GetPropertyStr(ctx, new_target, "prototype");
-    JSValue obj = JS_NewObjectProtoClass(ctx, proto, js_sandbox_class_id);
-    JS_FreeValue(ctx, proto);
-    if(JS_IsException(obj)){
-        return JS_NULL;
-    }
+    JSValue obj = JS_NewObjectClass(ctx, js_sandbox_class_id);
 
     App* app = LJS_create_app(JS_GetRuntime(ctx), 0, NULL, false, true, NULL, NULL);
     char* init_apps[32];
@@ -750,8 +845,17 @@ static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, i
         // module loader
         JSValue loader = JS_GetPropertyStr(ctx, argv[0], "loader");
         if(JS_IsFunction(ctx, loader)){
-            app -> module_loader = loader;
-            app -> module_ctx = ctx;
+        //     size_t len;
+        //     uint8_t* buf = JS_WriteObject(ctx, &len, loader, JS_WRITE_OBJ_BYTECODE);
+        //     if(buf){
+        //         app -> module_loader = JS_ReadObject(app -> ctx, buf, len, JS_READ_OBJ_BYTECODE);
+        //         js_free(ctx, buf);
+        //     }
+
+            app -> module_loader = JS_NewCFunctionData(
+                app -> ctx, sandbox_func_proxy, 1, 1,
+                1, (JSValue[]){ JS_MKPTR(JS_TAG_OBJECT, app -> ctx), loader }
+            );
         }
     }
     
@@ -781,21 +885,26 @@ bool LJS_init_thread(JSContext* ctx){
     JSRuntime* rt = JS_GetRuntime(ctx);
 
     // worker
-    JSValue worker_func = JS_NewCFunction(ctx, js_create_worker, "Worker", 1);
-    JS_SetPropertyStr(ctx, global_obj, "Worker", worker_func);
-    JS_FreeValue(ctx, worker_func);
+    JS_NewClassID(rt, &js_worker_class_id);
+    if(-1 == JS_NewClass(rt, js_worker_class_id, &js_worker_def)) return false;
+    JSValue worker_proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, worker_proto, js_worker_props, countof(js_worker_props));
+    JS_SetClassProto(ctx, js_worker_class_id, worker_proto);
+
+    JSValue worker_ctor = JS_NewCFunction2(ctx, js_create_worker, "Worker", 1, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, worker_ctor, worker_proto);
+    JS_SetPropertyStr(ctx, global_obj, "Worker", worker_ctor);
 
     // sandbox
     JS_NewClassID(rt, &js_sandbox_class_id);
     if(-1 == JS_NewClass(rt, js_sandbox_class_id, &js_sandbox_def)) return false;
     JSValue sandbox_proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, sandbox_proto, js_sandbox_funcs, countof(js_sandbox_funcs));
+    JS_SetClassProto(ctx, js_sandbox_class_id, sandbox_proto);
 
     JSValue sandbox_ctor = JS_NewCFunction2(ctx, js_sandbox_constructor, "Sandbox", 1, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, sandbox_ctor, sandbox_proto);
     JS_SetPropertyStr(ctx, global_obj, "Sandbox", sandbox_ctor);
-    JS_FreeValue(ctx, sandbox_proto);
-    JS_FreeValue(ctx, sandbox_ctor);
     return true;
 }
 
@@ -827,7 +936,7 @@ static JSValue js_timer_delay(JSContext* ctx, JSValueConst this_val, int argc, J
     timer -> once = true;
 
     uint32_t delay_time;
-    if(delay_time == 0 || 0 != JS_ToUint32(ctx, &delay_time, argv[0])){
+    if(delay_time == 0 || -1 == JS_ToUint32(ctx, &delay_time, argv[0])){
         return LJS_Throw(ctx, "Timer.delay takes a non-zero delay_time", NULL);
     }
 
@@ -843,7 +952,7 @@ static JSValue js_timer_set_timeout(JSContext* ctx, JSValueConst this_val, int a
 
     JSValue callback = JS_DupValue(ctx, argv[0]);
     uint32_t delay_time;
-    if(delay_time == 0 || !JS_ToUint32(ctx, &delay_time, argv[1])){
+    if(delay_time == 0 || -1 == JS_ToUint32(ctx, &delay_time, argv[1])){
         return LJS_Throw(ctx, "Timer.setTimeout takes a non-zero delay_time", NULL);
     }
 
@@ -864,7 +973,7 @@ static JSValue js_timer_interval(JSContext* ctx, JSValueConst this_val, int argc
 
     JSValue callback = JS_DupValue(ctx, argv[0]);
     uint32_t interval_time;
-    if(interval_time == 0 || !JS_ToUint32(ctx, &interval_time, argv[1])){
+    if(interval_time == 0 || -1 == JS_ToUint32(ctx, &interval_time, argv[1])){
         return LJS_Throw(ctx, "Timer.interval takes a non-zero interval_time", NULL);
     }
 
@@ -884,23 +993,18 @@ static JSValue js_timer_clear(JSContext* ctx, JSValueConst this_val, int argc, J
     }
     
     int id;
-    JS_ToInt32(ctx, &id, argv[0]);
+    if(-1 == JS_ToInt32(ctx, &id, argv[0])) return JS_EXCEPTION;
     return JS_NewBool(ctx, LJS_evcore_clearTimer(id));
 }
 
+const JSCFunctionListEntry js_timer_funcs[] = {
+    JS_CFUNC_DEF("delay", 1, js_timer_delay),
+    JS_CFUNC_DEF("setTimeout", 2, js_timer_set_timeout),
+    JS_CFUNC_DEF("interval", 2, js_timer_interval),
+    JS_CFUNC_DEF("clear", 1, js_timer_clear),
+};
+
 static void LJS_init_timer(JSContext* ctx){
     JSValue global_obj = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global_obj, "setTimeout", 
-        JS_NewCFunction(ctx, js_timer_set_timeout, "setTimeout", 2)
-    );
-    JS_SetPropertyStr(ctx, global_obj, "setInterval", 
-        JS_NewCFunction(ctx, js_timer_interval, "setInterval", 2)
-    );
-    JS_SetPropertyStr(ctx, global_obj, "clearTimer", 
-        JS_NewCFunction(ctx, js_timer_clear, "clearTimer", 1)
-    );
-    JS_SetPropertyStr(ctx, global_obj, "delay", 
-        JS_NewCFunction(ctx, js_timer_delay, "delay", 1)
-    );
-    JS_FreeValue(ctx, global_obj);
+    JS_SetPropertyFunctionList(ctx, global_obj, js_timer_funcs, countof(js_timer_funcs));
 }

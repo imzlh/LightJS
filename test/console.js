@@ -4,6 +4,11 @@ test("console.error", () => console.error("Error message"));
 test("console.warn", () => console.warn("Warning message"));
 test("console.debug", () => console.debug("Debug message"));
 test("console.info", () => console.info("Info message"));
+test("print objects", () => {
+    console.log({a: 1, b: 2});
+    console.log([1, 2, 3]);
+    console.log(new Uint8Array([1, 2, 3]));
+})
 test("console.count", () => {
     console.count();
     console.count();

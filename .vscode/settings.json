@@ -130,7 +130,9 @@
         "net_sockets.h": "c",
         "entropy.h": "c",
         "error.h": "c",
-        "stdatomic.h": "c"
+        "stdatomic.h": "c",
+        "ffi.h": "c",
+        "lrepl.h": "c"
     },
     "C_Cpp.errorSquiggles": "enabled"
 }

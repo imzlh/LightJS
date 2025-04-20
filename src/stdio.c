@@ -9,11 +9,12 @@
 #include <dirent.h>
 #include <limits.h>
 #include <unistd.h>
+#include <threads.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
 // class SyncPipe
-static JSClassID js_syncpipe_class_id;
+static thread_local JSClassID js_syncpipe_class_id;
 struct SyncPipe {
     int fd;
     int size;  // -1 means unlimited size
@@ -56,7 +57,7 @@ static JSValue js_syncio_read(JSContext *ctx, JSValueConst this_val, int argc, J
     uint8_t* buf = js_malloc(ctx, len ? BUFSIZ : len);
 
     uint32_t recv = read(pipe -> fd, &buf, len);
-    return JS_NewUint8Array(ctx, buf, recv, free_js_malloc, NULL, true);
+    return JS_NewUint8Array(ctx, buf, recv, free_js_malloc, NULL, false);
 }
 
 static JSValue js_syncio_write(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
@@ -274,7 +275,7 @@ static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValu
 
     JSValue ret = to_str
         ? JS_NewStringLen(ctx, (char *)buf, buf_len)
-        : JS_NewUint8Array(ctx, buf, buf_len, free_js_malloc, NULL, true);
+        : JS_NewUint8Array(ctx, buf, buf_len, free_js_malloc, NULL, false);
 
     if(to_str) js_free(ctx, buf);
     return ret;
