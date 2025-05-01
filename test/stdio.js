@@ -18,14 +18,15 @@ test("stat", () => {
     assert(s.size === "Hello World".length);
 });
 
-await test("open", async () => {
+await test2("open", async () => {
     const pipe = open("test2.txt", "r+");
     console.log(pipe);
     const res = await pipe.read("Hello World".length);
-    console.log(res);
+    if(!res) throw new Error("Read failed");
+    console.log("read() result:", decodeStr(res));
     assert(isEqual(res, encodeStr("Hello World")), "Read mismatch with write");
     
-    pipe.write(encodeStr("Goodbye World"));
+    await pipe.write(encodeStr("Goodbye World"));
     pipe.close();
     
     assert(pipe.closed, "Pipe should be closed after read");

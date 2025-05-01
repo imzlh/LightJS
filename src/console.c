@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/time.h>
 #include <threads.h>
+#include <assert.h>
 
 #define MAX_DEPTH 8
 #define MAX_OUTPUT_LEN 1024
@@ -55,6 +56,10 @@ static JSValue getClassName(JSContext *ctx, JSValue prototype) {
 
     return name;
 }
+
+#define PRINT_INDENT(depth) char* indent = str_repeat(" ", depth *4); \
+    fprintf(target_fd, "\n%s", indent); \
+    free(indent);
 
 /**
  * 打印 JSValue 值
@@ -160,6 +165,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
         }
         if(length > 8) printf("\n%s", str_repeat(" ", depth * 4));
         fprintf(target_fd, ANSI_GREEN "]" ANSI_RESET);
+        free(indent);
 
     end:
         visited[depth] = NULL;
@@ -199,6 +205,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
             }
             fprintf(target_fd, "%s%s\n", indent, stack_str);
 
+            free(indent);
             JS_FreeCString(ctx, name_str);
             JS_FreeCString(ctx, message_str);
             JS_FreeCString(ctx, js_stack_str);
@@ -287,6 +294,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
                 }
             }
 
+            free(indent);
             JS_FreePropertyEnum(ctx, classprops, len);
             if(vaild == 0) goto obj_norm;
         }
@@ -343,13 +351,14 @@ obj_norm:
         }
 
         if(len > 4) {
-            fprintf(target_fd, "\n%s", str_repeat(" ", depth *4));
+            fprintf(target_fd, "\n%s", indent);
         } else {
             fprintf(target_fd, " ");
         }
 
         fprintf(target_fd, ANSI_GREEN "}" ANSI_RESET);
         JS_FreePropertyEnum(ctx, props, len);
+        free(indent);
 
 end1:
         visited[depth] = NULL;
@@ -604,17 +613,5 @@ void LJS_dump_error(JSContext *ctx, JSValueConst exception) {
     } else {
         LJS_print_value(ctx, exception, 0, NULL, stderr);
         fprintf(stderr, "\n");
-    }
-}
-
-void LJS_handle_promise_reject(
-    JSContext *ctx, JSValue promise,
-    JSValue reason,
-    bool is_handled, void *opaque
-){
-    if (!is_handled) {
-        fprintf(stderr, "Uncaught (in promise) ");
-        LJS_dump_error(ctx, reason);
-        exit(1);
     }
 }

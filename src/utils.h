@@ -3,13 +3,14 @@
 #include <string.h>
 #include <unistd.h>
 
+#pragma once
+
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
-
 /**
  * 环形缓冲区
- * [start, end]，指向缓冲区的有效数据
+ * [start, end)，指向缓冲区的有效数据
  */
 struct Buffer {
     uint8_t* buffer;
@@ -29,7 +30,7 @@ struct Buffer {
  */
 static inline void buffer_init(struct Buffer** buf, uint8_t* data, uint32_t size) {
     struct Buffer* buffer = *buf = (struct Buffer*)malloc(sizeof(struct Buffer));
-    if(!buf) return;
+    if(!buffer) return;
 
     if(data && size > 0)
         buffer->buffer = data, buffer->is_dynamic = false;
@@ -46,11 +47,18 @@ static inline void buffer_init(struct Buffer** buf, uint8_t* data, uint32_t size
  * @param buffer 缓冲区指针
  */
 static inline void buffer_free(struct Buffer* buffer) {
-    if(buffer->is_dynamic){
-        if(buffer->__aligned_ptr) free(buffer->__aligned_ptr);
-        else free(buffer->buffer);
-    }
-    free(buffer);
+    if(buffer->__aligned_ptr) free(buffer->__aligned_ptr);
+    if(buffer->is_dynamic) free(buffer->buffer);
+}
+
+/**
+ * 计算缓冲区已用空间
+ * @param buffer 缓冲区指针
+ * @return 已用空间大小
+ */
+static inline uint32_t buffer_used(struct Buffer* buffer) {
+    if (buffer->size == 0) return 0;
+    return (buffer->end - buffer->start + buffer->size) % buffer->size;
 }
 
 /**
@@ -61,20 +69,12 @@ static inline void buffer_free(struct Buffer* buffer) {
  */
 static inline bool buffer_seek(struct Buffer* buffer, uint32_t pos) {
     if (buffer->size == 0 && pos != 0) return false;
+    
+    uint32_t used = buffer_used(buffer);
     buffer->start = (buffer->start + pos) % buffer->size;
-    buffer->end = (buffer->start + (buffer->end - buffer->start + buffer->size) % buffer->size) % buffer->size;
+    buffer->end = (buffer->start + used) % buffer->size;
+    
     return true;
-}
-
-/**
- * 计算缓冲区已用空间
- * @param buffer 缓冲区指针
- * @return 已用空间大小
- */
-static inline uint32_t buffer_used(struct Buffer* buffer) {
-    if (buffer->size == 0) return 0;
-    uint32_t ret = (buffer->end - buffer->start + buffer->size) % buffer->size;
-    return ret + 1;    // note: length should +1
 }
 
 /**
@@ -84,7 +84,7 @@ static inline uint32_t buffer_used(struct Buffer* buffer) {
  */
 static inline uint32_t buffer_available(struct Buffer* buffer) {
     if (buffer->size == 0) return 0;
-    return (buffer->start - buffer->end + buffer->size - 1) % buffer->size;
+    return (buffer->size - 1) - buffer_used(buffer);
 }
 
 /**
@@ -206,27 +206,36 @@ static inline ssize_t buffer_read(struct Buffer* buffer, int fd, uint32_t max_si
  * @param new_size 新缓冲区大小
  * @return 是否调整成功
  */
-static inline bool buffer_realloc(struct Buffer* buffer, uint32_t new_size) {
-    if (!buffer->is_dynamic || new_size <= buffer->size) return false;
+static inline bool buffer_realloc(struct Buffer* buffer, uint32_t new_size, bool force) {
+    if (!force && (
+        !buffer->is_dynamic || new_size <= buffer->size
+        || new_size < buffer_used(buffer)
+    )) return false;
 
     uint8_t* new_buf = (uint8_t*)malloc(new_size);
     if (!new_buf) return false;
 
-    // 复制现有数据到新缓冲区
+    // 保存旧指针
+    uint8_t* old_buf = buffer->buffer;
+
+    // 安全复制数据
     uint32_t used = buffer_used(buffer);
-    uint32_t first_chunk = MIN(buffer->size - (buffer->start % buffer->size), used);
-    memcpy(new_buf, buffer->buffer + (buffer->start % buffer->size), first_chunk);
+    uint32_t safe_used = MIN(used, new_size - 1);
+    uint32_t first_chunk = MIN(buffer->size - buffer->start, safe_used);
     
-    if (used > first_chunk) {
-        memcpy(new_buf + first_chunk, buffer->buffer, used - first_chunk);
+    memcpy(new_buf, old_buf + buffer->start, first_chunk);
+    if (safe_used > first_chunk) {
+        memcpy(new_buf + first_chunk, old_buf, safe_used - first_chunk);
     }
 
-    // 更新缓冲区信息
-    free(buffer->buffer);
+    // 原子化更新缓冲区状态
     buffer->buffer = new_buf;
     buffer->start = 0;
-    buffer->end = used;
+    buffer->end = safe_used;
     buffer->size = new_size;
+
+    // 最后释放旧内存
+    free(old_buf);
     return true;
 }
 
@@ -241,24 +250,17 @@ static inline uint8_t* buffer_export(struct Buffer* buffer, uint32_t* size) {
     *size = used;
     if (used == 0) return NULL;
 
-    const uint32_t start_pos = buffer->start % buffer->size;
-    bool loop = start_pos + used > buffer->size;
+    const uint32_t start_pos = buffer->start % buffer->size; 
+    const uint32_t first_chunk = MIN(buffer->size - start_pos, used); // 增加保护
     
-    uint8_t* copy = (uint8_t*)malloc(used);
-    if (!copy) {
-        *size = 0;
-        return NULL;
-    }
-    
-    const uint32_t first_chunk = buffer->size - start_pos;
+    uint8_t* copy = malloc(used);
     memcpy(copy, buffer->buffer + start_pos, first_chunk);
-    if (loop) memcpy(copy + first_chunk, buffer->buffer, used - first_chunk);
+    if (used > first_chunk) {
+        memcpy(copy + first_chunk, buffer->buffer, used - first_chunk);
+    }
 
-    // 更新缓冲区信息
     buffer->start = 0;
-    buffer->end = used;
-    buffer->size = used;
-    
+    buffer->end = used; 
     return copy;
 }
 
@@ -342,7 +344,7 @@ static inline uint8_t* buffer_sub_export(struct Buffer* buffer,
  * @return 实际写入数据长度
  */
 static inline ssize_t buffer_write(struct Buffer* buffer, int fd, uint32_t max_size) {
-    uint32_t used = buffer_used(buffer); // BUG
+    uint32_t used = buffer_used(buffer);
     if (used == 0 || max_size == 0) return 0;
 
     uint32_t can_write = MIN(used, max_size);
@@ -365,11 +367,11 @@ end:
 }
 
 /**
- * 调整缓冲区大小，使得缓冲区中数据连续
+ * 调整缓冲区使得缓冲区中数据连续
  * @param buffer 缓冲区指针
  * @return 是否调整成功
  */
-static inline bool buffer_expand(struct Buffer* buffer) {
+static inline bool buffer_flat(struct Buffer* buffer) {
     if (!buffer->is_dynamic) return false;
 
     uint32_t used = buffer_used(buffer);
@@ -398,16 +400,39 @@ static inline bool buffer_expand(struct Buffer* buffer) {
     return true;
 }
 
-static inline void* aligned_malloc(size_t size, int alignment, void** raw) {
-    const int pointerSize = sizeof(void*);
-    const int requestedSize = size + alignment - 1 + pointerSize;
-    *raw = malloc(requestedSize);
-    if(!*raw) abort();
-    uintptr_t start = (uintptr_t)(*raw) + pointerSize;
-    void* aligned = (void*)((start + alignment - 1) & ~(alignment - 1));
-    *(void**)((uintptr_t)aligned - pointerSize) = *raw;
-    return aligned;
+static inline bool buffer_offset(struct Buffer* buffer, uint32_t offset, bool force) {
+    // 展开缓冲区确保数据连续
+    buffer_flat(buffer);
+    
+    uint32_t used = buffer_used(buffer);
+    
+    // 检查偏移量有效性
+    if (offset > used) return false;
+    
+    // 强制模式或需要扩容
+    if (!force && (buffer->size < used - offset)) {
+        if (!buffer_realloc(buffer, used - offset, false)) {
+            return false;
+        }
+    }
+
+    // 移动数据并更新指针
+    memmove(buffer->buffer, buffer->buffer + offset, used - offset);
+    buffer->start = 0;
+    buffer->end = used - offset;
+    return true;
 }
+
+// static inline void* aligned_malloc(size_t size, int alignment, void** raw) {
+//     const int pointerSize = sizeof(void*);
+//     const int requestedSize = size + alignment - 1 + pointerSize;
+//     *raw = malloc(requestedSize);
+//     if(!*raw) abort();
+//     uintptr_t start = (uintptr_t)(*raw) + pointerSize;
+//     void* aligned = (void*)((start + alignment - 1) & ~(alignment - 1));
+//     *(void**)((uintptr_t)aligned - pointerSize) = *raw;
+//     return aligned;
+// }
 
 /**
  * 调整缓冲区内存对齐
@@ -415,45 +440,70 @@ static inline void* aligned_malloc(size_t size, int alignment, void** raw) {
  * @return 是否调整成功
  */
 static inline void buffer_aligned(struct Buffer* buffer, size_t blk_size) {
-    if (!buffer) return;
+    if (!buffer || blk_size == 0) return;
 
-    if (blk_size == 0 || !(blk_size & (blk_size - 1))) {  // Check if blk_size is a power of 2
-        void* raw_ptr;
-        size_t alloc_size = (buffer->size + blk_size - 1) & ~(blk_size - 1);
+    if (buffer -> size == 0 || (buffer -> size & (blk_size -1)) || (((uintptr_t)buffer -> buffer) & (blk_size - 1))) {
+        size_t alloc_size = ((buffer->size + blk_size - 1) & ~(blk_size - 1)) +1;
+        void* raw_ptr = buffer -> buffer;
+        // warn: 缓冲区需要预留1字节
+        if(0 != posix_memalign((void**)&buffer -> buffer, blk_size, alloc_size))
+            return;
 
-        void* new_buf = aligned_malloc(alloc_size, blk_size, &raw_ptr);
-        if (!new_buf) return;
+#ifdef LJS_DEBUG
+        if(((uintptr_t)buffer -> buffer) & (blk_size - 1))
+            abort();
+#endif
 
-        // 确保不会拷贝超过新旧缓冲区中较小的那个大小
         size_t copy_size = MIN(buffer->size, alloc_size);
-        if (buffer->buffer) {
-            memcpy(new_buf, buffer->buffer, copy_size);
-            if (buffer->is_dynamic) free(buffer->buffer);
-        }
+        memcpy(buffer->buffer, raw_ptr, copy_size);
 
-        buffer->buffer = (uint8_t*)new_buf;
         buffer->is_dynamic = true;
         buffer->size = alloc_size;
-        buffer->__aligned_ptr = raw_ptr;
+        if(!buffer -> is_dynamic) free(raw_ptr);
+        else buffer->__aligned_ptr = raw_ptr;
+
+#ifdef LJS_DEBUG
+        printf("buffer_aligned: %p, %d, %d, %d\n", buffer->buffer, buffer->size -1, buffer->start, buffer->end);
+#endif
     }
 }
 
 static inline bool buffer_merge(struct Buffer* buffer, struct Buffer* other) {
     if (!buffer || !other) return false;
-    size_t ot_size = buffer_used(other);
-    size_t self_size = buffer_used(buffer);
-    if (buffer_available(buffer) < ot_size) {
-        if (buffer->is_dynamic) {
-            buffer->buffer = realloc(buffer->buffer, self_size + ot_size);
-        } else {
-            return false;
-        }
+
+    buffer_flat(buffer);
+    buffer_flat(other);
+
+    const uint32_t self_used = buffer_used(buffer);
+    const uint32_t other_used = buffer_used(other);
+    const uint32_t need_capacity = self_used + other_used + 1;
+
+    if (buffer->size < need_capacity) {
+        if (!buffer->is_dynamic) return false;
+        if (!buffer_realloc(buffer, need_capacity, true)) return false;
     }
 
-    buffer_expand(buffer);
-    buffer_expand(other);
-    memcpy(buffer->buffer + buffer->end, other->buffer, ot_size);
-    buffer->end = (buffer->end + ot_size) % buffer->size;
+    memcpy(buffer->buffer + self_used, other->buffer, other_used);
+    buffer->end = (self_used + other_used) % buffer->size; // 环形索引
+    buffer->start = 0;
+    
     buffer_free(other);
     return true;
+}
+
+static const char map[] = "0123456789ABCDEF";
+static inline uint8_t u32tohex(uint32_t value, char* hex) {
+    uint8_t len = 0;
+    char buf[8];
+    int8_t i = 7;
+    do {
+        buf[i--] = map[value & 0xf];    // big-endian
+        len += 1;
+    } while (value >>= 4);
+
+    // copy
+    while(i < 8) {
+        *(hex ++) = buf[i++];
+    }
+    return len;
 }

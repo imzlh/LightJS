@@ -667,6 +667,7 @@ static JSValue js_stdio_scandir(JSContext *ctx, JSValueConst self, int argc, JSV
         i++;
     }
 
+    closedir(dir);
     return arr;
 }
 
@@ -759,7 +760,7 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
         piped->size = fstat(fd, &st) == 0 ? st.st_size : -1;
         return pipe;
     }else{
-        return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, PIPE_BUF, JS_NULL);
+        return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, PIPE_BUF, NULL);
     }
 
     error:{

@@ -143,8 +143,7 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
     // 默认加载器
     JSValue func_val;
 
-    char* module_name_copied = strdup(module_name);
-    buf = (char*)LJS_tryGetJSFile(&buf_len, &module_name_copied);
+    buf = (char*)LJS_tryGetJSFile(&buf_len, (char**)&module_name);
     if (!buf){
         JS_ThrowReferenceError(ctx, "could not load module by name: %s",
                                    module_name);
@@ -153,7 +152,7 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
 
     compile: {
         /* compile the module */
-        func_val = JS_Eval(ctx, buf, buf_len, module_name_copied,
+        func_val = JS_Eval(ctx, buf, buf_len, module_name,
                            JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
         free(buf);
         if (JS_IsException(func_val))
@@ -163,10 +162,10 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
         m = JS_VALUE_GET_PTR(func_val);
         JSValue meta_obj = JS_GetImportMeta(ctx, m);
         JS_DefinePropertyValueStr(ctx, meta_obj, "name",
-            JS_NewString(ctx, module_name_copied),
+            JS_NewString(ctx, module_name),
             JS_PROP_C_W_E);
         if(!use_loader){
-            char* real_path = realpath(module_name_copied, NULL);
+            char* real_path = realpath(module_name, NULL);
             JS_DefinePropertyValueStr(ctx, meta_obj, "path",
                 JS_NewString(ctx, real_path),
                 JS_PROP_C_W_E);
@@ -432,7 +431,7 @@ void LJS_destroy_app(App* app) {
 
 
 // for worker thread
-static void worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* user_data){
+static int worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* user_data){
     App* app = (App*)user_data;
     uint64_t value;
     if(read(app -> worker -> efd_main2worker, &value, sizeof(uint64_t)) != sizeof(uint64_t)){
@@ -454,6 +453,8 @@ static void worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_siz
         }
         pthread_mutex_unlock(&app -> worker -> lock);
     }
+    
+    return EVCB_RET_DONE;
 }
 
 // for worker thread
@@ -475,10 +476,11 @@ static void worker_writeable_callback(EvFD* __, void* opaque){
 }
 
 // for main thread
-static void main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* opaque){
+static int main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* opaque){
     App* app = (App*)opaque;    // worker APP, not main!
     uint64_t value;
-    if(read(app -> worker -> efd_worker2main, &value, sizeof(uint64_t)) != sizeof(uint64_t)) return;
+    if(read(app -> worker -> efd_worker2main, &value, sizeof(uint64_t)) != sizeof(uint64_t))
+        return EVCB_RET_DONE;
         
     // read queue
     JSContext *ctx = app -> worker -> parent -> ctx;
@@ -496,6 +498,8 @@ static void main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size,
         }
         pthread_mutex_unlock(&app -> worker -> lock);
     }
+
+    return EVCB_RET_DONE;
 }
 
 // for main thread
@@ -565,7 +569,7 @@ static void LJS_worker_loop(App* app, JSValue func){
 
 void LJS_init_runtime(JSRuntime* rt){
     // Promise追踪
-    JS_SetHostPromiseRejectionTracker(rt, LJS_handle_promise_reject, NULL);
+    JS_SetHostPromiseRejectionTracker(rt, js_handle_promise_reject, NULL);
 
     // 初始化ES6模块
     JS_SetModuleLoaderFunc(rt, /* js_module_format */ NULL, js_module_loader, NULL);
@@ -615,6 +619,9 @@ void LJS_init_context(App* app, char** init_list){
             LJS_init_stdio(ctx);
         if(!init_list || in(init_list, "http"))
             LJS_init_http(ctx);
+
+        if(!init_list || in(init_list, "compress"))
+            LJS_init_compress(ctx);
     }
     if(!init_list || in(init_list, "console")) LJS_init_console(ctx);
     if(!init_list || in(init_list, "global")) LJS_init_global_helper(ctx);
@@ -772,114 +779,6 @@ static JSClassDef js_worker_def = {
     .finalizer = NULL,  // worker can run in background
 };
 
-// class Sandbox
-// 使用线程内JSContext隔离执行JS代码
-static thread_local JSClassID js_sandbox_class_id;
-
-static JSValue js_sandbox_eval(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
-    App* app = (App*)JS_GetOpaque(this_val, js_sandbox_class_id);
-    if(!app) return LJS_Throw(ctx, "this value invalid", NULL);
-
-    if(argc == 0){
-        return LJS_Throw(ctx, "eval requires at least one argument",
-            "Sandbox.eval(code: string, import_meta?: object): any | Promise<any>"
-        );
-    }
-
-    const char* code = JS_ToCString(ctx, argv[0]);
-    if(!code) return LJS_Throw(ctx, "code argument is not a string", NULL);
-    JSValue func;
-    JS_UpdateStackTop(JS_GetRuntime(ctx));
-    if(argc == 2 && JS_IsObject(argv[1])){
-        func = JS_Eval(ctx, code, strlen(code), "<eval>", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-        if(!JS_IsException(func) && JS_IsModule(func)){
-            // set import.meta
-            JSValue meta = JS_GetImportMeta(ctx, (JSModuleDef*)JS_VALUE_GET_PTR(func));
-            JS_CopyObject(ctx, argv[1], meta, 32);
-        }
-    }else{
-        func = JS_Eval(ctx, code, strlen(code), "<eval>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
-    }
-
-    if(JS_IsException(func)){
-        return JS_EXCEPTION;
-    }
-    JS_UpdateStackTop(JS_GetRuntime(ctx));
-    JSValue ret = JS_EvalFunction(ctx, func);
-    return ret;
-}
-
-static JSValue js_sandbox_get_context(JSContext* ctx, JSValueConst this_val){
-    App* app = (App*)JS_GetOpaque(this_val, js_sandbox_class_id);
-    if(!app) return LJS_Throw(ctx, "this value invalid", NULL);
-    return JS_GetGlobalObject(ctx);
-}
-
-static JSValue sandbox_func_proxy(JSContext* _ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValue* func_data){
-    JSContext* ctx = JS_VALUE_GET_PTR(func_data[0]);
-    JSValue real_func = func_data[magic];
-    return JS_Call(ctx, real_func, this_val, argc, argv);
-}
-
-static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
-    JSValue obj = JS_NewObjectClass(ctx, js_sandbox_class_id);
-
-    App* app = LJS_create_app(JS_GetRuntime(ctx), 0, NULL, false, true, NULL, NULL);
-    char* init_apps[32];
-    uint8_t init_apps_len = 0;
-    if(argc >= 1 && JS_IsObject(argv[0])){
-        JSValue init_apps_obj = JS_GetPropertyStr(ctx, argv[0], "init");
-        if(JS_IsArray(init_apps_obj)){
-            int64_t len;
-            if(JS_GetLength(ctx, init_apps_obj, &len)){
-                for(uint32_t i = 0; i < len; i++){
-                    JSValue val = JS_GetPropertyUint32(ctx, init_apps_obj, i);
-                    if(JS_IsString(val)){
-                        init_apps[init_apps_len++] = (char*)JS_ToCString(ctx, val);
-                    }
-                }
-            }
-            init_apps[init_apps_len] = '\0';
-        }
-
-        // module loader
-        JSValue loader = JS_GetPropertyStr(ctx, argv[0], "loader");
-        if(JS_IsFunction(ctx, loader)){
-        //     size_t len;
-        //     uint8_t* buf = JS_WriteObject(ctx, &len, loader, JS_WRITE_OBJ_BYTECODE);
-        //     if(buf){
-        //         app -> module_loader = JS_ReadObject(app -> ctx, buf, len, JS_READ_OBJ_BYTECODE);
-        //         js_free(ctx, buf);
-        //     }
-
-            app -> module_loader = JS_NewCFunctionData(
-                app -> ctx, sandbox_func_proxy, 1, 1,
-                1, (JSValue[]){ JS_MKPTR(JS_TAG_OBJECT, app -> ctx), loader }
-            );
-        }
-    }
-    
-    LJS_init_context(app, init_apps_len == 0 ? NULL : init_apps);
-    JS_SetOpaque(obj, app);
-    return obj;
-}
-
-static void js_sandbox_finalizer(JSRuntime* rt, JSValue val){
-    App* app = (App*)JS_GetOpaque(val, js_sandbox_class_id);
-    if(!app) return;
-    LJS_destroy_app(app);
-}
-
-static JSCFunctionListEntry js_sandbox_funcs[] = {
-    JS_CFUNC_DEF("eval", 1, js_sandbox_eval),
-    JS_CGETSET_DEF("context", js_sandbox_get_context, NULL)
-};
-
-static JSClassDef js_sandbox_def = {
-    "Sandbox",
-    .finalizer = js_sandbox_finalizer,
-};
-
 bool LJS_init_thread(JSContext* ctx){
     JSValue global_obj = JS_GetGlobalObject(ctx);
     JSRuntime* rt = JS_GetRuntime(ctx);
@@ -894,17 +793,6 @@ bool LJS_init_thread(JSContext* ctx){
     JSValue worker_ctor = JS_NewCFunction2(ctx, js_create_worker, "Worker", 1, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, worker_ctor, worker_proto);
     JS_SetPropertyStr(ctx, global_obj, "Worker", worker_ctor);
-
-    // sandbox
-    JS_NewClassID(rt, &js_sandbox_class_id);
-    if(-1 == JS_NewClass(rt, js_sandbox_class_id, &js_sandbox_def)) return false;
-    JSValue sandbox_proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, sandbox_proto, js_sandbox_funcs, countof(js_sandbox_funcs));
-    JS_SetClassProto(ctx, js_sandbox_class_id, sandbox_proto);
-
-    JSValue sandbox_ctor = JS_NewCFunction2(ctx, js_sandbox_constructor, "Sandbox", 1, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, sandbox_ctor, sandbox_proto);
-    JS_SetPropertyStr(ctx, global_obj, "Sandbox", sandbox_ctor);
     return true;
 }
 
@@ -936,7 +824,7 @@ static JSValue js_timer_delay(JSContext* ctx, JSValueConst this_val, int argc, J
     timer -> once = true;
 
     uint32_t delay_time;
-    if(delay_time == 0 || -1 == JS_ToUint32(ctx, &delay_time, argv[0])){
+    if(-1 == JS_ToUint32(ctx, &delay_time, argv[0]) || delay_time == 0){
         return LJS_Throw(ctx, "Timer.delay takes a non-zero delay_time", NULL);
     }
 

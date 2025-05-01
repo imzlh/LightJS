@@ -3,6 +3,7 @@
 
 type IModule = 'pipe' | 'socket' | 'process' | 'stdio' | 'console' | 'event' | 'module' | 'url' | 'timer' |
     /* ES6 features */ 'base' | 'date' | 'eval' | 'regexp' | 'json' | 'proxy' | 'mapset' | 'typedarray' | 'promise' | 'bigint' | 'weakmap' | 'performance';
+type TypedArray = Int8Array | Uint8Array | Uint8ClampedArray | Int16Array | Uint16Array | Int32Array | Uint32Array | Float32Array | Float64Array;
 
 declare class Event {
     type: string;
@@ -49,17 +50,15 @@ declare class Worker {
     terminate(): void;
 }
 
-declare class Sandbox {
-    constructor(opts?: {
-        loader?: (input: string) => string;
-        init: Array<IModule>;
-    })
+declare function fetch(url: string, options?: {
+    method?: string;
+    headers?: Record<string, string>;
+    keepalive?: boolean;
+    referer?: string;
+    host?: string;  // 当URL为unix或ip地址时，需要用于指定请求的Host头
+    body?: Uint8Array | U8Pipe | string;
+}): Promise<import('http').Response>;
 
-    eval(code: string, import_meta: Record<string, any>): Promise<any>;
-    eval(code: string): any;
-
-    get context(): typeof globalThis;
-}
 
 /**
  * URL
@@ -141,14 +140,24 @@ declare class Pipe<T>{
 declare class U8Pipe {
     static buffer_size: number;
 
-    constructor(mode: number, control: {
-        start(): any;
-        pull(): Promise<Uint8Array>;
-        write(data: Uint8Array): void;
-        close(): void;
-    });
+    /**
+     * PS: mode可以为undefined，默认依据control决定
+     * @param control 
+     * @param mode 
+     */
+    constructor(control: {
+        start?(): any;
+        pull?(): Promise<Uint8Array>;
+        write?(data: Uint8Array): void;
+        close?(): void;
+    }, mode?: number);
     write(data: Uint8Array): Promise<void>;
-    pipeTo(destination: Pipe<Uint8Array> | U8Pipe, callback?: (data: Uint8Array) => Uint8Array): void;
+    /**
+     * 向另一个U8Pipe写入数据，可选参数为过滤函数，接收到数据时调用，返回true则写入，否则丢弃
+     * @param destination 目标U8Pipe
+     * @param filter 过滤函数，修改data可以实现修改写入对方的流
+     */
+    pipeTo(destination: U8Pipe, filter?: (data: Uint8Array) => boolean): Promise<void>;
     close(): void;
     read(length?: number): Promise<Uint8Array | null>;
     readline(): Promise<Uint8Array | null>;
@@ -165,7 +174,8 @@ declare class U8Pipe {
     /**
      * @deprecated read、write方法已经实现了Promise接口，此方法不再建议使用
      */
-    flush(): void;
+    fflush(): void;
+    fseek(offset: number, whence: "start" | "current" | "end"): void;
 }
 
 interface ImportMeta {

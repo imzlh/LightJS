@@ -26,6 +26,7 @@
 
 import { exit, self, signals, stdin, stdout } from 'process';
 import { read, write } from 'stdio';
+import { Sandbox } from 'vm';
 
 /**
  * @type {Record<string, string>}
@@ -132,10 +133,6 @@ var utf8_val = 0;
 var term_cursor_x = 0;
 
 var content = new Sandbox();
-
-async function log(params) {
-    
-}
 
 function termInit() {
     var tab;
@@ -358,7 +355,7 @@ function update() {
         move_cursor(-ucs_length(cmd.substring(cursor_pos, last_cursor_pos)));
     }
     last_cursor_pos = cursor_pos;
-    stdout.flush(); // make output synchronous
+    stdout.fflush(); // make output synchronous
 }
 
 /**

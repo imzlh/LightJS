@@ -15,6 +15,9 @@ static inline void run_jobs(){
 #ifdef LJS_DEBUG
     printf("run_jobs\n");
 #endif
+
+    js_run_promise_jobs();  // thread-local jobs
+
     int res = 1;
     JSRuntime* rt = JS_GetRuntime(app -> ctx);
     JSContext* ectx;
@@ -27,6 +30,8 @@ static inline void run_jobs(){
         printf("JS_ExecutePendingJob: %d\n", res);
 #endif
     }
+
+    while(js_run_promise_jobs()){}  // run again if there are more jobs
 }
 
 static bool check_promise_resolved(void* opaque){
@@ -34,9 +39,9 @@ static bool check_promise_resolved(void* opaque){
     JSValue* prom = (JSValue*)opaque;
     JSPromiseStateEnum state = JS_PromiseState(app -> ctx, *prom);
     if(state == JS_PROMISE_FULFILLED){
-        if(JS_IsJobPending(JS_GetRuntime(app -> ctx)))
-            run_jobs();
-        return true;
+        run_jobs();
+        if(!JS_IsJobPending(JS_GetRuntime(app -> ctx)))
+            return true;
     }else if(state == JS_PROMISE_REJECTED){
         LJS_dump_error(app -> ctx, JS_PromiseResult(app -> ctx, *prom));
         return true;
@@ -168,7 +173,7 @@ int main(int argc, char **argv) {
     // app init
     app = LJS_create_app(runtime, 
         argc == optind ? 0 : argc - optind -1, argc == optind ? NULL : argv + optind +1, 
-        false, true, "<eval>", NULL
+        false, true, strdup(optind == argc ? get_current_dir_name() : argv[optind]), NULL
     );
     if(!app){
         printf("Failed to create app. Make sure you have enough memory.\n");
@@ -194,16 +199,12 @@ int main(int argc, char **argv) {
         goto run_evloop;
     }
 
-    char* script_path = argv[optind];
-
     uint32_t buf_len;
     uint8_t* buf;
     if(eval_code){
-        buf = (uint8_t*)script_path;
-        buf_len = strlen(script_path);
-        app -> script_path = "<eval>";
+        buf = (uint8_t*)app -> script_path;
+        buf_len = strlen(app -> script_path);
     }else{
-        app -> script_path = script_path;
         buf = LJS_tryGetJSFile(&buf_len, &app -> script_path);
         if(!buf){
             printf("Failed to load script file: %s\n", app -> script_path);
@@ -244,6 +245,6 @@ int main(int argc, char **argv) {
     JS_DupValue(app -> ctx, ret_val);
 run_evloop:
     LJS_evcore_run(check_promise_resolved, &ret_val);
-    LJS_destroy_app(app);
+    // LJS_destroy_app(app); // destroy app will cause SEGFAULT as <argv> is not able to free.
     return 0;
 }

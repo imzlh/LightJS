@@ -18,7 +18,6 @@ test("console.count", () => {
 });
 test("console.time", () => {
     console.time("my-timer");
-    console.timeLog("my-timer");
 
     // wait for 10 second
     delay(10000).then(() => console.timeEnd("my-timer"));

@@ -10,8 +10,17 @@
 #include "core.h"
 
 #include <ffi.h>
+#include <pthread.h>
+#include <signal.h>
+#include <threads.h>
+#include <setjmp.h>
 #include <dlfcn.h>
 #include <errno.h>
+
+#if defined(LJS_DEBUG) && defined(LJS_EXECINFO)
+// warn: not available in Alpine(musl)
+#include <execinfo.h>
+#endif
 
 #define DEF(name, flag) JS_PROP_INT32_DEF(#name, flag, JS_PROP_CONFIGURABLE)
 #define RB_MALLOC 1 << 9
@@ -44,6 +53,53 @@ enum ARG_GCFLAG {
     GC_JSALLOC,     // from js_malloc
     GC_TYPEDARRAY   // from JS_GetArrayBuffer
 };
+
+// for safety , capture SIGSEGV and SIGBUS to prevent crash
+pthread_mutex_t ffi_mutex;
+pthread_t running_thread;
+char* info;
+static thread_local jmp_buf jump_buf;
+
+static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
+    // generate error message
+    info = malloc(
+#ifdef LJS_DEBUG
+        128
+#else
+        1024 * 64
+#endif
+    );
+    void *fault_addr = _info->si_addr;
+    switch(sig){
+        case SIGSEGV: snprintf(info, 128, "Segmentation fault at %p", fault_addr); break;
+        case SIGBUS: snprintf(info, 128, "Bus error at %p", fault_addr); break;
+        case SIGFPE: snprintf(info, 128, "Floating point exception at %p", fault_addr); break;
+        case SIGILL: snprintf(info, 128, "Illegal instruction at %p", fault_addr); break;
+        case SIGTRAP: snprintf(info, 128, "Trace/breakpoint trap at %p", fault_addr); break;
+        case SIGABRT: snprintf(info, 128, "Aborted at %p", fault_addr); break;
+        default: snprintf(info, 128, "Unknown signal %d", sig); break;
+    }
+    
+#if defined(LJS_DEBUG) && defined(LJS_EXECINFO)
+    void* bt_buff[60];
+    int bt_len = backtrace(bt_buff, 60);
+    char** bt_str = backtrace_symbols(bt_buff, bt_len);
+    char* bt_msg = malloc(1024);
+    strcat(bt_msg, "Backtrace(if available):\n");
+    for(int i = 0; i < bt_len; i++){
+        strcat(bt_msg, bt_str[i]);
+        strcat(bt_msg, "\n");
+    }
+    free(bt_str);
+#endif
+
+    pthread_mutex_unlock(&ffi_mutex);
+    pthread_kill(running_thread, SIGUSR2);
+}
+
+static void inthread_sighandler(int sig){
+    longjmp(jump_buf, 1);    // jump to handle ffi error
+}
 
 static inline int32_t guess_type(JSContext *ctx, JSValueConst val){
     if(JS_IsUndefined(val) || JS_IsNull(val)){
@@ -127,7 +183,7 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
     }
 
     // init
-    JSValue ret_val = JS_EXCEPTION;
+    volatile JSValue ret_val = JS_EXCEPTION;
     uint32_t args_len = MAX(argc, len-2);
     ffi_type **arg_types = js_malloc(ctx, args_len * sizeof(ffi_type*));
     void **args = js_malloc(ctx, args_len * sizeof(void*));
@@ -314,8 +370,18 @@ error:
         LJS_Throw(ctx, "Failed to prepare cif", NULL);
         goto cleanup;
     }
-        
-    ffi_call(&cif, func, ret_value, (void**)args);
+
+    // jump 
+    if(setjmp(jump_buf)){
+        ret_val = LJS_Throw(ctx, "FFI Error: %s", NULL, info);
+        free(info);
+        goto cleanup;
+    }else{
+        // dangerous! start ffi call
+        pthread_mutex_lock(&ffi_mutex);
+        running_thread = pthread_self();
+        ffi_call(&cif, func, ret_value, (void**)args);
+    }
 
     // return value
     switch(ret_type_num){
@@ -368,7 +434,7 @@ static JSValue js_dlopen(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     // realpath
     char rpath[PATH_MAX];
     if(realpath(path, rpath) == NULL) {
-        return LJS_Throw(ctx, "Failed to resolve library path: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, "Failed to resolve path %s: %s", NULL, path, strerror(errno));
     }
 
     void *handle = dlopen(rpath, RTLD_LAZY | RTLD_GLOBAL);
@@ -386,11 +452,33 @@ const JSCFunctionListEntry js_ffi_funcs[] = {
     JS_CFUNC_DEF("dlopen", 0, js_dlopen),
     JS_OBJECT_DEF("types", js_ffi_types, countof(js_ffi_types), JS_PROP_CONFIGURABLE)
 };
+
 #else
 const JSCFunctionListEntry js_ffi_funcs[] = {};
 #endif
 
+bool __ffi_mutex_init = false;
 int init_ffi(JSContext *ctx, JSModuleDef *m) {
+    // signal
+    signal(SIGUSR2, inthread_sighandler);
+
+    // mutex
+    if(!__ffi_mutex_init){
+        pthread_mutex_init(&ffi_mutex, NULL);
+        struct sigaction sa = {
+            .sa_flags = SA_SIGINFO,
+            .sa_sigaction = sig_handler,
+            .sa_restorer = NULL
+        };
+        sigaction(SIGSEGV, &sa, NULL);
+        sigaction(SIGBUS, &sa, NULL);
+        sigaction(SIGILL, &sa, NULL);
+        sigaction(SIGABRT, &sa, NULL);
+        sigaction(SIGFPE, &sa, NULL);
+        sigaction(SIGTRAP, &sa, NULL);
+        __ffi_mutex_init = true;
+    }
+
     return JS_SetModuleExportList(ctx, m, js_ffi_funcs, countof(js_ffi_funcs));
 }
 

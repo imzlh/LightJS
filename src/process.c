@@ -37,37 +37,37 @@ struct ReactiveEnviron {
 };
 static thread_local JSClassID js_reactive_environ_class_id;
 static struct ReactiveEnviron* env = NULL;
-static pthread_mutex_t env_lock;
+static pthread_rwlock_t env_lock;
 
 static int js_re_get_prop_exists(JSContext *ctx, JSPropertyDescriptor *desc, JSValue obj, JSAtom prop){
-    pthread_mutex_lock(&env_lock);
+    pthread_rwlock_rdlock(&env_lock);
     const char* name = JS_AtomToCString(ctx, prop);
     for(size_t i = 0; i < env->env_count; i++){
         if(prop == env->env_names_atom[i] || strcmp(name, env->env_names[i]) == 0){
             desc->flags = JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE;
             desc->value = JS_NewString(ctx, env->env_values[i]);
-            pthread_mutex_unlock(&env_lock);
+            pthread_rwlock_unlock(&env_lock);
             return true;
         }
     }
-    pthread_mutex_unlock(&env_lock);
+    pthread_rwlock_unlock(&env_lock);
     return false;
 }
 
 static int js_re_get_prop_names(JSContext *ctx, JSPropertyEnum **ptab, uint32_t *plen, JSValue obj){
-    pthread_mutex_lock(&env_lock);
+    pthread_rwlock_rdlock(&env_lock);
     *ptab = js_malloc(ctx, env->env_count * sizeof(JSPropertyEnum));
     *plen = env->env_count;
     for(size_t i = 0; i < env->env_count; i++){
         (*ptab)[i].atom = env->env_names_atom[i];
         (*ptab)[i].is_enumerable = true;
     }
-    pthread_mutex_unlock(&env_lock);
+    pthread_rwlock_unlock(&env_lock);
     return 0;
 }
 
 static int js_re_del_prop(JSContext *ctx, JSValue obj, JSAtom prop){
-    pthread_mutex_lock(&env_lock);
+    pthread_rwlock_wrlock(&env_lock);
     const char* name = JS_AtomToCString(ctx, prop);
     for(size_t i = 0; i < env->env_count; i++){
         if(strcmp(name, env->env_names[i]) == 0){
@@ -83,12 +83,12 @@ static int js_re_del_prop(JSContext *ctx, JSValue obj, JSAtom prop){
             }
 
             unsetenv(name);
-            pthread_mutex_unlock(&env_lock);
+            pthread_rwlock_unlock(&env_lock);
             return true;
         }
     }
 
-    pthread_mutex_unlock(&env_lock);
+    pthread_rwlock_unlock(&env_lock);
     return false;
 }
 
@@ -109,7 +109,7 @@ static int js_re_set_own_prop(JSContext *ctx, JSValue this_obj, JSAtom prop, JSV
 // }
 
 static int js_re_set_prop(JSContext *ctx, JSValue obj, JSAtom atom, JSValue value, JSValue receiver, int flags){
-    pthread_mutex_lock(&env_lock);
+    pthread_rwlock_wrlock(&env_lock);
     const char* name = JS_AtomToCString(ctx, atom);
     for(size_t i = 0; i < env->env_count; i++){
         if(strcmp(name, env->env_names[i]) == 0){
@@ -117,7 +117,7 @@ static int js_re_set_prop(JSContext *ctx, JSValue obj, JSAtom atom, JSValue valu
             env->env_values[i] = strdup(JS_ToCString(ctx, value));
 
             setenv(name, env->env_values[i], true);
-            pthread_mutex_unlock(&env_lock);
+            pthread_rwlock_unlock(&env_lock);
             return true;
         }
     }
@@ -134,14 +134,18 @@ static int js_re_set_prop(JSContext *ctx, JSValue obj, JSAtom atom, JSValue valu
     env->env_names_atom[env->env_count] = atom;
     env->env_count++;
     setenv(name, value_str, true);
-    pthread_mutex_unlock(&env_lock);
+    pthread_rwlock_unlock(&env_lock);
     return true;
 }
 
+bool __env_lock_init = false;
 static JSValue js_create_reactive_environ(JSContext* ctx){
     if(!env){
-        if(!pthread_mutex_init(&env_lock, NULL)) return JS_EXCEPTION;
-        pthread_mutex_lock(&env_lock);
+        if(!__env_lock_init){
+            if(!pthread_rwlock_init(&env_lock, NULL)) return JS_EXCEPTION;
+            __env_lock_init = true;
+        }
+        pthread_rwlock_wrlock(&env_lock);
         env = js_malloc(ctx, sizeof(struct ReactiveEnviron));
         char** envp = environ;
 
@@ -167,7 +171,7 @@ static JSValue js_create_reactive_environ(JSContext* ctx){
             env->env_names[i][name_len] = '\0';
             env->env_names_atom[i] = JS_NewAtom(ctx, env->env_names[i]);
         }
-        pthread_mutex_unlock(&env_lock);
+        pthread_rwlock_unlock(&env_lock);
     }
     
     // create JS object
@@ -220,10 +224,10 @@ typedef struct {
     struct list_head list;
 } signal_data;
 static struct list_head signal_list;
-static pthread_mutex_t signal_lock;
+static pthread_rwlock_t signal_lock;
 
 static void js_signal_handler(int sig){
-    pthread_mutex_lock(&signal_lock);
+    pthread_rwlock_rdlock(&signal_lock);
     struct list_head *el, *el1;
     list_for_each_safe(el, el1, &signal_list){
         signal_data* data = list_entry(el, signal_data, list);
@@ -237,7 +241,7 @@ static void js_signal_handler(int sig){
             break;
         }
     }
-    pthread_mutex_unlock(&signal_lock);
+    pthread_rwlock_unlock(&signal_lock);
 }
 
 static JSValue js_set_signal(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
@@ -255,9 +259,9 @@ static JSValue js_set_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
     data->handler = JS_DupValue(ctx, argv[1]);
     data->ctx = ctx;
     data->sig = sig;
-    pthread_mutex_lock(&signal_lock);
+    pthread_rwlock_wrlock(&signal_lock);
     list_add_tail(&data -> list, &signal_list);
-    pthread_mutex_unlock(&signal_lock);
+    pthread_rwlock_unlock(&signal_lock);
 
     return JS_UNDEFINED;
 }
@@ -271,7 +275,7 @@ static JSValue js_del_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
     JSValue handler = argv[0];
 
     // 遍历signal表
-    pthread_mutex_lock(&signal_lock);
+    pthread_rwlock_wrlock(&signal_lock);
     struct list_head* el, *el1;
     list_for_each_safe(el, el1, &signal_list){
         signal_data* data = list_entry(el, signal_data, list);
@@ -287,7 +291,7 @@ static JSValue js_del_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
             }
         }
     }
-    pthread_mutex_unlock(&signal_lock);
+    pthread_rwlock_unlock(&signal_lock);
     return JS_FALSE;
 }
 
@@ -342,13 +346,16 @@ struct process_class {
     int pid;
     int16_t exit_code;
     int pty_fd;
+    JSValue onclose;
+    JSContext* ctx;
+
+    struct list_head link;
 };
+#define GET_PROC_OPAQUE struct process_class *obj = JS_GetOpaque(this_val, js_process_class_id); \
+    if(obj == NULL) return JS_EXCEPTION;
 
 static JSValue js_process_kill(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-    struct process_class *obj = JS_GetOpaque2(ctx, this_val, js_process_class_id);
-    if(obj == NULL){
-        return JS_ThrowTypeError(ctx, "Process object required");
-    }
+    GET_PROC_OPAQUE
     if(obj -> exit_code >= 0){
         return JS_ThrowTypeError(ctx, "Process is already exited");
     }
@@ -365,21 +372,17 @@ static JSValue js_process_kill(JSContext *ctx, JSValueConst this_val, int argc, 
 }
 
 static JSValue js_process_get_return_code(JSContext *ctx, JSValueConst this_val){
-    struct process_class *obj = JS_GetOpaque2(ctx, this_val, js_process_class_id);
-    if(obj == NULL) return JS_EXCEPTION;
+    GET_PROC_OPAQUE
     return JS_NewUint32(ctx, obj->exit_code);
 }
 
 static JSValue js_process_isrunning(JSContext *ctx, JSValueConst this_val){
-    struct process_class *obj = JS_GetOpaque2(ctx, this_val, js_process_class_id);
-    if(obj == NULL) return JS_EXCEPTION;
-
+    GET_PROC_OPAQUE
     return obj -> exit_code == -1 ? JS_TRUE : JS_FALSE;
 }
 
 static JSValue js_process_set_termsize(JSContext *ctx, JSValueConst this_val, JSValueConst set_value){
-    struct process_class *obj = JS_GetOpaque2(ctx, this_val, js_process_class_id);
-    if(obj == NULL) return JS_EXCEPTION;
+    GET_PROC_OPAQUE
     if(obj -> exit_code < 0) return JS_ThrowTypeError(ctx, "Process is not running");
 
     uint32_t rows, cols;
@@ -400,8 +403,7 @@ static JSValue js_process_set_termsize(JSContext *ctx, JSValueConst this_val, JS
 }
 
 static JSValue js_process_get_termsize(JSContext *ctx, JSValueConst this_val){
-    struct process_class *obj = JS_GetOpaque2(ctx, this_val, js_process_class_id);
-    if(obj == NULL) return JS_EXCEPTION;
+    GET_PROC_OPAQUE
     if(obj -> exit_code < 0) return JS_ThrowTypeError(ctx, "Process is not running");
 
     struct winsize size;
@@ -412,8 +414,7 @@ static JSValue js_process_get_termsize(JSContext *ctx, JSValueConst this_val){
 }
 
 static JSValue js_process_get_title(JSContext *ctx, JSValueConst this_val){
-    struct process_class *obj = JS_GetOpaque2(ctx, this_val, js_process_class_id);
-    if(obj == NULL) return JS_EXCEPTION;
+    GET_PROC_OPAQUE
     if(obj -> exit_code < 0) return JS_ThrowTypeError(ctx, "Process is not running");
 
     char title[1024];
@@ -423,45 +424,28 @@ static JSValue js_process_get_title(JSContext *ctx, JSValueConst this_val){
     return JS_NewString(ctx, title);
 }
 
-static void js_process_finalizer(JSRuntime* rt, JSValue val){
-    struct process_class *obj = JS_GetOpaque(val, js_process_class_id);
-    if(obj == NULL) return;
+static JSValue js_process_get_pid(JSContext* ctx, JSValueConst this_val){
+    GET_PROC_OPAQUE
+    return JS_NewInt32(ctx, obj->pid);
+}
+
+static void js_process_finalizer(JSRuntime* rt, JSValue this_val){
+    struct process_class *obj = JS_GetOpaque(this_val, js_process_class_id);
     if(obj -> exit_code < 0){
         close(obj->pty_fd);
     }
     js_free_rt(rt, obj);
 }
 
-static JSValue pipe_close_cb(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValue *func_data){
-    struct process_class *obj = JS_VALUE_GET_PTR(func_data[0]);
-    if(obj == NULL) return JS_UNDEFINED;
-    
-    // waitpid获取退出状态
-    int status;
-    pid_t pid = waitpid(obj->pid, &status, 0);
-    if(pid == -1){
-        perror("waitpid");
-        obj -> exit_code = 255;
-        return JS_UNDEFINED;
-    }
-    if(WIFEXITED(status)){
-        obj->exit_code = WEXITSTATUS(status);
-    }else if(WIFSIGNALED(status)){
-        obj->exit_code = -WTERMSIG(status);
-    }else{
-        obj->exit_code = -1;
-    }
-
-    return JS_UNDEFINED;
-}
-
 static inline JSValue create_pipe(JSContext* ctx, struct process_class* obj){
-    JSValue cbarr[1] = { JS_MKPTR(JS_TAG_OBJECT, obj) };
-    JSValue callback = JS_NewCFunctionData(ctx, pipe_close_cb, 0, 0, 1, cbarr);
-    JSValue pipe = LJS_NewFDPipe(ctx, obj->pty_fd, PIPE_READ | PIPE_WRITE, PIPE_BUF, callback);
+    EvFD* evfd;
+    JSValue pipe = LJS_NewFDPipe(ctx, obj->pty_fd, PIPE_READ | PIPE_WRITE, PIPE_BUF, &evfd);
 
     return pipe;
 }
+
+struct list_head process_list;
+pthread_rwlock_t process_lock;
 
 static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
     struct process_class *obj = js_malloc(ctx, sizeof(struct process_class));
@@ -495,37 +479,59 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     }
 
     // 参数2: env, inheritPipe, cwd
-    JSValue opts;
-    if(argc > 1){
-        opts = argv[1];
-    }
+    JSValue opts = argc > 1 ? argv[1] : JS_NULL;
+    bool inherit = JS_ToBool(ctx, JS_GetPropertyStr(ctx, opts, "inheritPipe"));
+
+    // onclose
+    JSValue promise_cb[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, promise_cb);
+    JS_SetPropertyStr(ctx, class_obj, "onclose", promise);
 
     // 创建pty
-    int master_fd, slave_fd;
-    if (openpty(&master_fd, &slave_fd, NULL, NULL, NULL) == -1) {
-        LJS_Throw(ctx, "Failed to create pty: %s", NULL, strerror(errno));
-        goto fail;
+    int master_fd = -1, slave_fd;
+    if(!inherit){
+        if (openpty(&master_fd, &slave_fd, NULL, NULL, NULL) == -1) {
+            LJS_Throw(ctx, "Failed to create pty: %s", NULL, strerror(errno));
+            goto fail;
+        }
     }
+
+    // 加入链表
+    close(slave_fd);
+    obj->exit_code = -1;
+    obj->pty_fd = master_fd;
+    obj->ctx = ctx;
+    obj->onclose = promise_cb[1];
+    JS_FreeValue(ctx, promise_cb[0]);
+    pthread_rwlock_wrlock(&process_lock);
+    list_add(&obj->link, &process_list);
+    pthread_rwlock_unlock(&process_lock);
 
     // 创建进程
     pid_t pid = fork();
     if (pid == -1) {
         LJS_Throw(ctx, "Failed to create process: %s", NULL, strerror(errno));
+        list_del(&obj->link);
+        close(master_fd);
         goto fail;
     } else if (pid == 0) {
         // 子进程
-        close(master_fd);
-        if(!JS_IsEqual(ctx, JS_GetPropertyStr(ctx, opts, "inheritPipe"), JS_TRUE)){
-            // 将子进程的终端设置为从设备
+        if(!inherit){
+            close(master_fd);
             setsid();
             ioctl(slave_fd, TIOCSCTTY, NULL);
-            dup2(slave_fd, 0);
-            dup2(slave_fd, 1);
-            dup2(slave_fd, 2);
+            dup2(slave_fd, STDIN_FILENO);
+            dup2(slave_fd, STDOUT_FILENO);
+            dup2(slave_fd, STDERR_FILENO);
+            setbuf(stdin, NULL);
+            setbuf(stdout, NULL);
+            setbuf(stderr, NULL);
+            close(slave_fd);
+#ifdef LJS_DEBUG
+            printf("Child process: %d with pty\n", getpid());
+#endif
         }
         
-        close(slave_fd);
-
         // 初始化环境变量
         if(argc > 1){
             JSValue envs = JS_GetPropertyStr(ctx, opts, "env");
@@ -565,22 +571,43 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
         }
         js_free(ctx, _argv);
         exit(127);
-    } else {
-        // 父进程
-        close(slave_fd);
-        obj->pid = pid;
-        obj->exit_code = -1;
-        obj->pty_fd= master_fd;
+    }else{
+        obj -> pid = pid;
     }
 
-    JS_SetPropertyStr(ctx, class_obj, "pipe", create_pipe(ctx, obj));
-    JS_SetOpaque(new_target, obj);
+    if(!inherit)
+        JS_SetPropertyStr(ctx, class_obj, "pipe", create_pipe(ctx, obj));
+    JS_SetOpaque(class_obj, obj);
     return class_obj;
 
 fail:
     js_free(ctx, obj);
     JS_FreeValue(ctx, class_obj);
+    JS_Call(ctx, promise_cb[1], JS_UNDEFINED, 0, NULL);
+    JS_FreeValue(ctx, promise_cb[1]);
+    JS_FreeValue(ctx, promise_cb[0]);
     return JS_EXCEPTION;
+}
+
+// capture signal
+void sigchild_handle(int sig){
+    pthread_rwlock_rdlock(&process_lock);
+    struct list_head* el, *el1;
+    list_for_each_safe(el, el1, &process_list){
+        struct process_class* obj = list_entry(el, struct process_class, link);
+        // waitpid?
+        int exitcode;
+        if(waitpid(obj -> pid, &exitcode, WNOHANG) == 0){
+            if(WIFEXITED(exitcode)) {
+                // close
+                JS_Call(obj -> ctx, obj -> onclose, JS_UNDEFINED, 0, NULL);
+                obj -> exit_code = WEXITSTATUS(exitcode);
+                JS_FreeValue(obj -> ctx, obj -> onclose);
+                close(obj -> pty_fd);
+                list_del(&obj -> link);
+            }
+        }
+    }
 }
 
 static const JSCFunctionListEntry js_process_proto_funcs[] = {
@@ -589,6 +616,7 @@ static const JSCFunctionListEntry js_process_proto_funcs[] = {
     JS_CGETSET_DEF("alive", js_process_isrunning, NULL),
     JS_CGETSET_DEF("size", js_process_get_termsize, js_process_set_termsize),
     JS_CGETSET_DEF("title", js_process_get_title, NULL),
+    JS_CGETSET_DEF("pid", js_process_get_pid, NULL)
 };
 
 static const JSCFunctionListEntry js_process_signals[] = {
@@ -689,10 +717,17 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
     JS_SetPropertyFunctionList(ctx, signals, js_process_signals, countof(js_process_signals));
     JS_SetModuleExport(ctx, m, "signals", signals);
 
+    // set STDIN
+    // struct termios tty;
+    // tcgetattr(STDIN_FILENO, &tty);
+    // tty.c_iflag &= ~(ICRNL | INLCR | ECHO | ICANON);    // 禁止 CR -> LF 转换
+    // tty.c_oflag &= ~(OPOST | ONLCR);                    // 禁止输出时添加 CR
+    // tcsetattr(STDIN_FILENO, TCSANOW, &tty);
+
     // stdin, stdout, stderr
-    JSValue stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, PIPE_BUF, JS_NULL),
-        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, PIPE_BUF, JS_NULL),
-        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, PIPE_BUF, JS_NULL);
+    JSValue stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, PIPE_BUF, NULL),
+        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, PIPE_BUF, NULL),
+        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, PIPE_BUF, NULL);
 
     JS_SetModuleExport(ctx, m, "stdin", stdin_p);
     JS_SetModuleExport(ctx, m, "stdout", stdout_p);
@@ -707,6 +742,7 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
     return 0;
 }
 
+bool __signal_lock_init = false;
 bool LJS_init_process(JSContext* ctx,
     char* _entry, uint32_t _argc, char** _argv
 ){
@@ -752,8 +788,14 @@ bool LJS_init_process(JSContext* ctx,
     JS_AddModuleExport(ctx, m, "exit");
 
     // signal
-    init_list_head(&signal_list);
-    JS_AddModuleExport(ctx, m, "signals");
+    if(!__signal_lock_init){
+        init_list_head(&signal_list);
+        JS_AddModuleExport(ctx, m, "signals");
+        init_list_head(&process_list);
+        pthread_rwlock_init(&process_lock, NULL);
+        signal(SIGCHLD, sigchild_handle);
+        __signal_lock_init = true;
+    }
 
     // stdin/out/err
     JS_AddModuleExport(ctx, m, "stdin");

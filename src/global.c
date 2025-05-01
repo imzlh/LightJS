@@ -1,3 +1,8 @@
+/**
+ * JS Global Object & functions
+ * & LightJS core utils
+ */
+
 #include "../engine/quickjs.h"
 #include "core.h"
 
@@ -5,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <threads.h>
+#include <assert.h>
 #include <sys/stat.h>
 
 typedef struct {
@@ -487,13 +493,220 @@ const JSCFunctionListEntry js_vm_funcs[] = {
     JS_CFUNC_DEF("compile", 1, js_vm_compile),
 };
 
+// class Sandbox
+// 使用线程内JSContext隔离执行JS代码
+static thread_local JSClassID js_sandbox_class_id;
+
+static JSValue js_sandbox_eval(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    App* app = (App*)JS_GetOpaque(this_val, js_sandbox_class_id);
+    if(!app) return LJS_Throw(ctx, "this value invalid", NULL);
+
+    if(argc == 0){
+        return LJS_Throw(ctx, "eval requires at least one argument",
+            "Sandbox.eval(code: string, import_meta?: object): any | Promise<any>"
+        );
+    }
+
+    const char* code = JS_ToCString(ctx, argv[0]);
+    if(!code) return LJS_Throw(ctx, "code argument is not a string", NULL);
+    JSValue func;
+    JS_UpdateStackTop(JS_GetRuntime(ctx));
+    if(argc == 2 && JS_IsObject(argv[1])){
+        func = JS_Eval(ctx, code, strlen(code), "<eval>", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        if(!JS_IsException(func) && JS_IsModule(func)){
+            // set import.meta
+            JSValue meta = JS_GetImportMeta(ctx, (JSModuleDef*)JS_VALUE_GET_PTR(func));
+            JS_CopyObject(ctx, argv[1], meta, 32);
+        }
+    }else{
+        func = JS_Eval(ctx, code, strlen(code), "<eval>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+    }
+
+    if(JS_IsException(func)){
+        return JS_EXCEPTION;
+    }
+    JS_UpdateStackTop(JS_GetRuntime(ctx));
+    JSValue ret = JS_EvalFunction(ctx, func);
+    return ret;
+}
+
+static JSValue js_sandbox_get_context(JSContext* ctx, JSValueConst this_val){
+    App* app = (App*)JS_GetOpaque(this_val, js_sandbox_class_id);
+    if(!app) return LJS_Throw(ctx, "this value invalid", NULL);
+    return JS_GetGlobalObject(ctx);
+}
+
+static JSValue sandbox_func_proxy(JSContext* _ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValue* func_data){
+    JSContext* ctx = JS_VALUE_GET_PTR(func_data[0]);
+    JSValue real_func = func_data[magic];
+    return JS_Call(ctx, real_func, this_val, argc, argv);
+}
+
+static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
+    JSValue obj = JS_NewObjectClass(ctx, js_sandbox_class_id);
+
+    App* app = LJS_create_app(JS_GetRuntime(ctx), 0, NULL, false, true, NULL, NULL);
+    char* init_apps[32];
+    uint8_t init_apps_len = 0;
+    if(argc >= 1 && JS_IsObject(argv[0])){
+        JSValue init_apps_obj = JS_GetPropertyStr(ctx, argv[0], "init");
+        if(JS_IsArray(init_apps_obj)){
+            int64_t len;
+            if(JS_GetLength(ctx, init_apps_obj, &len)){
+                for(uint32_t i = 0; i < len; i++){
+                    JSValue val = JS_GetPropertyUint32(ctx, init_apps_obj, i);
+                    if(JS_IsString(val)){
+                        init_apps[init_apps_len++] = (char*)JS_ToCString(ctx, val);
+                    }
+                }
+            }
+            init_apps[init_apps_len] = '\0';
+        }
+
+        // module loader
+        JSValue loader = JS_GetPropertyStr(ctx, argv[0], "loader");
+        if(JS_IsFunction(ctx, loader)){
+        //     size_t len;
+        //     uint8_t* buf = JS_WriteObject(ctx, &len, loader, JS_WRITE_OBJ_BYTECODE);
+        //     if(buf){
+        //         app -> module_loader = JS_ReadObject(app -> ctx, buf, len, JS_READ_OBJ_BYTECODE);
+        //         js_free(ctx, buf);
+        //     }
+
+            app -> module_loader = JS_NewCFunctionData(
+                app -> ctx, sandbox_func_proxy, 1, 1,
+                1, (JSValue[]){ JS_MKPTR(JS_TAG_OBJECT, app -> ctx), loader }
+            );
+        }
+    }
+    
+    LJS_init_context(app, init_apps_len == 0 ? NULL : init_apps);
+    JS_SetOpaque(obj, app);
+    return obj;
+}
+
+static void js_sandbox_finalizer(JSRuntime* rt, JSValue val){
+    App* app = (App*)JS_GetOpaque(val, js_sandbox_class_id);
+    if(!app) return;
+    LJS_destroy_app(app);
+}
+
+static JSCFunctionListEntry js_sandbox_funcs[] = {
+    JS_CFUNC_DEF("eval", 1, js_sandbox_eval),
+    JS_CGETSET_DEF("context", js_sandbox_get_context, NULL)
+};
+
+static JSClassDef js_sandbox_def = {
+    "Sandbox",
+    .finalizer = js_sandbox_finalizer,
+};
+
 static int vm_init(JSContext *ctx, JSModuleDef *m) {
-    return JS_SetModuleExportList(ctx, m, js_vm_funcs, countof(js_vm_funcs));
-    // return 0;
+    JS_SetModuleExportList(ctx, m, js_vm_funcs, countof(js_vm_funcs));
+
+    JSValue sandbox_ctor = JS_NewCFunction2(ctx, js_sandbox_constructor, "Sandbox", 1, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, sandbox_ctor, JS_GetClassProto(ctx, js_sandbox_class_id));
+    JS_SetModuleExport(ctx, m, "Sandbox", sandbox_ctor);
+    return 0;
 }
 
 bool LJS_init_vm(JSContext *ctx) {
     JSModuleDef* m = JS_NewCModule(ctx, "vm", vm_init);
     if (!m) return false;
+
+    JS_NewClassID(JS_GetRuntime(ctx), &js_sandbox_class_id);
+    if(-1 == JS_NewClass(JS_GetRuntime(ctx), js_sandbox_class_id, &js_sandbox_def)) return false;
+    JSValue sandbox_proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, sandbox_proto, js_sandbox_funcs, countof(js_sandbox_funcs));
+    JS_SetClassProto(ctx, js_sandbox_class_id, sandbox_proto);
+    JS_AddModuleExport(ctx, m, "Sandbox");
+
     return JS_AddModuleExportList(ctx, m, js_vm_funcs, countof(js_vm_funcs));
+}
+
+// ================ promise loop ==============
+struct promise_data {
+    struct list_head list;
+    JSValue promise;
+    JSContext* ctx;
+
+    JSPromiseCallback callback;
+    void* opaque;
+};
+
+static thread_local struct list_head promise_jobs = {NULL, NULL};
+
+int js_run_promise_jobs(){
+    if(promise_jobs.prev == NULL){
+        init_list_head(&promise_jobs);
+        return 0;
+    }
+    if(list_empty(&promise_jobs)) return 0;
+    int count = 0;
+    struct list_head *cur, *tmp;
+    list_for_each_safe(cur, tmp, &promise_jobs){
+        struct promise_data* data = list_entry(cur, struct promise_data, list);
+        JSPromiseStateEnum res = JS_PromiseState(data -> ctx, data -> promise);
+        if(res != JS_PROMISE_PENDING){
+            const bool error = res == JS_PROMISE_REJECTED;
+            if(error) JS_PromiseHandleError(data -> ctx, data -> promise);    // catch()
+            data -> callback(
+                data -> ctx, error, 
+                JS_PromiseResult(data -> ctx, data -> promise),
+                data -> opaque
+            );
+            list_del(cur);
+            JS_FreeValue(data -> ctx, data -> promise);
+            free(data);
+            count ++;
+        }
+    }
+    return count;
+}
+
+// return true if promise has been resolved or rejected
+bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback callback, void* opaque){
+    int state = JS_PromiseState(ctx, promise);
+    if(state != JS_PROMISE_PENDING){
+        const bool error = state == -1 ? JS_IsException(promise) : state == JS_PROMISE_REJECTED;
+        if(error) JS_PromiseHandleError(ctx, promise);  // make the promise auto-catched
+        callback(ctx, error, JS_PromiseResult(ctx, promise), opaque);
+        JS_FreeValue(ctx, promise);
+        return true;
+    }
+
+    struct promise_data* data = (struct promise_data*)malloc(sizeof(struct promise_data));
+    data -> promise = JS_DupValue(ctx, promise);
+    data -> ctx = ctx;
+    data -> callback = callback;
+    data -> opaque = opaque;
+    list_add_tail(&data -> list, &promise_jobs);
+    return false;
+}
+
+// static void handle_promise(JSContext *ctx, bool is_error, JSValue reason, void *opaque) {
+//     assert(is_error);
+//     JSValue promise = ((struct JSValueProxy*)opaque) -> val;
+//     if(!JS_PromiseIsHandled(ctx, promise)){
+//         fprintf(stderr, "Uncaught (in promise) ");
+//         LJS_dump_error(ctx, reason);
+//     }
+// }
+
+void js_handle_promise_reject(
+    JSContext *ctx, JSValue promise,
+    JSValue reason,
+    bool is_handled, void *opaque
+){
+    if (!is_handled){
+        // force next_tick
+        // struct promise_data* data = (struct promise_data*)malloc(sizeof(struct promise_data));
+        // data -> promise = JS_DupValue(ctx, promise);
+        // data -> ctx = ctx;
+        // data -> callback = handle_promise;
+        // data -> opaque = LJS_NewJSValueProxy(ctx, promise);
+        // list_add_tail(&data -> list, &promise_jobs);
+        fprintf(stderr, "Uncaught (in promise) ");
+        LJS_dump_error(ctx, reason);
+    }
 }

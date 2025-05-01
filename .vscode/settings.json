@@ -132,7 +132,10 @@
         "error.h": "c",
         "stdatomic.h": "c",
         "ffi.h": "c",
-        "lrepl.h": "c"
+        "lrepl.h": "c",
+        "setjmp.h": "c",
+        "alltypes.h": "c",
+        "quickjs-opcode.h": "c"
     },
     "C_Cpp.errorSquiggles": "enabled"
 }

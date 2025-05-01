@@ -12,8 +12,10 @@ declare module 'process'{
         readonly pid: number;
         readonly code: number;
         readonly title: string;
-        readonly pipe: U8Pipe;
+        readonly pipe?: U8Pipe; // undefined if interitPipe
         size: [number, number];
+
+        readonly onclose: Promise<void>;
     }
 
     const self: {

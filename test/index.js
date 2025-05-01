@@ -21,7 +21,7 @@ globalThis.test = async function(name, assert_func){
         success = false;
     }
     (success ? console.log : console.error)('Try', name, 
-        // success ? 'succeed' : ('error:' + error.name + '\n' + ' '.repeat(4) + error.message + '\n' + error.stack)
+        success ? 'succeed' : ('error:' + error.name + '\n' + ' '.repeat(4) + error.message + '\n' + error.stack)
     )
     success || console.error(error);
 }
@@ -87,7 +87,7 @@ globalThis.isEqual = function(value, other) {
     return true;
 }
 
-if(!import.meta.path || self.entry == import.meta.path)(async function(){
+if(!import.meta.path || self.entry == import.meta.path){
     const file = self.argv[0];
     if(!file){
         throw new Error('Expect an arg to run test');
@@ -108,4 +108,4 @@ if(!import.meta.path || self.entry == import.meta.path)(async function(){
     }catch(e){
         console.error('Could not load test:' + file, e)
     }
-})();
+}

@@ -92,7 +92,7 @@ if(CMAKE_BUILD_TYPE MATCHES "Debug")
     add_compile_options(-O0)
     xcheck_add_c_compiler_flag(-ggdb3)
     xcheck_add_c_compiler_flag(-fno-omit-frame-pointer)
-    # add_compile_definitions(LJS_DEBUG)
+    add_compile_definitions(LJS_DEBUG)
 endif()
 
 macro(xoption OPTION_NAME OPTION_TEXT OPTION_DEFAULT)
@@ -200,6 +200,7 @@ set(ljs_sources
     engine/libregexp.c
     engine/libunicode.c
     engine/quickjs.c
+    engine/xsum.c # add in QuickJS-NG v0.9.1
     ${ljs_core}
 )
 
@@ -242,6 +243,22 @@ if(LIBFFI_LIBRARIES)
     list(APPEND ljs_libs ffi)
     list(APPEND ljs_libs dl)
     add_compile_options(-Wl,--export-dynamic)
+endif()
+
+#zlib
+find_library(ZLIB_LIBRARIES z)
+if(ZLIB_LIBRARIES)
+    message(STATUS "Building with zlib support")
+    add_compile_definitions(LJS_ZLIB)
+    list(APPEND ljs_libs z)
+endif()
+
+#libexecinfo
+find_library(LIBEXECINFO_LIBRARIES execinfo)
+if(LIBEXECINFO_LIBRARIES)
+    message(STATUS "Building with libexecinfo support")
+    add_compile_definitions(LJS_LIBEXECINFO)
+    list(APPEND ljs_libs execinfo)
 endif()
 
 add_library(ljs ${ljs_sources})

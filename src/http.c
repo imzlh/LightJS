@@ -152,10 +152,14 @@ static URL_data *default_url;
 
 /**
  * 解析URL
- * 严重警告：请确保url深拷贝，释放会导致空指针错误
+ * 务必使用memset(url_struct, 0, sizeof(URL_data))初始化url_struct
  */
-bool LJS_parse_url(char *url, URL_data *url_struct, URL_data *base){
-    if (strlen(url) <= 1){
+bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base){
+    if (strlen(_url) <= 1){
+        return false;
+    }
+    char* url = url_struct -> source_str = strdup(_url);
+    if(!url){
         return false;
     }
 
@@ -166,6 +170,7 @@ bool LJS_parse_url(char *url, URL_data *url_struct, URL_data *base){
             if(default_url == NULL){
                 return false;
             }
+            memset(default_url, 0, sizeof(URL_data));
         }
         base = default_url;
     }
@@ -286,7 +291,13 @@ bool LJS_parse_url(char *url, URL_data *url_struct, URL_data *base){
             *pos2 = '\0';
             url_struct -> hash = pos2 + 1;
         }
-        url_struct -> path = LJS_resolve_path(url, NULL);
+        // copy path
+        int urlen = strlen(url) + 1;
+        char* path = malloc(urlen);
+        *path = '/';
+        memcpy(path + 1, url, urlen);
+        url_struct -> path = LJS_resolve_path(path, base -> path);
+        free(path);
     }
     return true;
 }
@@ -297,6 +308,7 @@ void LJS_free_url(URL_data *url_struct){
         free(url_struct -> query_string);
     }
     free(url_struct -> path);
+    free(url_struct -> source_str);
 }
 
 char* LJS_format_url(URL_data *url_struct){
@@ -521,6 +533,7 @@ static inline void init_http_data(HTTP_data *data){
     data -> chunked = false;
     data -> content_length = 0;
     data -> state = HTTP_INIT;
+    data -> __read_all = false;
 }
 
 static inline void str_trim(char* str){
@@ -574,13 +587,12 @@ static inline char* find_header(HTTP_data *data, const char* name){
     return NULL;
 }
 
-static inline char* strtoupper(char* str){
-    char* p = str;
-    while (*p != '\0'){
-        *p = toupper(*p);
-        p++;
+static inline void strtoupper(char* str){
+    while (*str != '\0'){
+        if('a' <= *str && *str <= 'z')
+            *str = toupper(*str);
+        str ++;
     }
-    return str;
 }
 
 static inline char* strtolower(char* str){
@@ -592,10 +604,76 @@ static inline char* strtolower(char* str){
     return str;
 }
 
-static void parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, void* userdata){
+#define COPY_BUF(var, buf, len) uint8_t* var = malloc(len); memcpy(var, buf, len);
+
+// predef
+static int parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len, void* user_data);
+
+// http chunk
+static int parse_evloop_chunk_callback(EvFD* evfd, uint8_t* chunk_data, uint32_t len, void* user_data){
+    HTTP_data *data = user_data;
+    if (data->state == HTTP_BODY && data->chunked){
+        data -> cb(data, chunk_data, len, data -> userdata);
+        data -> content_read += len;
+    }
+
+    free(chunk_data);
+    
+    if(data -> __read_all){
+        uint8_t* buf = malloc(BUFFER_SIZE);
+        LJS_evfd_readline(evfd, BUFFER_SIZE, buf, parse_evloop_body_callback, data);
+    }
+    return EVCB_RET_DONE;
+}
+
+// body: read once
+static int parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len, void* user_data){
+    HTTP_data *data = user_data;
+    if (data->state != HTTP_BODY) abort();
+    char* line_data = (char*)buffer;
+    if (data->chunked) {
+        // 处理chunked编码
+        str_trim(line_data);
+        uint32_t chunk_size = hex2int(line_data);
+        if (chunk_size == 0) goto done;
+
+        // chunk read
+        uint8_t* buf = malloc(chunk_size);
+        LJS_evfd_readsize(evfd, chunk_size, buf, parse_evloop_chunk_callback, data);
+
+        free(line_data);
+        return EVCB_RET_DONE;
+    }else {
+        // 读取fd
+        COPY_BUF(databuf, buffer, len);
+        data->content_read += len;
+        data->cb(data, databuf, len, data->userdata);
+        if (data->content_read >= data->content_length)
+            goto done;
+
+        if(data -> __read_all){
+            goto end;   // continue read
+        }
+
+        return EVCB_RET_DONE;
+    }
+
+    return EVCB_RET_DONE;
+
+end:
+    return EVCB_RET_CONTINUE;   // 继续读取
+
+done:
+    data->state = HTTP_DONE;
+    data->cb(data, NULL, 0, data->userdata);
+    free(buffer);
+    return EVCB_RET_DONE;
+}
+
+// main
+static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, void* userdata){
     HTTP_data *data = userdata;
     char* line_data = (char*)_line_data;
-    line_data[len] = '\0';
     // 是第一行
     if (data->state == HTTP_INIT){
         // 找空格解析参数
@@ -618,13 +696,14 @@ static void parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len,
 
         // GET / HTTP/1.1
         if (data->is_client){
-            data->method = strdup(strtoupper (param1));
+            strtoupper(param1);
+            data->method = strdup(param1);
             data->path = strdup(param2);
             data->version = parse_http_version (param3);
             if (data->version < 1.0){
                 goto error;
             }
-            // HTTP/1.1 200 OK
+        // HTTP/1.1 200 OK
         }else{
             data->version = parse_http_version (param1);
             data->status = atoi (param2);
@@ -634,12 +713,10 @@ static void parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len,
         if (line_data[0] == '\0'){
             if (strcmp (find_header (data, "Transfer-Encoding"), "chunked") == 0){
                 data->chunked = true;
-                data->state = HTTP_BODY;
             }
-            if (data->content_length){
-                data->state = HTTP_BODY;
-            }
-            return;
+            data->state = HTTP_BODY;
+            free(line_data);
+            return EVCB_RET_DONE;
         }
 
         char *colon = strchr (line_data, ':');
@@ -660,59 +737,14 @@ static void parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len,
         }
     }
 
-    uint8_t *buffer = malloc (BUFFER_SIZE);
-    LJS_evfd_readline (data -> fd, BUFFER_SIZE, buffer, parse_evloop_callback, data);
-    free(buffer);
-    return;
+
+    return EVCB_RET_CONTINUE;
 
     error:{
         data->state = HTTP_ERROR;
-        close (LJS_evfd_getfd(evfd, NULL));
-        return;
-    }
-}
-
-// 提前定义
-static void parse_evloop_body_callback(EvFD* evfd, uint8_t* line_data, uint32_t len, void* user_data);
-static void parse_evloop_chunk_callback(EvFD* evfd, uint8_t* chunk_data, uint32_t len, void* user_data);
-
-static void parse_evloop_chunk_callback(EvFD* evfd, uint8_t* chunk_data, uint32_t len, void* user_data){
-    HTTP_data *data = user_data;
-    if (data->state == HTTP_BODY && data->chunked){
-        data -> cb(data, chunk_data, len, data -> userdata);
-        data -> content_read += len;
-        uint8_t *buffer = malloc(BUFFER_SIZE);
-        LJS_evfd_readline(data -> fd, BUFFER_SIZE, buffer, parse_evloop_body_callback, data);
-    }
-}
-
-static void parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len, void* user_data){
-    HTTP_data *data = user_data;
-    if (data->state != HTTP_BODY)
-        return;
-    char* line_data = (char*)buffer;
-    if (data->chunked){
-        // 处理chunked编码
-        str_trim(line_data);
-        uint32_t chunk_size = hex2int(line_data);
-        if (chunk_size == 0){
-            data->state = HTTP_DONE;
-            data->cb(data, NULL, 0, data->userdata);
-            return;
-        }
-        free(line_data);
-
-        // 读取chunk
-        uint8_t *buffer = malloc(chunk_size);
-        LJS_evfd_readline(data -> fd, chunk_size, buffer, parse_evloop_chunk_callback, data);
-    }else{
-        // 读取fd
-        data->content_read += len;
-        data->cb(data, buffer, len, data->userdata);
-        if (data->content_read >= data->content_length){
-            data->state = HTTP_DONE;
-            data->cb(data, NULL, 0, data->userdata);
-        }
+        LJS_evfd_close(evfd);
+        free(_line_data);
+        return EVCB_RET_DONE;
     }
 }
 
@@ -733,7 +765,7 @@ static void write_evloop_callback(EvFD* evfd, void *userdata){
 }
 
 
-void LJS_write_header_to_fd(int fd, HTTP_data *data){
+static inline void write_firstline(int fd, HTTP_data *data){
     // 第一行
     char *first_line = malloc(1024);
     if(data -> is_client){
@@ -745,33 +777,17 @@ void LJS_write_header_to_fd(int fd, HTTP_data *data){
     free(first_line);
 }
 
-static void http_promise_callback(HTTP_data *data, uint8_t *buffer, uint32_t len, void *userdata){
-    struct promise *promise = userdata;
-    if(NULL == buffer){
-        if(data -> state == HTTP_ERROR)
-            JS_Call(promise -> ctx, promise -> reject, JS_NewError(promise -> ctx), 0, NULL);
-        else
-            JS_Call(promise -> ctx, promise -> resolve, JS_NULL, 0, NULL);
-    }else{
-        JS_Call(promise -> ctx, promise -> resolve, 
-            JS_NewUint8Array(promise -> ctx, buffer, len, free_js_malloc, NULL, false),    
-        0, NULL);
-    }
-
-    // free promise
-    LJS_FreePromise(promise);
-}
-
-void LJS_read_body(HTTP_data *data, HTTP_ParseCallback callback, void *userdata){
+static inline void read_body(HTTP_data *data, HTTP_ParseCallback callback, void *userdata, bool readall){
     if(data -> state != HTTP_BODY){
         return;
     }
     data -> cb = callback;
     data -> userdata = userdata;
+    data -> __read_all = readall;
 
     uint8_t *buffer = malloc(BUFFER_SIZE);
-    if(data -> chunked) LJS_evfd_readline(data -> fd, BUFFER_SIZE, buffer, parse_evloop_chunk_callback, data);
-    else LJS_evfd_read(data -> fd, BUFFER_SIZE, buffer, parse_evloop_chunk_callback, data);
+    if(data -> chunked) LJS_evfd_readline(data -> fd, BUFFER_SIZE, buffer, parse_evloop_body_callback, data);
+    else LJS_evfd_read(data -> fd, BUFFER_SIZE, buffer, parse_evloop_body_callback, data);
 }
 
 void LJS_parse_from_fd(EvFD* fd, HTTP_data *data, bool is_client, 
@@ -800,6 +816,11 @@ static JSValue js_response_get_status(JSContext *ctx, JSValueConst this_val) {
     return JS_NewInt32(ctx, response -> data -> status);
 }
 
+static JSValue js_response_get_ok(JSContext *ctx, JSValueConst this_val) {
+    struct HTTP_Response *response = JS_GetOpaque(this_val, response_class_id);
+    return JS_NewBool(ctx, response -> data -> status - 200 < 100);
+}
+
 static JSValue js_response_get_headers(JSContext *ctx, JSValueConst this_val) {
     struct HTTP_Response *response = JS_GetOpaque(this_val, response_class_id);
     JSValue headers = JS_NewObject(ctx);
@@ -809,16 +830,332 @@ static JSValue js_response_get_headers(JSContext *ctx, JSValueConst this_val) {
     return headers;
 }
 
+static void callback_tou8(HTTP_data *data, uint8_t *buffer, uint32_t len, void *userdata){
+    struct promise *promise = userdata;
+    if(NULL == buffer){
+        if(data -> state == HTTP_ERROR)
+            JS_Call(promise -> ctx, promise -> reject, JS_NewError(promise -> ctx), 0, NULL);
+        else
+            JS_Call(promise -> ctx, promise -> resolve, JS_NULL, 0, NULL);
+    }else{
+        JS_Call(promise -> ctx, promise -> resolve, 
+            JS_NewUint8Array(promise -> ctx, buffer, len, free_js_malloc, NULL, false),    
+        0, NULL);
+    }
+
+    // free promise
+    LJS_FreePromise(promise);
+}
+
 static JSValue response_poll(JSContext* ctx, void* ptr, JSValue __){
     struct promise *promise = LJS_NewPromise(ctx);
     struct HTTP_Response *response = ptr;
-    LJS_read_body(response -> data, http_promise_callback, promise);
+    read_body(response -> data, callback_tou8, promise, false);
     return promise -> promise;
 }
 
+struct buf_link {
+    uint8_t* buf;
+    uint32_t len;
+    
+    struct list_head list;
+};
+
+struct readall_promise{
+    struct promise *promise;
+    struct list_head u8arrs;
+    struct HTTP_Response *response;
+
+    bool tostr;
+    bool tojson;
+
+    void* addition_data;
+};
+
+static inline struct readall_promise* init_tou8_merge_task(struct promise *promise, struct HTTP_Response *response){
+    struct readall_promise *task = malloc(sizeof(struct readall_promise));
+    task -> promise = promise;
+    task -> response = response;
+    task -> tostr = false;
+    task -> tojson = false;
+    task -> addition_data = NULL;
+    init_list_head(&task -> u8arrs);
+    return task;
+}
+
+static void callback_tou8_merge(HTTP_data *data, uint8_t *buffer, uint32_t len, void *userdata){
+    struct readall_promise *task = userdata;
+
+    if(data -> state == HTTP_DONE){
+        // merge u8arrs
+        struct list_head *tmp, *cur;
+        int length = task -> response -> data -> content_read;
+        JSContext* ctx = task -> promise -> ctx;
+        uint8_t* merged_buf = js_malloc(ctx, length +1);
+        int copy_len = 0;
+
+        list_for_each_safe(cur, tmp, &task -> u8arrs){
+            struct buf_link *bufobj = list_entry(cur, struct buf_link, list);
+            memcpy(merged_buf + copy_len, bufobj -> buf, bufobj -> len);
+            copy_len += bufobj -> len;
+            free(bufobj -> buf);
+            free(bufobj);
+        }
+
+        merged_buf[copy_len] = '\0';
+
+        JSValue res;
+        if(task -> tostr){
+            res = JS_NewStringLen(ctx, (char*)merged_buf, length);
+        }else if(task -> tojson){
+            res = JS_ParseJSON(ctx, (char*)merged_buf, length, "<httpstream>.json");
+        }else{
+            res = JS_NewUint8Array(ctx, merged_buf, length, free_js_malloc, NULL, false);
+        }
+        JS_Call(ctx, task -> promise -> resolve, JS_UNDEFINED, 1, (JSValue[]){ res });
+        free(merged_buf);
+        goto end;
+    }else if(data -> state == HTTP_BODY){
+        struct buf_link *bufobj = malloc(sizeof(struct buf_link));
+        bufobj -> buf = buffer;
+        bufobj -> len = len;
+        list_add_tail(&bufobj -> list, &task -> u8arrs);
+    }else if(NULL == buffer){
+        struct list_head *tmp, *cur;
+        list_for_each_safe(cur, tmp, &task -> u8arrs){
+            struct buf_link *bufobj = list_entry(cur, struct buf_link, list);
+            free(bufobj -> buf);
+            free(bufobj);
+        }
+
+        struct promise *promise = task -> promise;
+        if(data -> state == HTTP_ERROR)
+            JS_Call(promise -> ctx, promise -> reject, JS_NewError(promise -> ctx), 0, NULL);
+        else
+            JS_Call(promise -> ctx, promise -> resolve, JS_NULL, 0, NULL);
+        goto end;
+    }
+
+end:
+    // free promise
+    LJS_FreePromise(task -> promise);
+    free(task);
+}
+
+struct formdata_t {
+    char *name;
+    char* type;
+    char* filename;
+
+    uint32_t length;
+    uint8_t* data;
+
+    struct list_head list;
+};
+
+enum FormDataState {
+    FD_BOUNDARY,
+    FD_NEWLINE,
+    FD_HEADER,
+    FD_DATA,
+    FD_DONE
+};
+
+struct formdata_addition_data {
+    enum FormDataState state;
+    char* boundary;
+    uint32_t readed;
+
+    struct list_head formdata;  // 反序添加(add to tail)
+};
+
+static inline struct formdata_addition_data* init_formdata_parse_task(struct promise *promise, struct HTTP_Response *response){
+    struct formdata_addition_data *task = malloc(sizeof(struct formdata_addition_data));
+    task -> state = FD_BOUNDARY;
+    task -> readed = 0;
+    init_list_head(&task -> formdata);
+    return task;
+}
+
+#define SET_IF_NOT_NULL(obj, prop, val) if(val){ \
+    JS_SetPropertyStr(ctx, obj, prop, JS_NewString(ctx, val)); \
+    free(val); \
+}
+#define FREE_IF_NOT_NULL(obj) if(obj) js_free(ctx, obj);
+#define SPLIT_HEADER(line) \
+    char *name = line; \
+    char *value = strchr(line, ':'); \
+    if(value){ \
+        *value = '\0'; \
+        value += 1; \
+        str_trim(value); \
+    }\
+    str_trim(name);
+#define TRIM_START(var2, line, _len) \
+    char* var2 = line; \
+    uint32_t __i = 0; \
+    while((*var2 != '\0' || __i < _len) && (*var2 == ' ' || *var2 == '\t' || *var2 == '\r' || *var2 == '\n')) \
+        var2++, __i++; \
+    if(__i == _len) var2 = NULL;
+
+static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* userdata){
+    struct readall_promise *task = userdata;
+    struct formdata_addition_data *fd_task = task -> addition_data;
+    JSContext *ctx = task -> promise -> ctx;
+    fd_task -> readed += read_size;
+
+    // 空行
+    if (fd_task->state == FD_NEWLINE) {
+        fd_task->state = FD_HEADER;
+        return EVCB_RET_CONTINUE;
+    }
+
+    // ------WebKitFormBoundaryABC123
+    if (fd_task->state == FD_BOUNDARY) {
+        char* line = (char*) buffer;
+        if (line[0] != '-' || line[1] != '-' || strcmp(line + 2, fd_task->boundary) != 0) {
+            // error
+            LJS_Promise_Reject(task->promise, "Invalid boundary");
+            goto end;
+        }
+        fd_task->state = FD_HEADER;
+        return EVCB_RET_CONTINUE;
+    }
+
+    struct formdata_t* formdata = list_entry(fd_task->formdata.next, struct formdata_t, list);
+
+    // Content-Disposition: form-data; name="file"; filename="test.txt"
+    if (fd_task->state == FD_HEADER) {
+        char* _line = (char*) buffer;
+        TRIM_START(line, _line, read_size);
+
+        if (line == NULL) {
+            // end of header
+            if (formdata->length == 0) fd_task->state = FD_NEWLINE;
+            else fd_task->state = FD_DATA;
+
+            uint8_t* buf = js_malloc(ctx, formdata->length);
+            LJS_evfd_readsize(evfd, formdata->length, buf, parse_evloop_body_callback, formdata);
+
+            js_free(ctx, _line);
+            return EVCB_RET_DONE;   // 切换模式
+        }
+
+        SPLIT_HEADER(line);
+        if (!value) {
+            // error
+            LJS_Promise_Reject(task->promise, "Invalid header");
+            goto end_cleanup;
+        }
+
+        if (strcmp(name, "Content-Disposition") == 0) {
+            char* filename = NULL;
+            char* type = NULL;
+            char* tmp = strchr(value, ';');
+            if (tmp) {
+                *tmp = '\0';
+                tmp += 1;
+                str_trim(tmp);
+                char* tmp2 = strstr(tmp, "filename=");
+                if (tmp2) {
+                    tmp2 += 9;
+                    str_trim(tmp2);
+                    filename = strdup(tmp2);
+                }
+                tmp2 = strstr(tmp, "type=");
+                if (tmp2) {
+                    tmp2 += 5;
+                    str_trim(tmp2);
+                    type = strdup(tmp2);
+                }
+            } else {
+                filename = strdup(value);
+            }
+            formdata->filename = filename;
+            formdata->type = type;
+        } else if (strcmp(name, "Content-Type") == 0) {
+            formdata->type = strdup(value);
+        } else if (strcmp(name, "Content-Length") == 0) {
+            int len = atoi(value);
+            if (len < 0) {
+                // error
+                LJS_Promise_Reject(task->promise, "Invalid content-length");
+                goto end_cleanup;
+            }
+            formdata->length = len;
+        } else {
+            // ignore
+        }
+        fd_task->state = FD_DATA;
+        return EVCB_RET_CONTINUE;
+    }
+
+    if (fd_task->state == FD_DATA) {
+        if (formdata->length < read_size) {
+            // error
+            LJS_Promise_Reject(task->promise, "Failed to receive data: short readed");
+            goto end_cleanup;
+        }
+
+        // already recv all data
+        formdata->data = buffer;
+
+        // end
+        if(fd_task -> readed == formdata -> length) goto end_callback;
+
+        // newline: the buffer will be reused for header
+        fd_task->state = FD_NEWLINE;
+        uint8_t* buf = js_malloc(ctx, BUFFER_SIZE);
+        LJS_evfd_readline(evfd, BUFFER_SIZE, buf, parse_evloop_body_callback, formdata);
+
+        return EVCB_RET_DONE;
+    }
+
+struct list_head *tmp, *cur;
+end_callback:
+    JSValue array = JS_NewArray(ctx);
+    uint32_t i = 0;
+    
+    list_for_each_safe(cur, tmp, &fd_task -> formdata){
+        struct formdata_t *formdata = list_entry(cur, struct formdata_t, list);
+        JSValue obj = JS_NewObject(ctx);
+        SET_IF_NOT_NULL(obj, "name", formdata -> name);
+        SET_IF_NOT_NULL(obj, "type", formdata -> type);
+        SET_IF_NOT_NULL(obj, "filename", formdata -> filename);
+        JS_SetPropertyStr(ctx, obj, "data", JS_NewUint8Array(ctx, formdata -> data, formdata -> length, free_js_malloc, NULL, false));
+        JS_SetPropertyUint32(ctx, array, i++, obj);
+        js_free(ctx, formdata);
+    }
+
+    JS_SetLength(ctx, array, i);
+    JS_Call(ctx, task -> promise -> resolve, JS_UNDEFINED, 1, (JSValue[]){ array });
+    goto end;
+
+end_cleanup:
+    list_for_each_safe(cur, tmp, &fd_task -> formdata){
+        struct formdata_t *formdata = list_entry(cur, struct formdata_t, list);
+        FREE_IF_NOT_NULL(formdata -> name);
+        FREE_IF_NOT_NULL(formdata -> type);
+        FREE_IF_NOT_NULL(formdata -> filename);
+        FREE_IF_NOT_NULL(formdata -> data);
+        FREE_IF_NOT_NULL(formdata);
+    }
+
+end:
+    FREE_IF_NOT_NULL(buffer);
+    // free promise
+    free(fd_task);
+    LJS_FreePromise(task -> promise);
+    return EVCB_RET_DONE;
+}
+
+#define RESPONSE_GET_OPAQUE(var, this_val) \
+    struct HTTP_Response *var = JS_GetOpaque(this_val, response_class_id); \
+    if(!var) return JS_EXCEPTION; \
+    if(var -> locked) return LJS_Throw(ctx, "Body is locked", NULL);
+
 static JSValue js_response_get_body(JSContext *ctx, JSValueConst this_val) {
-    struct HTTP_Response *response = JS_GetOpaque(this_val, response_class_id);
-    if(response -> locked) return LJS_Throw(ctx, "Body is locked", NULL);
+    RESPONSE_GET_OPAQUE(response, this_val);
 
     response -> locked = true;
     JSValue pipe = LJS_NewU8Pipe(ctx, PIPE_READ, BUFFER_SIZE, response_poll, NULL, NULL, response);
@@ -827,7 +1164,64 @@ static JSValue js_response_get_body(JSContext *ctx, JSValueConst this_val) {
 
 static JSValue js_response_get_locked(JSContext *ctx, JSValueConst this_val) {
     struct HTTP_Response *response = JS_GetOpaque(this_val, response_class_id);
+    if(!response) return JS_EXCEPTION;
     return JS_NewBool(ctx, response -> locked);
+}
+
+#define INIT_TOU8_TASK \
+    RESPONSE_GET_OPAQUE(response, this_val); \
+    struct promise *promise = LJS_NewPromise(ctx); \
+    struct readall_promise* data = init_tou8_merge_task(promise, response); \
+    read_body(response -> data, callback_tou8_merge, data, true);
+
+static JSValue js_response_buffer(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    INIT_TOU8_TASK
+    return promise -> promise;
+}
+
+static JSValue js_response_text(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    INIT_TOU8_TASK
+    data -> tostr = true;
+    return promise -> promise;
+}
+
+static JSValue js_response_json(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    INIT_TOU8_TASK
+    data -> tojson = true;
+    return promise -> promise;
+}
+
+static JSValue js_response_formData(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    RESPONSE_GET_OPAQUE(response, this_val);
+
+    // get form info
+    char* boundary;
+    for(uint32_t i = 0 ; i < response -> data -> header_count; i++){
+        char* key = response -> data -> headers[i][0];
+        char* value = response -> data -> headers[i][1];
+        if(strncasecmp(key, "Content-Type", 12) == 0){
+            char* bound = strstr(value, "boundary=");
+            if(bound){
+                bound += 9;
+                str_trim(bound);
+                boundary = bound;
+                goto main;
+            }else{
+                goto not_found;   
+            }
+        }
+    }
+
+not_found:
+    return LJS_Throw(ctx, "Invalid or missing content-type. Please ensure boundary is set", NULL);
+
+main:
+    struct promise *promise = LJS_NewPromise(ctx);
+    struct formdata_addition_data* task = init_formdata_parse_task(promise, response);
+    task -> boundary = boundary;
+    uint8_t* buf = js_malloc(ctx, BUFFER_SIZE);
+    LJS_evfd_readline(response -> data -> fd, BUFFER_SIZE, buf, callback_formdata_parse, task);
+    return promise -> promise;
 }
 
 static void js_response_finalizer(JSRuntime *rt, JSValue val) {
@@ -869,6 +1263,12 @@ static JSCFunctionListEntry response_proto_funcs[] = {
     JS_CGETSET_DEF("headers", js_response_get_headers, NULL),
     JS_CGETSET_DEF("body", js_response_get_body, NULL),
     JS_CGETSET_DEF("locked", js_response_get_locked, NULL),
+    JS_CGETSET_DEF("ok", js_response_get_ok, NULL),
+    
+    JS_CFUNC_DEF("bytes", 0, js_response_buffer),
+    JS_CFUNC_DEF("text", 0, js_response_text),
+    JS_CFUNC_DEF("json", 0, js_response_json),
+    JS_CFUNC_DEF("formData", 0, js_response_formData)
 };
 
 // fetch API
@@ -879,6 +1279,32 @@ struct keepalive_connection{
 };
 
 static struct list_head keepalive_list = { 0, 0 };
+static pthread_mutex_t keepalive_mutex;
+
+// alert: buffer = NULL
+void fetch_resolve(HTTP_data *data, uint8_t *buffer, uint32_t len, void* ptr){
+    struct promise *promise = ptr;
+    JSContext *ctx = promise -> ctx;
+    JSValue obj = JS_NewObjectClass(ctx, response_class_id);
+    struct HTTP_Response *response = malloc(sizeof(struct HTTP_Response));
+    response -> data = data;
+    response -> locked = false;
+    JS_SetOpaque(obj, response);
+    LJS_Promise_Resolve(promise, obj);
+}
+
+bool body_chunked_filter(struct Buffer* buf, void* user_data){
+    char chunk_header[14];
+    uint32_t chunk_len = buffer_used(buf);
+    uint8_t len = u32tohex(chunk_len, chunk_header);
+    if(!len) return false;
+
+    buffer_offset(buf, len +2, true);
+    chunk_header[len ++] = '\r';
+    chunk_header[len ++] = '\n';
+    memcpy(buf -> buffer, chunk_header, len);
+    return true;
+}
 
 static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(argc == 0)
@@ -887,41 +1313,60 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     // parse URL
     const char *urlstr = JS_ToCString(ctx, argv[0]);
     if(!urlstr) return JS_EXCEPTION;
-    char* url_str = strdup(urlstr);
-    JS_FreeCString(ctx, urlstr);
-    URL_data url;
-    if(!LJS_parse_url(url_str, &url, NULL) || url.protocol == NULL || url.host == NULL){
-        JS_FreeCString(ctx, url_str);
+    URL_data url = {};
+    if(!LJS_parse_url(urlstr, &url, NULL) || url.protocol == NULL || url.host == NULL){
+        JS_FreeCString(ctx, urlstr);
         return LJS_Throw(ctx, "Invalid URL", NULL);
     }
+    JS_FreeCString(ctx, urlstr);
     
     if(strstr(url.protocol, "http") == NULL && strstr(url.protocol, "ws") == NULL){
         LJS_free_url(&url);
         return LJS_Throw(ctx, "Unsupported protocol %s", NULL, url.protocol);
     }
 
+    JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
+    bool websocket = strstr(url.protocol, "ws") != NULL;
+
     // 获取连接
     EvFD* fd = NULL;
-    if(keepalive_list.prev == NULL){
-        init_list_head(&keepalive_list);
+    if(JS_ToBool(ctx, JS_GetPropertyStr(ctx, obj, "keepalive"))){
+        if(keepalive_list.prev == NULL){
+            init_list_head(&keepalive_list);
+            pthread_mutex_init(&keepalive_mutex, NULL);
+        }
+        pthread_mutex_lock(&keepalive_mutex);
+        struct list_head *cur, *tmp;
+        struct keepalive_connection *conn;
+        list_for_each_safe(cur, tmp, &keepalive_list){
+            conn = list_entry(cur, struct keepalive_connection, list);
+            if(conn -> free){
+                conn -> free = false;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&keepalive_mutex);
     }
-    struct list_head *cur, *tmp;
-    struct keepalive_connection *conn;
-    list_for_each_safe(cur, tmp, &keepalive_list){
-        conn = list_entry(cur, struct keepalive_connection, list);
-        if(!conn -> free) continue;
-        conn -> free = false;
-    }
-    if(!conn){
+    if(!fd){
         // open new connection
-        // bool ssl = url.protocol[strlen(url.protocol) - 1] == 's';
-        // todo...
+        bool ssl = url.protocol[strlen(url.protocol) - 1] == 's';
+        if(ssl){
+#ifdef LJS_MBEDTLS
+            // todo
+#else
+            return LJS_Throw(ctx, "SSL is not supported", NULL);
+#endif
+        }else{
+            if(strstr(url.protocol, "+unix") != NULL){
+                fd = LJS_open_socket("unix", url.host, -1, BUFFER_SIZE);
+            }else{
+                fd = LJS_open_socket("tcp", url.host, url.port, BUFFER_SIZE);
+            }
+        }
     }
-    if(!conn) return LJS_Throw(ctx, "Failed to open connection", NULL);
+    if(!fd) return LJS_Throw(ctx, "Failed to open connection", NULL);
 
     // 解析参数
-    JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
-
     // GET / HTTP/1.1
     char* method = (char*) JS_ToCString(ctx, JS_GetPropertyStr(ctx, obj, "method"));
     if (!method) method = "GET";
@@ -929,9 +1374,10 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     char* buf = malloc(guess_len);
     snprintf(buf, guess_len, "%s %s HTTP/1.1\r\n", method, url.path);
     LJS_evfd_write(fd, (uint8_t*) buf, strlen(buf), NULL, NULL);
+    free(buf);
 
     // keep-alive
-    bool keep_alive = JS_ToBool(ctx, JS_GetPropertyStr(ctx, obj, "keepAlive"));
+    bool keep_alive = JS_ToBool(ctx, JS_GetPropertyStr(ctx, obj, "keepalive"));
     if (keep_alive) {
         LJS_evfd_write(fd, (uint8_t*) "Connection: keep-alive\r\n", 24, NULL, NULL);
     }
@@ -946,6 +1392,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
         char* buf = malloc(guess_len);
         snprintf(buf, guess_len, "Referer: %s\r\n", referer);
         LJS_evfd_write(fd, (uint8_t*) buf, strlen(buf), NULL, NULL);
+        free(buf);
     }
 
     // host
@@ -954,16 +1401,22 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
         snprintf(host, strlen(url.host) + 16, "Host: %s\r\n", url.host);
         LJS_evfd_write(fd, (uint8_t*) host, strlen(host), NULL, NULL);
     }
+    
+    // websocket?
+    if(websocket){
+        // todo
+    }
 
     // headers
-    const char* headers = JS_ToCString(ctx, JS_GetPropertyStr(ctx, obj, "headers"));
-    if (headers) {
+    JSValue headers = JS_GetPropertyStr(ctx, obj, "headers");
+    if (JS_IsObject(headers)) {
         JSPropertyEnum* props;
         uint32_t prop_count;
-        if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, obj, JS_GPN_STRING_MASK) == 0) {
+        if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, headers, JS_GPN_STRING_MASK) == 0) {
             for (int i = 0; i < prop_count; i++) {
+                if(!props[i].is_enumerable) continue;
                 const char* key = JS_AtomToCString(ctx, props[i].atom);
-                const char* value = JS_ToCString(ctx, JS_GetProperty(ctx, obj, props[i].atom));
+                const char* value = JS_ToCString(ctx, JS_GetProperty(ctx, headers, props[i].atom));
                 if (key && value) {
                     if (
                         strcasecmp(key, "method") == 0 || 
@@ -986,9 +1439,11 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     // body
     JSValue body = JS_GetPropertyStr(ctx, obj, "body");
     // typedarray
-    if (JS_GetTypedArrayType(body) != -1) {
+    if (JS_GetTypedArrayType(body) != -1 || JS_IsString(body)) {
         size_t data_len;
-        uint8_t* data = JS_GetArrayBuffer(ctx, &data_len, body);
+        uint8_t* data = JS_IsString(body) 
+            ? (uint8_t*) JS_ToCStringLen(ctx, &data_len, body) 
+            : JS_GetArrayBuffer(ctx, &data_len, body);
         if (data) {
             size_t len = 22 + sizeof(size_t);
             char* buf = malloc(len);
@@ -1000,18 +1455,22 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
         // 写入数据
         LJS_evfd_write(fd, data, data_len, NULL, NULL);
     }else{
-        // 暂时不支持
-        LJS_evfd_write(fd, (uint8_t*) "Content-Length: 0\r\n\r\n", 26, NULL, NULL);
+        // pipeTo chunked
+        EvFD* body_fd = LJS_GetPipeFD(ctx, body);
+        if(!body_fd) {
+            // content 0
+            LJS_evfd_write(fd, (uint8_t*) "Content-Length: 0\r\n\r\n", 26, NULL, NULL);
+        }else{
+            LJS_evfd_pipeTo(fd, body_fd, body_chunked_filter, NULL, NULL, NULL);
+        }
     }
 
     // 解析响应
     HTTP_data *data = malloc(sizeof(HTTP_data));
-    LJS_parse_from_fd(fd, data, true, NULL, NULL);
-
-    // 创建Response对象
-    JSValue response_obj = LJS_NewResponse(ctx, data);
+    struct promise *promise = LJS_NewPromise(ctx);
+    LJS_parse_from_fd(fd, data, false, fetch_resolve, promise);
     LJS_free_url(&url);
-    return response_obj;
+    return promise -> promise;
 }
 
 // --------------------- JAVASCRIPT URL API -----------------------------
@@ -1032,6 +1491,7 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
     if(url_struct == NULL || js_url_struct == NULL){
         return JS_ThrowOutOfMemory(ctx);
     }
+    memset(url_struct, 0, sizeof(URL_data));
 
     js_url_struct -> dup_count = 0;
 
@@ -1042,9 +1502,7 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
             return LJS_Throw(ctx, "Invalid URL", NULL);
         }
         // 深拷贝
-        char* url_copied = malloc(strlen(url) + 1);
-        memcpy(url_copied, url, strlen(url) + 1);
-        LJS_parse_url(url_copied, url_struct, NULL);
+        LJS_parse_url(url, url_struct, NULL);
     }else if(argc == 2){
         const char *url = JS_ToCString(ctx, argv[0]);
         if(JS_IsObject(argv[1])){
@@ -1061,18 +1519,17 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
                 free(url_struct);
                 return JS_ThrowOutOfMemory(ctx);
             }
+            memset(base_url, 0, sizeof(URL_data));
             const char *base_url_str = JS_ToCString(ctx, argv[1]);
             if(base_url_str == NULL){
                 free(url_struct);
                 return LJS_Throw(ctx, "Invalid base URL", NULL);
             }
             // 拷贝
-            char* base_url_copied = strdup(base_url_str);
-            char* url_copied = strdup(url);
-            LJS_parse_url(base_url_copied, base_url, NULL);
+            LJS_parse_url(base_url_str, base_url, NULL);
             js_url_struct -> base = base_url;
             // 解析
-            LJS_parse_url(url_copied, url_struct, base_url);
+            LJS_parse_url(url, url_struct, base_url);
         }
     }else if(argc != 0){
         JS_ThrowTypeError(ctx, "URL constructor takes 0 or 1 argument");
@@ -1083,315 +1540,73 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
     return JS_NewObjectClass(ctx, js_class_url_id);
 }
 
-static JSValue js_url_toString(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    char *url_str = malloc(1024);
-    if(url_str == NULL){
-        return JS_ThrowOutOfMemory(ctx);
-    }
-
-    char* data = LJS_format_url(url_struct);
-    JSValue url_val = JS_NewString(ctx, data);
-    free(data);
-    return url_val;
+#define GETTER_STRING(func_name, field) \
+static JSValue func_name(JSContext *ctx, JSValueConst this_val) { \
+    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id); \
+    if (!js_url_struct) return JS_EXCEPTION; \
+    URL_data *url_struct = js_url_struct->self; \
+    return (url_struct->field) ? JS_NewString(ctx, url_struct->field) : JS_UNDEFINED; \
 }
 
-static JSValue js_url_getProtocol(JSContext *ctx, JSValueConst this_val){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> protocol == NULL){
-        return JS_UNDEFINED;
-    }
-    return JS_NewString(ctx, url_struct -> protocol);
+#define GETTER_INT(func_name, field, invalid_value) \
+static JSValue func_name(JSContext *ctx, JSValueConst this_val) { \
+    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id); \
+    if (!js_url_struct) return JS_EXCEPTION; \
+    URL_data *url_struct = js_url_struct->self; \
+    return (url_struct->field == invalid_value) ? JS_UNDEFINED : JS_NewInt32(ctx, url_struct->field); \
 }
 
-static JSValue js_url_getHost(JSContext *ctx, JSValueConst this_val){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> host == NULL){ 
-        return JS_UNDEFINED;
-    }
-    return JS_NewString(ctx, url_struct -> host);
+#define SETTER_STRING_DUP(func_name, field, err_msg) \
+static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst value) { \
+    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id); \
+    if (!js_url_struct) return JS_EXCEPTION; \
+    const char *str = JS_ToCString(ctx, value); \
+    if (!str) return LJS_Throw(ctx, err_msg, NULL); \
+    js_url_struct->dup_value[js_url_struct->dup_count++] = JS_DupValue(ctx, value); \
+    js_url_struct->self->field = (char*)str; \
+    return JS_UNDEFINED; \
 }
 
-static JSValue js_url_getPort(JSContext *ctx, JSValueConst this_val){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> port == 0){    
-        return JS_UNDEFINED;
-    }
-    return JS_NewInt32(ctx, url_struct -> port);
+#define SETTER_STRING_COPY(func_name, field, err_msg) \
+static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst value) { \
+    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id); \
+    if (!js_url_struct) return JS_EXCEPTION; \
+    const char *str = JS_ToCString(ctx, value); \
+    if (!str) return LJS_Throw(ctx, err_msg, NULL); \
+    free(js_url_struct->self->field); \
+    js_url_struct->self->field = strdup(str); \
+    JS_FreeCString(ctx, str); \
+    return JS_UNDEFINED; \
 }
 
-static JSValue js_url_getPath(JSContext *ctx, JSValueConst this_val){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> path == NULL){
-        return JS_UNDEFINED;
-    }
-    return JS_NewString(ctx, url_struct -> path);
+#define SETTER_INT_RANGE(func_name, field, min, max, err_msg) \
+static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst value) { \
+    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id); \
+    if (!js_url_struct) return JS_EXCEPTION; \
+    int32_t val; \
+    if (JS_ToInt32(ctx, &val, value) < 0) return LJS_Throw(ctx, err_msg, NULL); \
+    if (val < min || val > max) return JS_ThrowRangeError(ctx, #field " out of range"); \
+    js_url_struct->self->field = val; \
+    return JS_UNDEFINED; \
 }
 
-static JSValue js_url_getQueryStr(JSContext *ctx, JSValueConst this_val){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> query == NULL){
-        return JS_UNDEFINED;
-    }
-    char *query_str = malloc(1024);
-    if(query_str == NULL){
-        return JS_ThrowOutOfMemory(ctx);
-    }
-    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
-        if(url_struct -> query[i].key == NULL){
-            break;
-        }
-        if(i != 0){
-            strcat(query_str, "&");
-        }
-        strcat(query_str, url_struct -> query[i].key);
-        if(url_struct -> query[i].value != NULL){
-            strcat(query_str, "=");
-            strcat(query_str, url_struct -> query[i].value);
-        }
-    }
-    JSValue query_val = JS_NewString(ctx, query_str);
-    free(query_str);
-    return query_val;
-}
+/* 生成getter方法 */
+GETTER_STRING(js_url_getProtocol, protocol)
+GETTER_STRING(js_url_getHost, host)
+GETTER_STRING(js_url_getPath, path)
+GETTER_STRING(js_url_getHash, hash)
+GETTER_STRING(js_url_getUsername, username)
+GETTER_STRING(js_url_getPassword, password)
+GETTER_INT(js_url_getPort, port, 0)
 
-static JSValue js_url_getQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> query == NULL){
-        return JS_UNDEFINED;
-    }
-    JSValue query_obj = JS_NewObject(ctx);
-    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
-        if(url_struct -> query[i].key == NULL){
-            break;
-        }
-        JSValue value_val = JS_NewString(ctx, url_struct -> query[i].value);
-        JS_SetPropertyStr(ctx, query_obj, url_struct -> query[i].key, value_val);
-    }
-    return query_obj;
-}
-
-static JSValue js_url_getHash(JSContext *ctx, JSValueConst this_val){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> hash == NULL){
-        return JS_UNDEFINED;
-    }
-    return JS_NewString(ctx, url_struct -> hash);
-}
-
-static JSValue js_url_getUsername(JSContext *ctx, JSValueConst this_val){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> username == NULL){
-        return JS_UNDEFINED;
-    }
-    return JS_NewString(ctx, url_struct -> username);
-}
-
-static JSValue js_url_getPassword(JSContext *ctx, JSValueConst this_val){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> password == NULL){
-        return JS_UNDEFINED;
-    }
-    return JS_NewString(ctx, url_struct -> password);
-}
-
-static JSValue js_url_setUsername(JSContext *ctx, JSValueConst this_val, JSValueConst value){ 
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    const char *username = JS_ToCString(ctx, value);
-    if(username == NULL){
-        return LJS_Throw(ctx, "Invalid username", NULL);
-    }
-    js_url_struct -> dup_value[js_url_struct -> dup_count ++] = JS_DupValue(ctx, value);
-    url_struct -> username = (char*)username;
-    return JS_UNDEFINED;
-}
-
-static JSValue js_url_setPassword(JSContext *ctx, JSValueConst this_val, JSValueConst value){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    const char *password = JS_ToCString(ctx, value);
-    if(password == NULL){
-        return LJS_Throw(ctx, "Invalid password", NULL);
-    }
-    js_url_struct -> dup_value[js_url_struct -> dup_count ++] = JS_DupValue(ctx, value);
-    url_struct -> password = (char*)password;
-    return JS_UNDEFINED;
-}
-
-static JSValue js_url_setProtocol(JSContext *ctx, JSValueConst this_val, JSValueConst value){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    const char *protocol = JS_ToCString(ctx, value);
-    if(protocol == NULL){
-        return LJS_Throw(ctx, "Invalid protocol", NULL);
-    }
-    js_url_struct -> dup_value[js_url_struct -> dup_count ++] = JS_DupValue(ctx, value);
-    url_struct -> protocol = (char*)protocol;
-    return JS_UNDEFINED;
-}
-
-JSValue js_url_setHost(JSContext *ctx, JSValueConst this_val, JSValueConst value){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    const char *host = JS_ToCString(ctx, value);
-    if(host == NULL){
-        return LJS_Throw(ctx, "Invalid host", NULL);
-    }
-    js_url_struct -> dup_value[js_url_struct -> dup_count ++] = JS_DupValue(ctx, value);
-    url_struct -> host = (char*)host;
-    return JS_UNDEFINED;
-}
-
-JSValue js_url_setPort(JSContext *ctx, JSValueConst this_val, JSValueConst value){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    int32_t port;
-    if(-1 == JS_ToInt32(ctx, &port, value))
-        return LJS_Throw(ctx, "Invalid port", NULL);
-    if(port < 0 || port > 65535){
-        return JS_ThrowRangeError(ctx, "port out of range");
-    }
-    url_struct -> port = port;
-    return JS_UNDEFINED;
-}
-
-JSValue js_url_setPath(JSContext *ctx, JSValueConst this_val, JSValueConst value){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    const char *path = JS_ToCString(ctx, value);
-    if(path == NULL){
-        return LJS_Throw(ctx, "Invalid path", NULL);
-    }
-    url_struct -> path = strdup(path);
-    return JS_UNDEFINED;
-}
-
-JSValue js_url_setQueryStr(JSContext *ctx, JSValueConst this_val, JSValue value){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    const char *query = JS_ToCString(ctx, value);
-    if(query == NULL){
-        return LJS_Throw(ctx, "Invalid query string", NULL);
-    }
-    URL_query_data* query_list = malloc(sizeof(URL_query_data) * MAX_QUERY_COUNT);
-    char* query_str = strdup(query);
-    if(!LJS_parse_query(query_str, &query_list, MAX_QUERY_COUNT)){
-        return LJS_Throw(ctx, "Failed to parse query string", NULL);
-    }
-    url_struct -> query_string = query_str;
-    url_struct -> query = query_list;
-    return JS_UNDEFINED;
-}
-
-JSValue js_url_delQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return JS_EXCEPTION;
-    }
-    
-    if(NULL == js_url_struct -> self -> query){
-        return JS_UNDEFINED;
-    }
-
-    uint32_t del_id = -1;
-    char* key;
-    if(argc == 1){
-        key = (char*)JS_ToCString(ctx, argv[0]);
-        if(key == NULL){
-            return LJS_Throw(ctx, "Invalid query key", NULL);
-        }
-    }else if(argc == 2){
-        key = (char*)JS_ToCString(ctx, argv[0]);
-        if(-1 == JS_ToUint32(ctx, &del_id, argv[1]) || key == NULL){
-            return LJS_Throw(ctx, "Invalid arguments", NULL);
-        }
-    }else{
-        return JS_ThrowTypeError(ctx, "delQuery takes 1 or 2 arguments");
-    }
-
-    uint32_t key_occurrence = 0;
-    bool found = false;
-    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
-        if(js_url_struct -> self -> query[i].key == NULL){
-            break;
-        }
-        if(strcmp(js_url_struct -> self -> query[i].key, key) == 0){
-            if(del_id == -1 || del_id == key_occurrence){
-                js_url_struct -> self -> query[i].key = NULL;
-                js_url_struct -> self -> query[i].value = NULL;
-                found = true;
-            }
-            key_occurrence++;
-        }
-    }
-
-    if(!found){
-        return JS_ThrowTypeError(ctx, "query key not found");
-    }
-    return JS_UNDEFINED;
-}
+/* 生成setter方法 */
+SETTER_STRING_DUP(js_url_setProtocol, protocol, "Invalid protocol")
+SETTER_STRING_DUP(js_url_setHost, host, "Invalid host")
+SETTER_STRING_DUP(js_url_setUsername, username, "Invalid username")
+SETTER_STRING_DUP(js_url_setPassword, password, "Invalid password")
+SETTER_STRING_COPY(js_url_setPath, path, "Invalid path")
+SETTER_STRING_COPY(js_url_setHash, hash, "Invalid hash")
+SETTER_INT_RANGE(js_url_setPort, port, 0, 65535, "Invalid port")
 
 JSValue js_url_addQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
@@ -1446,62 +1661,173 @@ JSValue js_url_addQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     return JS_UNDEFINED;
 }
 
-JSValue js_url_setHash(JSContext *ctx, JSValueConst this_val, JSValueConst value){
+JSValue js_url_delQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
+    if(js_url_struct == NULL){
+        return JS_EXCEPTION;
+    }
+    
+    if(NULL == js_url_struct -> self -> query){
+        return JS_UNDEFINED;
+    }
+
+    uint32_t del_id = -1;
+    char* key;
+    if(argc == 1){
+        key = (char*)JS_ToCString(ctx, argv[0]);
+        if(key == NULL){
+            return LJS_Throw(ctx, "Invalid query key", NULL);
+        }
+    }else if(argc == 2){
+        key = (char*)JS_ToCString(ctx, argv[0]);
+        if(-1 == JS_ToUint32(ctx, &del_id, argv[1]) || key == NULL){
+            return LJS_Throw(ctx, "Invalid arguments", NULL);
+        }
+    }else{
+        return JS_ThrowTypeError(ctx, "delQuery takes 1 or 2 arguments");
+    }
+
+    uint32_t key_occurrence = 0;
+    bool found = false;
+    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
+        if(js_url_struct -> self -> query[i].key == NULL){
+            break;
+        }
+        if(strcmp(js_url_struct -> self -> query[i].key, key) == 0){
+            if(del_id == -1 || del_id == key_occurrence){
+                js_url_struct -> self -> query[i].key = NULL;
+                js_url_struct -> self -> query[i].value = NULL;
+                found = true;
+            }
+            key_occurrence++;
+        }
+    }
+
+    if(!found){
+        return JS_ThrowTypeError(ctx, "query key not found");
+    }
+    return JS_UNDEFINED;
+}
+
+
+static JSValue js_url_toString(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
     if(js_url_struct == NULL){
         return JS_EXCEPTION;
     }
     URL_data *url_struct = js_url_struct -> self;
-    const char *hash = JS_ToCString(ctx, value);
-    if(hash == NULL){
-        return LJS_Throw(ctx, "Invalid hash", NULL);
+    char *url_str = malloc(1024);
+    if(url_str == NULL){
+        return JS_ThrowOutOfMemory(ctx);
     }
-    char* hash_copied = malloc(strlen(hash) + 1);
-    memcpy(hash_copied, hash, strlen(hash) + 1);
-    url_struct -> hash = hash_copied;
+
+    char* data = LJS_format_url(url_struct);
+    JSValue url_val = JS_NewString(ctx, data);
+    free(data);
+    return url_val;
+}
+
+
+static JSValue js_url_getQueryStr(JSContext *ctx, JSValueConst this_val){
+    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
+    if(js_url_struct == NULL){
+        return JS_EXCEPTION;
+    }
+    URL_data *url_struct = js_url_struct -> self;
+    if(url_struct -> query == NULL){
+        return JS_UNDEFINED;
+    }
+    char *query_str = malloc(1024);
+    if(query_str == NULL){
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
+        if(url_struct -> query[i].key == NULL){
+            break;
+        }
+        if(i != 0){
+            strcat(query_str, "&");
+        }
+        strcat(query_str, url_struct -> query[i].key);
+        if(url_struct -> query[i].value != NULL){
+            strcat(query_str, "=");
+            strcat(query_str, url_struct -> query[i].value);
+        }
+    }
+    JSValue query_val = JS_NewString(ctx, query_str);
+    free(query_str);
+    return query_val;
+}
+
+static JSValue js_url_getQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
+    if(js_url_struct == NULL){
+        return JS_EXCEPTION;
+    }
+    URL_data *url_struct = js_url_struct -> self;
+    if(url_struct -> query == NULL){
+        return JS_UNDEFINED;
+    }
+    JSValue query_obj = JS_NewObject(ctx);
+    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
+        if(url_struct -> query[i].key == NULL){
+            break;
+        }
+        JSValue value_val = JS_NewString(ctx, url_struct -> query[i].value);
+        JS_SetPropertyStr(ctx, query_obj, url_struct -> query[i].key, value_val);
+    }
+    return query_obj;
+}
+
+
+JSValue js_url_setQueryStr(JSContext *ctx, JSValueConst this_val, JSValue value){
+    struct JS_URL_struct *js_url_struct = JS_GetOpaque(this_val, js_class_url_id);
+    if(js_url_struct == NULL){
+        return JS_EXCEPTION;
+    }
+    URL_data *url_struct = js_url_struct -> self;
+    const char *query = JS_ToCString(ctx, value);
+    if(query == NULL){
+        return LJS_Throw(ctx, "Invalid query string", NULL);
+    }
+    URL_query_data* query_list = malloc(sizeof(URL_query_data) * MAX_QUERY_COUNT);
+    char* query_str = strdup(query);
+    if(!LJS_parse_query(query_str, &query_list, MAX_QUERY_COUNT)){
+        return LJS_Throw(ctx, "Failed to parse query string", NULL);
+    }
+    url_struct -> query_string = query_str;
+    url_struct -> query = query_list;
     return JS_UNDEFINED;
 }
 
 static void js_url_finalizer(JSRuntime *rt, JSValue val) {
     struct JS_URL_struct *js_url_struct = JS_GetOpaque(val, js_class_url_id);
-    if(js_url_struct == NULL){
-        return;
-    }
-    URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> protocol != NULL){
-        free(url_struct -> protocol);
-    }
-    if(url_struct -> host != NULL){
-        free(url_struct -> host);
-    }
-    if(url_struct -> path != NULL){
-        free(url_struct -> path);
-    }
-    if(url_struct -> username != NULL){
-        free(url_struct -> username);
-    }
-    if(url_struct -> password != NULL){
-        free(url_struct -> password);
-    }
-    if(url_struct -> hash != NULL){
-        free(url_struct -> hash);
-    }
-    if(url_struct -> query != NULL){
-        for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
-            if(url_struct -> query[i].key != NULL){
-                free(url_struct -> query[i].key);
-            }
-            if(url_struct -> query[i].value != NULL){
-                free(url_struct -> query[i].value);
-            }
+    if (!js_url_struct) return;
+    
+    URL_data *url = js_url_struct->self;
+
+#define FREE_FIELD(field) do { if(url->field) free(url->field); } while(0)
+    FREE_FIELD(protocol);
+    FREE_FIELD(host);
+    FREE_FIELD(path);
+    FREE_FIELD(username);
+    FREE_FIELD(password);
+    FREE_FIELD(hash);
+#undef FREE_FIELD
+    
+    if (url->query) {
+        for (uint32_t i = 0; i < MAX_QUERY_COUNT; i++) {
+            free(url->query[i].key);
+            free(url->query[i].value);
         }
-        free(url_struct -> query);
+        free(url->query);
     }
-    for(uint32_t i = 0; i < js_url_struct -> dup_count; i++){
-        JS_FreeValueRT(rt, js_url_struct -> dup_value[i]);
+    
+    for (uint32_t i = 0; i < js_url_struct->dup_count; i++) {
+        JS_FreeValueRT(rt, js_url_struct->dup_value[i]);
     }
     free(js_url_struct);
-};
+}
 
 static JSValue js_url_proto_canParse(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0 || !JS_IsString(argv[0]))
@@ -1510,8 +1836,6 @@ static JSValue js_url_proto_canParse(JSContext *ctx, JSValueConst this_val, int 
     // url
     const char *url = JS_ToCString(ctx, argv[0]);
     if(!url) return JS_EXCEPTION;
-    char* url_str = strdup(url);
-    JS_FreeCString(ctx, url);
 
     // base url
     URL_data url_base_struct;
@@ -1519,23 +1843,22 @@ static JSValue js_url_proto_canParse(JSContext *ctx, JSValueConst this_val, int 
     if(argc == 2){
         const char* base_url = JS_ToCString(ctx, argv[1]);
         if(base_url){
-            base_url_str = strdup(base_url);
-            JS_FreeCString(ctx, base_url);
-            if(!LJS_parse_url(base_url_str, &url_base_struct, NULL)){
+            if(!LJS_parse_url(base_url, &url_base_struct, NULL)){
                 free(base_url_str);
                 return JS_FALSE;
             }
+            JS_FreeCString(ctx, base_url);
         }
     }
     
     // parse
     URL_data url_struct;
-    bool result = LJS_parse_url(url_str, &url_struct, &url_base_struct);
+    bool result = LJS_parse_url(url, &url_struct, &url_base_struct);
+    JS_FreeCString(ctx, url);
 
     // free
     LJS_free_url(&url_struct);
     LJS_free_url(&url_base_struct);
-    free(url_str);
     if(base_url_str) free(base_url_str);
     
     return JS_NewBool(ctx, result);

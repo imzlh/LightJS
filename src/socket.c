@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <threads.h>
+#include <signal.h>
 #include <netinet/tcp.h>
 #include <sys/un.h>
 #include <sys/epoll.h>
@@ -38,7 +39,7 @@ JSValue js_server_close(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     return JS_UNDEFINED;
 }
 
-void socket_handle_connect(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data) {
+int socket_handle_connect(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data) {
     struct JS_Server_Data* data = (struct JS_Server_Data*)user_data;
 
     // accept
@@ -77,12 +78,14 @@ void socket_handle_connect(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void
     }
 
     // 转换为Pipe
-    JSValue pipe = LJS_NewFDPipe(data -> ctx, client_fd, PIPE_READ | PIPE_WRITE, data -> bufsize, JS_NULL);
+    JSValue pipe = LJS_NewFDPipe(data -> ctx, client_fd, PIPE_READ | PIPE_WRITE, data -> bufsize, NULL);
 
     // 调用on_connection回调
     JSValue on_connection = data->on_connection;
     JSValue args[2] = { pipe, addr_info };
     JS_Call(data -> ctx, on_connection, JS_UNDEFINED, 2, args);
+
+    return EVCB_RET_DONE;
 }
 
 static void socket_handle_close(int fd, void* user_data) {
@@ -108,6 +111,7 @@ static int open_socket(const char* protocol, const char* host, uint16_t port, co
         addr_in.sin_addr.s_addr = inet_addr(host);
         if(addr_in.sin_addr.s_addr == INADDR_NONE) return -2;
         sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        connect(sockfd, (struct sockaddr*)&addr_in, sizeof(addr_in));
     }else if(strstr(protocol, "tcp6")) {
         struct sockaddr_in6 addr_in6;
         memset(&addr_in6, 0, sizeof(addr_in6));
@@ -115,12 +119,14 @@ static int open_socket(const char* protocol, const char* host, uint16_t port, co
         addr_in6.sin6_port = htons(port);
         if(inet_pton(AF_INET6, host, &addr_in6.sin6_addr) != 1) return -2;
         sockfd = socket(AF_INET6, SOCK_STREAM, 0);
+        connect(sockfd, (struct sockaddr*)&addr_in6, sizeof(addr_in6));
     }else if(strstr(protocol, "unix")){
         struct sockaddr_un addr_un;
         memset(&addr_un, 0, sizeof(addr_un));
         addr_un.sun_family = AF_UNIX;
         strncpy(addr_un.sun_path, unix_path, sizeof(addr_un.sun_path)-1);
         sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+        connect(sockfd, (struct sockaddr*)&addr_un, sizeof(addr_un));
     }
     if(sockfd < 0) return -1;
     return sockfd;
@@ -332,7 +338,7 @@ void dns_free_record(dns_record** record, int count) {
     free(record);
 }
 
-void dns_response_handler(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data) {
+int dns_response_handler(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data) {
     DnsQueryContext* ctx = (DnsQueryContext*)user_data;
     struct dns_header* header = (struct dns_header*)buffer;
 
@@ -374,12 +380,13 @@ void dns_response_handler(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void*
 
     // 调用回调
     ctx -> user_callback(total_records, records, ctx -> user_data);
-    return;
+    return EVCB_RET_DONE;
 
 cleanup:
     // 清理资源
     LJS_evfd_close(evfd);
     free(ctx);
+    return EVCB_RET_DONE;
 }
 
 // 异步DNS解析入口函数
@@ -521,6 +528,39 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     LJS_evcore_attach(sockfd, false, socket_handle_connect, (EvWriteCallback)NULL, socket_handle_close, data);
 
     return promise -> promise;
+}
+
+static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    if(argc == 0 || !JS_IsString(argv[0]) ) {
+        return LJS_Throw(ctx, "connect: missing or invalid arguments",
+            "connect(addr: string, flag?: Object) => U8Pipe"
+        );
+    }
+    const char *addr_str = JS_ToCString(ctx, argv[0]);
+    if(addr_str == NULL)  return JS_EXCEPTION;
+    URL_data addr = {};
+    if(!LJS_parse_url((char*)addr_str, &addr, NULL)) {
+        JS_FreeCString(ctx, addr_str);
+        return JS_ThrowTypeError(ctx, "connect: invalid address");
+    }
+    JS_FreeCString(ctx, addr_str);
+
+    int sockfd = open_socket(addr.protocol, addr.host, addr.port, addr.path);
+    if(sockfd == -1) return LJS_Throw(ctx, "failed to connect: %s", NULL, strerror(errno));
+
+    // TCP设置
+    JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
+    uint32_t buffer_size = BUFFER_SIZE;
+    JS_ToUint32(ctx, &buffer_size, JS_GetPropertyStr(ctx, obj, "bufferSize"));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
+    int timeout = 0;
+    JS_ToInt32(ctx, &timeout, JS_GetPropertyStr(ctx, obj, "timeout"));
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    JSValue pipe = LJS_NewFDPipe(ctx, sockfd, PIPE_READ | PIPE_WRITE, buffer_size, NULL);
+    return pipe;
 }
 
 void ssl_handshake_callback(EvFD* evfd, void* user_data) {
@@ -745,6 +785,7 @@ static JSValue js_cert_remove(JSContext *ctx, JSValueConst this_val, int argc, J
 
 static const JSCFunctionListEntry LJS_socket_funcs[] = {
     JS_CFUNC_DEF("bind", 1, js_bind),
+    JS_CFUNC_DEF("connect", 1, js_connect),
     JS_CFUNC_DEF("upgradeTLS", 1, js_ssl_handshake),
     JS_CFUNC_DEF("resolveDNS", 1, js_resolve_dns),
     JS_CFUNC_DEF("regCert", 3, js_cert_add),
@@ -753,6 +794,10 @@ static const JSCFunctionListEntry LJS_socket_funcs[] = {
 
 static int js_init_socket(JSContext* ctx, JSModuleDef* m) {
     JS_SetModuleExportList(ctx, m, LJS_socket_funcs, countof(LJS_socket_funcs));
+
+    // ignore SIGPIPE
+    // signal(SIGPIPE, SIG_IGN);
+
     return 0;
 }
 
@@ -769,4 +814,46 @@ bool LJS_dns_resolve(
     DnsResponseCallback callback, DnsErrorCallback error_callback, void* user_data
 ) {
     return async_dns_resolve(dns_server, hostname, callback, error_callback, user_data);
+}
+
+EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int bufsize) {
+    bool ssl = protocol[strlen(protocol) - 1] == 's';
+    if(strstr(protocol, "unix") == NULL){
+        // resolve DNS sync
+        // XXX: use async DNS resolve
+        struct addrinfo hints = {0}, *res;
+        hints.ai_family = AF_INET; // IPv4
+        hints.ai_socktype = SOCK_STREAM;
+
+        if (getaddrinfo(hostname, NULL, &hints, &res) != 0) {
+            return NULL;
+        }
+
+        switch(res->ai_family){
+            case AF_INET:
+                hostname = inet_ntoa(((struct sockaddr_in*)res->ai_addr)->sin_addr);
+                protocol = "tcp";
+                break;
+            case AF_INET6:
+                hostname = inet_ntop(AF_INET6, &((struct sockaddr_in6*)res->ai_addr)->sin6_addr, NULL, 0);
+                protocol = "tcp6";
+                break;
+            default:
+                freeaddrinfo(res);
+                return NULL;
+        }
+        freeaddrinfo(res);
+    }
+    int fd = open_socket(protocol, hostname, port, hostname);
+    if(ssl){
+#ifdef LJS_MBEDTLS
+        LJS_init_ssl(fd, user_data);
+        // ...
+        return true;
+#else
+        close(fd);
+        return NULL;
+#endif
+    }
+    return LJS_evfd_new(fd, false, true, true, bufsize, NULL, NULL);
 }
