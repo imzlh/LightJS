@@ -234,6 +234,8 @@ int main(int argc, char **argv) {
     // JS_SetDumpFlags(runtime, JS_DUMP_FREE | JS_DUMP_GC | JS_DUMP_GC_FREE | JS_DUMP_LEAKS | JS_DUMP_PROMISE);
 #endif
 
+    LJS_evcore_set_memory(js_malloc_proxy, runtime);
+
     // eval
     JSValue ret_val = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE);
     if(JS_IsException(ret_val)){

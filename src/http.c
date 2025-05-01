@@ -16,8 +16,23 @@
 #include <sys/socket.h>
 
 #define MAX_QUERY_COUNT 32
-#define MAX_HEADER_COUNT 64
 #define BUFFER_SIZE 1024
+
+#define SPLIT_HEADER(line) \
+    char *name = line; \
+    char *value = strchr(line, ':'); \
+    if(value){ \
+        *(value ++) = '\0'; \
+        while(*value == ' ') value ++; \
+        str_trim(value); \
+    }\
+    str_trim(name);
+#define TRIM_START(var2, line, _len) \
+    char* var2 = line; \
+    uint32_t __i = 0; \
+    while((*var2 != '\0' || __i < _len) && (*var2 == ' ' || *var2 == '\t' || *var2 == '\r' || *var2 == '\n')) \
+        var2++, __i++; \
+    if(__i == _len) var2 = NULL;
 
 static char* normalize_path(const char* path) {
     char* copy = strdup(path);
@@ -292,12 +307,15 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base){
             url_struct -> hash = pos2 + 1;
         }
         // copy path
-        int urlen = strlen(url) + 1;
-        char* path = malloc(urlen);
-        *path = '/';
-        memcpy(path + 1, url, urlen);
-        url_struct -> path = LJS_resolve_path(path, base -> path);
-        free(path);
+        if(*url == '\0') url_struct -> path = strdup("/");
+        else{
+            int urlen = strlen(url) + 1;
+            char* path = malloc(urlen);
+            *path = '/';
+            memcpy(path + 1, url, urlen);
+            url_struct -> path = LJS_resolve_path(path, base -> path);
+            free(path);
+        }
     }
     return true;
 }
@@ -357,12 +375,9 @@ char* LJS_format_url(URL_data *url_struct){
 }
 
 void LJS_free_http_data(HTTP_data *data){
-    if(data -> headers){
-        for(uint32_t i = 0; i < data -> header_count; i++){
-            free(data -> headers[i][0]);
-            free(data -> headers[i][1]);
-        }
-        free(data -> headers);
+    for(uint32_t i = 0; i < data -> header_count; i++){
+        free(data -> headers[i][0]);
+        free(data -> headers[i][1]);
     }
     free(data);
 }
@@ -528,10 +543,10 @@ static inline void init_http_data(HTTP_data *data){
     data -> method = "GET";
     data -> status = 200;
     data -> version = 1.1;
-    data -> headers = malloc(MAX_HEADER_COUNT * sizeof(char*));
     data -> header_count = 0;
     data -> chunked = false;
     data -> content_length = 0;
+    data -> header_count = 0;
     data -> state = HTTP_INIT;
     data -> __read_all = false;
 }
@@ -674,6 +689,7 @@ done:
 static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, void* userdata){
     HTTP_data *data = userdata;
     char* line_data = (char*)_line_data;
+    if(!line_data) goto error2; // close
     // 是第一行
     if (data->state == HTTP_INIT){
         // 找空格解析参数
@@ -708,31 +724,29 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
             data->version = parse_http_version (param1);
             data->status = atoi (param2);
         }
+        data->state = HTTP_HEADER;
     }else if (data->state == HTTP_HEADER){
         str_trim (line_data);
         if (line_data[0] == '\0'){
-            if (strcmp (find_header (data, "Transfer-Encoding"), "chunked") == 0){
+            char* encode = find_header (data, "transfer-encoding");
+            if (encode && strcmp (encode, "chunked") == 0){
                 data->chunked = true;
             }
             data->state = HTTP_BODY;
             free(line_data);
+
+            data->cb(data, NULL, 0, data->userdata);
             return EVCB_RET_DONE;
         }
 
-        char *colon = strchr (line_data, ':');
-        if (colon == NULL){
-            goto error;
-        }
-        *colon = '\0';
-        colon += 1;
-        str_trim (colon);
+        SPLIT_HEADER(line_data);    // name&value
         
         if (strcmp (strtolower(line_data), "content-length") == 0){
-            data->content_length = atoi (colon);
+            data->content_length = atoi (value);
         }else{
             char **header = malloc(sizeof(char*) * 2);
-            header[0] = strdup(strtolower(line_data));
-            header[1] = strdup(colon);
+            header[0] = strdup(strtolower(name));
+            header[1] = strdup(value);
             data->headers[data->header_count++] = header;
         }
     }
@@ -740,12 +754,12 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
 
     return EVCB_RET_CONTINUE;
 
-    error:{
-        data->state = HTTP_ERROR;
-        LJS_evfd_close(evfd);
-        free(_line_data);
-        return EVCB_RET_DONE;
-    }
+error:
+    LJS_evfd_close(evfd);
+error2:
+    data->state = HTTP_ERROR;
+    free(_line_data);
+    return EVCB_RET_DONE;
 }
 
 static void write_evloop_callback(EvFD* evfd, void *userdata){
@@ -763,7 +777,6 @@ static void write_evloop_callback(EvFD* evfd, void *userdata){
     LJS_evfd_write(data -> fd, (uint8_t*)line, strlen(line), write_evloop_callback, data);
     free(line);
 }
-
 
 static inline void write_firstline(int fd, HTTP_data *data){
     // 第一行
@@ -797,6 +810,8 @@ void LJS_parse_from_fd(EvFD* fd, HTTP_data *data, bool is_client,
     data -> fd = fd;
     data -> is_client = is_client;
     data -> cb = callback;
+    data -> userdata = userdata;
+    data -> state = HTTP_INIT;
 
     // 第一行
     uint8_t *buffer = malloc(BUFFER_SIZE);
@@ -982,21 +997,6 @@ static inline struct formdata_addition_data* init_formdata_parse_task(struct pro
     free(val); \
 }
 #define FREE_IF_NOT_NULL(obj) if(obj) js_free(ctx, obj);
-#define SPLIT_HEADER(line) \
-    char *name = line; \
-    char *value = strchr(line, ':'); \
-    if(value){ \
-        *value = '\0'; \
-        value += 1; \
-        str_trim(value); \
-    }\
-    str_trim(name);
-#define TRIM_START(var2, line, _len) \
-    char* var2 = line; \
-    uint32_t __i = 0; \
-    while((*var2 != '\0' || __i < _len) && (*var2 == ' ' || *var2 == '\t' || *var2 == '\r' || *var2 == '\n')) \
-        var2++, __i++; \
-    if(__i == _len) var2 = NULL;
 
 static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* userdata){
     struct readall_promise *task = userdata;

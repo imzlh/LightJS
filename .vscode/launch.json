@@ -11,7 +11,7 @@
             "program": "${workspaceFolder}/build/ljs",
             "preLaunchTask": "CMake: 生成",
             // "args": ["--memory-limit=256m", "src/repl.js"],
-            "args": ["test", "pipe"],
+            "args": ["test", "http"],
             // "args": ["--memory-limit=256m", "lib/lrepl.js"],
             // "args": ["--memory-limit=256m", "${file}"],
             "stopAtEntry": true,

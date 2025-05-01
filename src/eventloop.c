@@ -106,9 +106,13 @@ struct EvFD_SSL {
 #endif
 
 struct EvFD{
+    union {
+        aio_context_t ctx;
+        uint64_t __padding;
+    } aio;
+
     int fd[2];  // 如果是aio，第二个则是原始fd
     enum EvFDType type;
-    aio_context_t aio_ctx;          // for aio
     struct list_head list;          // for task list
     struct UDPContext* proto_ctx;   // udp
 #ifdef LJS_MBEDTLS
@@ -150,6 +154,25 @@ static thread_local struct list_head timer_list;
 static thread_local ssize_t evloop_events = 0;
 static int is_aio_supported = -1;
 
+// malloc
+#define malloc(size) alloc_func(size, alloc_opaque);
+static inline void* _malloc(size_t size, void* opaque) {
+    void* ptr;
+    if(posix_memalign(&ptr, 8, size) != 0) {
+#ifdef LJS_DEBUG
+        perror("posix_memalign");
+#endif
+        return NULL;
+    }
+    return ptr;
+}
+static thread_local void* (*alloc_func)(size_t size, void* opaque) = _malloc;
+static thread_local void* alloc_opaque = NULL;
+void LJS_evcore_set_memory(void* (*allocator)(size_t, void*), void* opaque){
+    alloc_func = allocator;
+    alloc_opaque = opaque;
+}
+
 // linux_kernel aio syscall
 static inline int io_setup(unsigned nr, aio_context_t *ctxp) { 
     return syscall(__NR_io_setup, nr, ctxp); 
@@ -173,7 +196,7 @@ static inline int io_cancel(aio_context_t ctx, struct iocb *iocb, struct io_even
 
 static inline int aio_supported() {
     aio_context_t test_ctx;
-    if(!io_setup(0, &test_ctx)) return false;
+    if(-1 == io_setup(MAX_EVENTS, &test_ctx)) return false;
     io_destroy(test_ctx);
     return true;
 }
@@ -213,9 +236,10 @@ static void check_queue_status(EvFD* evfd, int fd) {
 }
 
 // buffer
-#define CALL_AND_HANDLE(func, ...) int _ret = func(__VA_ARGS__); \
-    if (_ret & EVCB_RET_CONTINUE) goto main; \
-    if ((_ret & EVCB_RET_REWIND) == 0)
+#define CALL_AND_HANDLE(func, blk, ...) int _ret = func(__VA_ARGS__); \
+    if (evfd -> destroy) return; \
+    if (!(_ret & EVCB_RET_REWIND)) blk; \
+    if (_ret & EVCB_RET_CONTINUE) goto main;
 
 #define EVFD_YIELD(evfd, type) { \
      struct epoll_event ev = { \
@@ -292,7 +316,7 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
     } else if (evfd->type == EVFD_AIO/* && iocb */) {
         n = ioev->res;
         evfd->u.task.offset += n;
-        buffer_push(evfd->read_buffer, (uint8_t*) ((struct iocb*) ioev->obj)->aio_data, n);
+        buffer_push(evfd->read_buffer, (uint8_t*) ((struct iocb*) ioev->obj)->aio_buf, n);
     } else if (evfd->type == EVFD_SSL) {
         // evfd SSL下，只有mbedtls处理后才有数据
         n = buffer_used(evfd->read_buffer);
@@ -339,23 +363,26 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
                 EVFD_YIELD(evfd, EPOLLIN);
         }
 
-main:
+        list_del(cur); // avoid recursive call
+main:   // while loop
         uint32_t bufsize = buffer_used(evfd -> read_buffer);
         switch(task -> type){
             case EV_TASK_READ: // readsize
                 if (task -> buffer -> size <= bufsize) {
                     // 导出
                     buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
-                    CALL_AND_HANDLE(task -> cb.read, evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque){
-                        buffer_clear(evfd -> read_buffer);
-                    }
+                    CALL_AND_HANDLE(
+                        task -> cb.read,
+                        { buffer_clear(evfd -> read_buffer); }, 
+                        evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque
+                    );
                     goto _continue;
                 } else if(!n) {
                     perror("evfd_readsize");
                     // handle_close(fd, evfd);
                     goto _break;
                 }
-                break;
+                goto __break;
 
             case EV_TASK_READLINE:
                 // 确保line_buffer有足够空间
@@ -386,9 +413,11 @@ main:
                         uint32_t readed = buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
 
                         // 触发回调
-                        CALL_AND_HANDLE(task -> cb.read, evfd, task -> buffer -> buffer, readed, task -> opaque){
-                            buffer_seek(evfd -> read_buffer, i - start + 1);
-                        }
+                        CALL_AND_HANDLE(
+                            task -> cb.read,
+                            { buffer_seek(evfd -> read_buffer, i - start + 1); },
+                            evfd, task -> buffer -> buffer, readed, task -> opaque
+                        );
                         goto _continue;
                     } else if(*p == '\r' && !i2){
                         i2 = i; // 记录\r位置，备用
@@ -402,9 +431,11 @@ main:
                     // 导出并出发回调
                     uint32_t readed = buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
                     task -> buffer -> buffer[readed-1] = '\0';    // end with \0
-                    CALL_AND_HANDLE(task -> cb.read, evfd, task -> buffer -> buffer, readed, task -> opaque){
-                        buffer_seek(evfd -> read_buffer, i2 +1);
-                    }
+                    CALL_AND_HANDLE(
+                        task -> cb.read,
+                        { buffer_seek(evfd -> read_buffer, i2 +1); },
+                        evfd, task -> buffer -> buffer, readed, task -> opaque
+                    );
                     
                     goto _continue;
                 }
@@ -412,14 +443,16 @@ main:
                 // 缓冲区满但未找到换行符
                 if (bufsize >= task -> buffer -> size) {
                     buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
-                    CALL_AND_HANDLE(task -> cb.read, evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque){
-                        buffer_clear(evfd -> read_buffer);
-                    }
+                    CALL_AND_HANDLE(
+                        task -> cb.read,
+                        { buffer_clear(evfd -> read_buffer); },
+                        evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque
+                    )
                     goto _continue;
                 }
 
                 // 没有换行符
-                break;
+                goto __break;
         
             case EV_TASK_READONCE: // readonce
                 // int available;
@@ -427,9 +460,11 @@ main:
                 // available = available > task->total_size ? task->total_size : available;
 
                 buffer_copyto(evfd -> read_buffer, task -> buffer -> buffer, task -> buffer -> size);
-                CALL_AND_HANDLE(task -> cb.read, evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque){
-                    buffer_clear(evfd -> read_buffer);
-                }
+                CALL_AND_HANDLE(
+                    task -> cb.read,
+                    { buffer_clear(evfd -> read_buffer); },
+                    evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque
+                )
                 goto _continue;
 
             // 真正写入的部分在另一个pipe handle_write中
@@ -445,19 +480,21 @@ main:
 
                 if(buffer_is_full(evfd -> read_buffer))
                     EVFD_YIELD(evfd, EPOLLOUT);
-                break;
+                goto __break;
 
             _continue:
                 if(evfd -> destroy) return;   // task already destroyed
-                list_del(&task->list);
                 evloop_events --;
                 buffer_free(task -> buffer);
                 free(task);
                 continue;
 
+            __break:
+                if(evfd -> destroy) return;
+                list_add(&task->list, &evfd->u.task.write_tasks);
+
             _break:
                 if(evfd -> destroy) return;   // task already destroyed
-                list_del(&task->list);
                 evloop_events --;
                 free(task -> buffer);
                 free(task);
@@ -491,6 +528,8 @@ static bool check_aio_alignment(EvFD* evfd, struct Buffer* buf, off_t offset) {
 #endif
 
 static inline int submit_aio_read(EvFD* evfd, struct Task* task){
+    if(!is_aio_supported) return -1;
+
     // buffer对齐
     buffer_aligned(task -> buffer, blksize_get(evfd->fd[1]));
 
@@ -505,7 +544,7 @@ static inline int submit_aio_read(EvFD* evfd, struct Task* task){
         .aio_flags = IOCB_FLAG_RESFD,
         .aio_resfd = evfd->fd[0],
     };
-    int ret = io_submit(evfd -> aio_ctx, 1, (struct iocb*[1]){&iocb});
+    int ret = io_submit(evfd -> aio.ctx, 1, (struct iocb*[1]){&iocb});
 #ifdef LJS_DEBUG
     printf("submit_aio_read: fd=%d, size=%d, ret=%d\n", evfd->fd[1], task->buffer->size -1, ret);
     if(ret == -1) perror("io_submit");
@@ -515,6 +554,8 @@ static inline int submit_aio_read(EvFD* evfd, struct Task* task){
 
 // 注意这里的buffer不能circular
 static inline int submit_aio_write(EvFD* evfd, struct Task* task) {
+    if(!is_aio_supported) return -1;
+
     // buffer对齐，适配aio
     buffer_aligned(task -> buffer, blksize_get(evfd->fd[1]));
     task -> aio_write_remain = task -> buffer -> size;
@@ -537,7 +578,7 @@ static inline int submit_aio_write(EvFD* evfd, struct Task* task) {
         .aio_flags = IOCB_FLAG_RESFD,
         .aio_resfd = evfd->fd[0],
     };
-    int ret = io_submit(evfd -> aio_ctx, 1, (struct iocb*[1]){&iocb});
+    int ret = io_submit(evfd -> aio.ctx, 1, (struct iocb*[1]){&iocb});
 
 #ifdef LJS_DEBUG
     printf("submit_aio_write: fd=%d, remain=%d, ret=%d\n", evfd->fd[1], task->aio_write_remain, ret);
@@ -665,12 +706,14 @@ static void handle_close(int fd, void* _evfd) {
     if(!evfd -> destroy) switch (evfd -> type){
         case EVFD_NORM:
         case EVFD_TIMER:
+        case EVFD_INOTIFY:
             close(fd);
         break;
 
         case EVFD_AIO:
-        case EVFD_INOTIFY:
-            io_destroy(evfd -> aio_ctx);
+            close(evfd -> fd[0]);
+            close(evfd -> fd[1]);   // eventfd
+            io_destroy(evfd -> aio.ctx);
         break;
 
         case EVFD_SSL:
@@ -921,7 +964,7 @@ bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data
                     case EVFD_AIO:
                         struct io_event events[MAX_EVENTS];
                         struct timespec timeout = {0, 0};
-                        int ret = io_getevents(evfd->aio_ctx, 1, MAX_EVENTS, events, &timeout);
+                        int ret = io_getevents(evfd->aio.ctx, 1, MAX_EVENTS, events, &timeout);
                         if (ret < 0) {
                             perror("io_getevents");
                             break;
@@ -1036,7 +1079,7 @@ int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback 
 
     // 设置文件类型
     if (use_aio) {
-        if (io_setup(128, &evfd->aio_ctx) < 0) {
+        if (io_setup(MAX_EVENTS, &evfd->aio.ctx) < 0) {
             free(evfd);
             close(fd);
             return -1;
@@ -1070,7 +1113,7 @@ int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback 
     evfd -> u.cb.write = wcb;
     evfd -> u.cb.close = ccb;
 
-    return use_aio ? evfd->aio_ctx : 0;
+    return use_aio ? evfd->aio.ctx : 0;
 }
 
 // 分离事件监听
@@ -1086,7 +1129,7 @@ bool LJS_evcore_detach(int fd, uint8_t type) {
 // 创建新的evfd对象
 EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize,
                    EvCloseCallback close_callback, void* close_opaque) {
-    EvFD* evfd = malloc(sizeof(struct EvFD));
+    EvFD* evfd = malloc(sizeof(EvFD));
     if (!evfd) return NULL;
 
     // 初始化任务队列
@@ -1128,7 +1171,7 @@ EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t
             goto aio_err;
         }
 
-        if(io_setup(NR_FILE, &evfd->aio_ctx) == -1){
+        if(io_setup(MAX_EVENTS, &evfd->aio.ctx) != 0){
             perror("io_setup");
             goto aio_err;
         }
@@ -1279,6 +1322,7 @@ bool LJS_evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
     task->type = EV_TASK_READ;
     task->cb.read = callback;
     task->opaque = user_data;
+    task->buffer = buf;
 
     if(evfd -> type == EVFD_AIO) {
         // 提交AIO
@@ -1318,6 +1362,7 @@ bool LJS_evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
     task->buffer = buf;
     task->cb.read = callback;
     task->opaque = user_data;
+    evfd->strip_if_is_n = false;
     
     if(evfd -> type == EVFD_AIO && submit_aio_read(evfd, task)){
         free(task);
@@ -1493,7 +1538,6 @@ bool LJS_evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque,
 bool LJS_evfd_close(EvFD* evfd) {
     if (!evfd || !evfd->active) return false;
     handle_close(evfd->fd[0], evfd);
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, evfd->fd[0], NULL);
     evfd->active = false;
     return true;
 }

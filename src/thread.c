@@ -609,7 +609,7 @@ void LJS_init_context(App* app, char** init_list){
         // 依赖项
         if(!init_list || in(init_list, "socket")){
             // socket: todo
-            LJS_init_http(ctx);
+            LJS_init_socket(ctx);
         }
         if(!init_list || in(init_list, "process")){
             LJS_init_process(ctx, app -> script_path, app -> argc, app -> argv);

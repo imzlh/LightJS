@@ -710,3 +710,8 @@ void js_handle_promise_reject(
         LJS_dump_error(ctx, reason);
     }
 }
+
+void* js_malloc_proxy(size_t size, void* opaque){
+    JSRuntime* rt = opaque;
+    return js_malloc_rt(rt, size);
+}

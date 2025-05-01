@@ -42,6 +42,7 @@ enum {
 #define MAX_MESSAGE_COUNT 10
 #define EV_REMOVE_ALL (EV_REMOVE_READ | EV_REMOVE_WRITE | EV_REMOVE_EOF)
 #define EVFD_BUFSIZE 16 * 1024
+#define MAX_HEADER_COUNT 64
 
 #ifndef countof
 #define countof(x) (sizeof(x)/sizeof((x)[0]))
@@ -103,7 +104,7 @@ struct HTTP_data {
     float version;
     char* path;
 
-    char*** headers;
+    char** headers[MAX_HEADER_COUNT];
     uint32_t header_count;
     uint32_t header_writed;
 
@@ -127,8 +128,8 @@ enum EvPipeToNotifyType{
 };
 
 #define EVCB_RET_DONE 0
-#define EVCB_RET_REWIND 1 << 1      // rewind current buffer
-#define EVCB_RET_CONTINUE 1 << 2    // continue current task
+#define EVCB_RET_REWIND (1 << 1)      // rewind current buffer
+#define EVCB_RET_CONTINUE (1 << 2)    // continue current task
 
 typedef struct {
     char* message;
@@ -231,6 +232,7 @@ bool LJS_init_module(JSContext *ctx);
 void LJS_init_runtime(JSRuntime* rt);
 bool LJS_init_stdio(JSContext *ctx);
 bool LJS_init_process(JSContext* ctx, char* _entry, uint32_t _argc, char** _argv);
+bool LJS_init_socket(JSContext* ctx);
 
 // Core I/O Pipe
 JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, EvFD** ref);
@@ -243,6 +245,7 @@ bool LJS_evcore_init();
 bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
 int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback wcb, EvCloseCallback ccb, void* opaque);
 bool LJS_evcore_detach(int fd, uint8_t type);
+void LJS_evcore_set_memory(void* (*allocator)(size_t, void*), void* opaque);
 EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
 void LJS_evfd_setup_udp(EvFD* evfd);
 bool LJS_evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
@@ -273,6 +276,7 @@ bool LJS_evcore_inotify_unwatch(EvFD* evfd, int wd);
 
 int js_run_promise_jobs(); // internal use
 bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback callback, void* opaque);
+void* js_malloc_proxy(size_t size, void* opaque);
 
 // compress
 bool LJS_init_compress(JSContext *ctx);

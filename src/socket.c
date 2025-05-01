@@ -783,7 +783,7 @@ static JSValue js_cert_remove(JSContext *ctx, JSValueConst this_val, int argc, J
 #endif
 }
 
-static const JSCFunctionListEntry LJS_socket_funcs[] = {
+static const JSCFunctionListEntry js_socket_funcs[] = {
     JS_CFUNC_DEF("bind", 1, js_bind),
     JS_CFUNC_DEF("connect", 1, js_connect),
     JS_CFUNC_DEF("upgradeTLS", 1, js_ssl_handshake),
@@ -793,7 +793,7 @@ static const JSCFunctionListEntry LJS_socket_funcs[] = {
 };
 
 static int js_init_socket(JSContext* ctx, JSModuleDef* m) {
-    JS_SetModuleExportList(ctx, m, LJS_socket_funcs, countof(LJS_socket_funcs));
+    JS_SetModuleExportList(ctx, m, js_socket_funcs, countof(js_socket_funcs));
 
     // ignore SIGPIPE
     // signal(SIGPIPE, SIG_IGN);
@@ -801,10 +801,10 @@ static int js_init_socket(JSContext* ctx, JSModuleDef* m) {
     return 0;
 }
 
-bool LJS_init_module_socket(JSContext* ctx) {
+bool LJS_init_socket(JSContext* ctx) {
     JSModuleDef* m = JS_NewCModule(ctx, "socket", js_init_socket);
     if(!m) return false;
-    JS_AddModuleExportList(ctx, m, LJS_socket_funcs, countof(LJS_socket_funcs));
+    JS_AddModuleExportList(ctx, m, js_socket_funcs, countof(js_socket_funcs));
     return true;
 }
 

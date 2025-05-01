@@ -32,7 +32,7 @@ static inline void buffer_init(struct Buffer** buf, uint8_t* data, uint32_t size
     struct Buffer* buffer = *buf = (struct Buffer*)malloc(sizeof(struct Buffer));
     if(!buffer) return;
 
-    if(data && size > 0)
+    if(data)
         buffer->buffer = data, buffer->is_dynamic = false;
     else
         buffer->buffer = (uint8_t*)malloc(size), buffer->is_dynamic = true;

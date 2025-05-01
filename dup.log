@@ -1,0 +1,96 @@
+==15899== Memcheck, a memory error detector
+==15899== Copyright (C) 2002-2024, and GNU GPL'd, by Julian Seward et al.
+==15899== Using Valgrind-3.24.0 and LibVEX; rerun with -h for copyright info
+==15899== Command: ./build/ljs test http
+==15899== 
+epoll_ctl: Operation not permitted
+==15899== Conditional jump or move depends on uninitialised value(s)
+==15899==    at 0x200792: parse_evloop_callback (http.c:694)
+==15899==    by 0x1DCC86: handle_read (eventloop.c:416)
+==15899==    by 0x1DE11B: LJS_evcore_run (eventloop.c:961)
+==15899==    by 0x11DA46: main (main.c:249)
+==15899==  Uninitialised value was created by a heap allocation
+==15899==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==15899==    by 0x203664: js_fetch (http.c:1468)
+==15899==    by 0x14A95E: js_call_c_function (quickjs.c:16263)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x14DF89: JS_CallInternal (quickjs.c:16859)
+==15899==    by 0x15B6C3: async_func_resume (quickjs.c:19193)
+==15899==    by 0x15C024: js_async_function_resume (quickjs.c:19448)
+==15899==    by 0x15C7BF: js_async_function_call (quickjs.c:19567)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x14DF89: JS_CallInternal (quickjs.c:16859)
+==15899==    by 0x15B6C3: async_func_resume (quickjs.c:19193)
+==15899==    by 0x15C024: js_async_function_resume (quickjs.c:19448)
+==15899== 
+==15899== Use of uninitialised value of size 8
+==15899==    at 0x200A95: parse_evloop_callback (http.c:750)
+==15899==    by 0x1DCC86: handle_read (eventloop.c:416)
+==15899==    by 0x1DE11B: LJS_evcore_run (eventloop.c:961)
+==15899==    by 0x11DA46: main (main.c:249)
+==15899==  Uninitialised value was created by a heap allocation
+==15899==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==15899==    by 0x203664: js_fetch (http.c:1468)
+==15899==    by 0x14A95E: js_call_c_function (quickjs.c:16263)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x14DF89: JS_CallInternal (quickjs.c:16859)
+==15899==    by 0x15B6C3: async_func_resume (quickjs.c:19193)
+==15899==    by 0x15C024: js_async_function_resume (quickjs.c:19448)
+==15899==    by 0x15C7BF: js_async_function_call (quickjs.c:19567)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x14DF89: JS_CallInternal (quickjs.c:16859)
+==15899==    by 0x15B6C3: async_func_resume (quickjs.c:19193)
+==15899==    by 0x15C024: js_async_function_resume (quickjs.c:19448)
+==15899== 
+==15899== Conditional jump or move depends on uninitialised value(s)
+==15899==    at 0x200454: find_header (http.c:597)
+==15899==    by 0x200912: parse_evloop_callback (http.c:731)
+==15899==    by 0x1DCC86: handle_read (eventloop.c:416)
+==15899==    by 0x1DE11B: LJS_evcore_run (eventloop.c:961)
+==15899==    by 0x11DA46: main (main.c:249)
+==15899==  Uninitialised value was created by a heap allocation
+==15899==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==15899==    by 0x203664: js_fetch (http.c:1468)
+==15899==    by 0x14A95E: js_call_c_function (quickjs.c:16263)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x14DF89: JS_CallInternal (quickjs.c:16859)
+==15899==    by 0x15B6C3: async_func_resume (quickjs.c:19193)
+==15899==    by 0x15C024: js_async_function_resume (quickjs.c:19448)
+==15899==    by 0x15C7BF: js_async_function_call (quickjs.c:19567)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x14DF89: JS_CallInternal (quickjs.c:16859)
+==15899==    by 0x15B6C3: async_func_resume (quickjs.c:19193)
+==15899==    by 0x15C024: js_async_function_resume (quickjs.c:19448)
+==15899== 
+==15899== Conditional jump or move depends on uninitialised value(s)
+==15899==    at 0x200F5F: js_response_get_headers (http.c:841)
+==15899==    by 0x14AA19: js_call_c_function (quickjs.c:16280)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x15AA3C: JS_CallFree (quickjs.c:18941)
+==15899==    by 0x130B29: JS_GetPropertyInternal (quickjs.c:7592)
+==15899==    by 0x154890: JS_CallInternal (quickjs.c:17786)
+==15899==    by 0x15B6C3: async_func_resume (quickjs.c:19193)
+==15899==    by 0x15C024: js_async_function_resume (quickjs.c:19448)
+==15899==    by 0x15C5DD: js_async_function_resolve_call (quickjs.c:19534)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x15A9AD: JS_Call (quickjs.c:18934)
+==15899==    by 0x1BD71C: promise_reaction_job (quickjs.c:50191)
+==15899==  Uninitialised value was created by a heap allocation
+==15899==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==15899==    by 0x203664: js_fetch (http.c:1468)
+==15899==    by 0x14A95E: js_call_c_function (quickjs.c:16263)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x14DF89: JS_CallInternal (quickjs.c:16859)
+==15899==    by 0x15B6C3: async_func_resume (quickjs.c:19193)
+==15899==    by 0x15C024: js_async_function_resume (quickjs.c:19448)
+==15899==    by 0x15C7BF: js_async_function_call (quickjs.c:19567)
+==15899==    by 0x14B3A8: JS_CallInternal (quickjs.c:16478)
+==15899==    by 0x14DF89: JS_CallInternal (quickjs.c:16859)
+==15899==    by 0x15B6C3: async_func_resume (quickjs.c:19193)
+==15899==    by 0x15C024: js_async_function_resume (quickjs.c:19448)
+==15899== 
+[31m error [0m[31mError[0m: Assertion failed
+      at <anonymous> (test/index.js:53:31)
+      at <anonymous> (test/http.js:9:12)
+  
+ 
