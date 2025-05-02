@@ -18,7 +18,7 @@ test("stat", () => {
     assert(s.size === "Hello World".length);
 });
 
-await test2("open", async () => {
+await test("open", async () => {
     const pipe = open("test2.txt", "r+");
     console.log(pipe);
     const res = await pipe.read("Hello World".length);
@@ -27,6 +27,7 @@ await test2("open", async () => {
     assert(isEqual(res, encodeStr("Hello World")), "Read mismatch with write");
     
     await pipe.write(encodeStr("Goodbye World"));
+    await pipe.write(encodeStr("!!"));
     pipe.close();
     
     assert(pipe.closed, "Pipe should be closed after read");

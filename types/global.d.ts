@@ -161,6 +161,10 @@ declare class U8Pipe {
     close(): void;
     read(length?: number): Promise<Uint8Array | null>;
     readline(): Promise<Uint8Array | null>;
+    /**
+     * 只支持基于fd的pipe(fdpipe)
+     */
+    sync(): Promise<void>;
     readonly closed: boolean;
     readonly onclose: Promise<void>;
 

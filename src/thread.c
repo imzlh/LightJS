@@ -458,7 +458,7 @@ static int worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size
 }
 
 // for worker thread
-static void worker_close_callback(int fd, void* user_data){
+static void worker_close_callback(EvFD* fd, void* user_data){
     close(((App*)user_data) -> worker -> efd_worker2main);
     worker_exit(0, "worker closed");
 }
@@ -514,7 +514,7 @@ static void main_writeable_callback(EvFD* __, void* opaque){
 }
 
 // for main thread
-static void main_close_callback(int fd, void* user_data){
+static void main_close_callback(EvFD* fd, void* user_data){
     App* app = (App*)user_data; // worker APP, not main!
     JSContext* ctx = app -> worker -> parent -> ctx;
 
@@ -560,8 +560,16 @@ static void LJS_worker_loop(App* app, JSValue func){
     }
 
     // 监听pipe
-    LJS_evcore_attach(app -> worker -> efd_main2worker, false, worker_message_callback, NULL, worker_close_callback, app);
-    LJS_evcore_attach(app -> worker -> efd_worker2main, false, NULL, worker_writeable_callback, NULL, app);
+    LJS_evcore_attach(app -> worker -> efd_main2worker, false, 
+        worker_message_callback, app,
+        NULL, NULL,
+        worker_close_callback, app
+    );
+    LJS_evcore_attach(app -> worker -> efd_worker2main, false, 
+        NULL, NULL,
+        worker_writeable_callback, app,
+        NULL, NULL
+    );
 
     // 启动事件循环
     LJS_evcore_run(NULL, NULL);
@@ -765,8 +773,16 @@ static JSValue js_create_worker(JSContext* ctx, JSValueConst new_target, int arg
     App* app = LJS_NewWorker((App*)JS_GetContextOpaque(ctx));
 
     // evloop
-    LJS_evcore_attach(app -> worker -> efd_worker2main, false, main_message_callback, NULL, main_close_callback, app);
-    LJS_evcore_attach(app -> worker -> efd_main2worker, false, NULL, main_writeable_callback, NULL, app);
+    LJS_evcore_attach(app -> worker -> efd_worker2main, false, 
+        main_message_callback, app,
+        NULL, NULL,
+        main_close_callback, app
+    );
+    LJS_evcore_attach(app -> worker -> efd_main2worker, false,
+        NULL, NULL,
+        main_writeable_callback, app,
+        NULL, NULL
+    );
 
     // construct class
     JSValue obj = JS_NewObjectClass(ctx, js_worker_class_id);

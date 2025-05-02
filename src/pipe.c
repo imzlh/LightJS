@@ -14,9 +14,6 @@
 #include <threads.h>
 #include <termios.h>
 
-#define PIPE_READ 0b1
-#define PIPE_WRITE 0b10
-
 // 从FD创建的管道
 struct FDPipe_T{
     EvFD* fd;
@@ -30,7 +27,9 @@ struct FDPipe_T{
     JSValue write_buf;
 
     JSValue close_rs;
+    JSValue close_rj;   // for socket only
     bool closed;
+    bool is_socket; // 为socket优化
 };
 struct U8PipeTransfer {
     JSValue jspipe[2];          // [from, dest], free if ended
@@ -88,6 +87,13 @@ static thread_local uint32_t PIPE_u8_buf_size = 16 * 1024;
     JS_SetPropertyStr(ctx, obj, "onclose", prom); \
     pipe -> close_rs = promise[0]; \
     JS_FreeValue(ctx, promise[1]); \
+}
+#define DEF_ONCLOSE2(pipe) { \
+    JSValue promise[2]; \
+    JSValue prom = JS_NewPromiseCapability(ctx, promise); \
+    JS_SetPropertyStr(ctx, obj, "onclose", prom); \
+    pipe -> close_rs = promise[0]; \
+    pipe -> close_rj = promise[1]; \
 }
 
 static void pipe_unlock_job(JSContext* ctx, bool is_error, JSValue res, void* opaque){
@@ -238,7 +244,7 @@ static JSValue js_pipe_constructor(JSContext *ctx, JSValueConst new_target, int 
 #define CHECK_U8PIPE_LOCKED(pipe, read) if(u8pipe_locked(ctx, pipe, read)) return JS_ThrowTypeError(ctx, "U8Pipe is locked");
 
 #undef EXCEPTION_THEN_CLOSE
-#define EXCEPTION_THEN_CLOSE(val, ret) if(JS_IsException(val)){ u8pipe_handle_close(JS_GetRuntime(ctx), pipe); return ret; } \
+#define EXCEPTION_THEN_CLOSE(val, ret) if(JS_IsException(val)){ u8pipe_handle_close(JS_GetRuntime(ctx), pipe, false); return ret; } \
     else if(JS_IsPromise(val)) JS_PromiseHandleError(ctx, val);
 #define CALL_ONCLOSE(pipe) JS_Call(pipe -> ctx, pipe -> close_rs, JS_NULL, 0, NULL);
 
@@ -253,7 +259,7 @@ static JSValue js_pipe_constructor(JSContext *ctx, JSValueConst new_target, int 
 //     // proxy -> ctx = ctx;
 // }
 
-static void u8pipe_handle_close(JSRuntime *rt, struct U8Pipe_T* pipe){
+static void u8pipe_handle_close(JSRuntime *rt, struct U8Pipe_T* pipe, bool closed){
     if(pipe -> transfer){
         JS_FreeValueRT(rt, pipe->transfer->jspipe[0]);
         JS_FreeValueRT(rt, pipe->transfer->jspipe[1]);
@@ -262,14 +268,35 @@ static void u8pipe_handle_close(JSRuntime *rt, struct U8Pipe_T* pipe){
     }
 
     if(pipe -> fdpipe){
-        if(pipe -> pipe.fdpipe && !pipe -> pipe.fdpipe -> closed){
-            LJS_evfd_close(pipe -> pipe.fdpipe  -> fd);
-            if(JS_IsFunction(pipe -> pipe.fdpipe -> ctx, pipe -> pipe.fdpipe  -> close_rs))
-                JS_FreeValueRT(rt, pipe -> pipe.fdpipe  -> close_rs);
-            pipe -> pipe.fdpipe  -> closed = true;
-            CALL_ONCLOSE(pipe -> pipe.fdpipe);
+        struct FDPipe_T* fdpipe = pipe -> pipe.fdpipe;
+        if(fdpipe && !fdpipe -> closed){
+            if(!closed) LJS_evfd_close(fdpipe  -> fd);
+            fdpipe  -> closed = true;
+            if(fdpipe -> is_socket){
+                int error = 0;
+                socklen_t errlen = sizeof(error);
+                
+                if (getsockopt(LJS_evfd_getfd(fdpipe -> fd, NULL), SOL_SOCKET, SO_ERROR, &error, &errlen) == -1)
+                    error = errno;
+
+                if(error == 0){
+                    CALL_ONCLOSE(fdpipe);
+                } else {
+                    JSValue error_obj = JS_NewError(fdpipe -> ctx);
+                    JS_SetPropertyStr(fdpipe -> ctx, error_obj, "message", JS_NewString(fdpipe -> ctx, strerror(error)));
+                    JS_SetPropertyStr(fdpipe -> ctx, error_obj, "code", JS_NewInt32(fdpipe -> ctx, error));
+                    JS_Call(fdpipe -> ctx, fdpipe -> close_rj, JS_NULL, 1, (JSValueConst[]){ error_obj });
+                }
+            }else{
+                CALL_ONCLOSE(fdpipe);
+            }
+
+            if(JS_IsFunction(fdpipe -> ctx, fdpipe  -> close_rs)){
+                JS_FreeValueRT(rt, fdpipe  -> close_rs);
+                JS_FreeValueRT(rt, fdpipe  -> close_rj);
+            }
         }
-        js_free_rt(rt, pipe -> pipe.fdpipe );
+        js_free_rt(rt, fdpipe);
         // pipe -> pipe.fdpipe  -> fd was freed by evfd
     }else{
         pipe_handle_close(rt, pipe -> pipe.pipe);
@@ -395,6 +422,7 @@ static inline bool u8pipe_fill(JSContext* ctx, struct U8Pipe_T* pipe, struct pro
 
 static int evread_callback(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data){
     struct FDPipe_T* pipe = user_data;
+    if(!pipe -> read) return EVCB_RET_DONE;   // (for socket) target respond
     if(read_size > 0){
         JSValue data = JS_NewUint8Array(pipe -> ctx, buffer, read_size, free_js_malloc, NULL, false);
         LJS_Promise_Resolve(pipe -> read, data);
@@ -480,9 +508,30 @@ static JSValue js_U8Pipe_close(JSContext *ctx, JSValueConst this_val, int argc, 
     GET_U8PIPE_OPAQUE(pipe, this_val);
     CHECK_U8PIPE_CLOSED(pipe);
 
-    LJS_evfd_close(pipe -> pipe.fdpipe -> fd);
+    if(pipe -> fdpipe && pipe -> pipe.fdpipe -> is_socket)
+        shutdown(LJS_evfd_getfd(pipe -> pipe.fdpipe -> fd, NULL), SHUT_RDWR);
+    else
+        LJS_evfd_close(pipe -> pipe.fdpipe -> fd);
 
     return JS_UNDEFINED;
+}
+
+static void sync_promise_proxy(EvFD* fd, void* opaque){
+    struct promise* promise = opaque;
+    if(((uintptr_t)promise -> user_data ++) == 1)
+        LJS_Promise_Resolve(promise, JS_UNDEFINED);
+}
+
+static JSValue js_U8Pipe_sync(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    GET_U8PIPE_OPAQUE(pipe, this_val);
+    CHECK_U8PIPE_CLOSED(pipe);
+    if(!pipe -> fdpipe) return LJS_Throw(ctx, "U8Pipe.sync() only support for fdpipe", NULL);
+
+    struct promise* promise = LJS_NewPromise(ctx);
+    promise -> user_data = 0;
+    LJS_evfd_wait(pipe -> pipe.fdpipe -> fd, false, sync_promise_proxy, promise);
+    LJS_evfd_wait(pipe -> pipe.fdpipe -> fd, true, sync_promise_proxy, promise);
+    return promise -> promise;
 }
 
 static JSValue js_U8Pipe_readline(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -700,11 +749,10 @@ static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc,
     return from -> transfer -> promise -> promise;
 }
 
-static void evclose_callback(int fd, void* opaque){
+static void evclose_callback(EvFD* fd, void* opaque){
     struct FDPipe_T* pipe = ((struct U8Pipe_T*)opaque) -> pipe.fdpipe;
-    pipe -> closed = true;
-    CALL_ONCLOSE(pipe);
-    u8pipe_handle_close(JS_GetRuntime(pipe -> ctx), (struct U8Pipe_T*)opaque);
+    if(!pipe -> closed)
+        u8pipe_handle_close(JS_GetRuntime(pipe -> ctx), (struct U8Pipe_T*)opaque, true);
 }
 
 static JSValue js_U8Pipe_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
@@ -896,6 +944,7 @@ static const JSCFunctionListEntry U8Pipe_proto_funcs[] = {
     JS_CGETSET_DEF("closed", js_u8pipe_get_closed, NULL),
     JS_CFUNC_DEF("readline", 1, js_U8Pipe_readline),
     JS_CFUNC_DEF("pipeTo", 1, js_U8Pipe_pipeTo),
+    JS_CFUNC_DEF("sync", 0, js_U8Pipe_sync),
     JS_CFUNC_DEF("ttyRaw", 1, js_iopipe_setraw),
     JS_CGETSET_DEF("ttySize", js_iopipe_get_size, js_iopipe_set_size),
     JS_CGETSET_DEF("isTTY", js_iopipe_istty, NULL),
@@ -951,11 +1000,12 @@ static inline JSValue u8pipe_new(JSContext *ctx, bool fdpipe, struct U8Pipe_T *p
 
     if(fdpipe){
         pipe -> pipe.fdpipe = js_malloc(ctx, sizeof(struct FDPipe_T));
-        DEF_ONCLOSE(pipe -> pipe.fdpipe);
+        DEF_ONCLOSE2(pipe -> pipe.fdpipe);
         
         pipe -> pipe.fdpipe -> closed = false;
         // not locked check
         pipe -> pipe.fdpipe -> read = pipe -> pipe.fdpipe -> write = NULL;
+        pipe -> pipe.fdpipe -> is_socket = false;
     }else{
         pipe -> pipe.pipe = js_malloc(ctx, sizeof(struct Pipe_T));
         DEF_ONCLOSE(pipe -> pipe.pipe);
@@ -983,12 +1033,18 @@ JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, 
         return LJS_Throw(ctx, "Failed to bind FD: %s", NULL, strerror(errno));
     }
 
+#ifdef LJS_DEBUG
+    if (flag & PIPE_SOCKET)
+        printf("fdpipe socket: %d\n", fd);
+#endif
+
     pipe -> pipe.fdpipe -> fd = evfd;
     pipe -> pipe.fdpipe -> flag = flag;
     pipe -> pipe.fdpipe -> ctx = ctx;
     pipe -> pipe.fdpipe -> read = 
     pipe -> pipe.fdpipe -> write = NULL;
     pipe -> pipe.fdpipe -> closed = false;
+    pipe -> pipe.fdpipe -> is_socket = flag & PIPE_SOCKET;
     pipe -> js_freed = false;
     if(ref) *ref = evfd;
     return obj;

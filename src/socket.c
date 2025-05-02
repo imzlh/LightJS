@@ -24,13 +24,12 @@
 #define BUFFER_SIZE 64 * 1024
 
 struct JS_Server_Data{
-    JSValue on_connection;
+    JSValue on_connection;  // to handle a new connection
+    JSValue on_close;
     int fd;
     JSContext* ctx;
     uint32_t bufsize;
     bool ssl;
-
-    struct promise* promise;
 };
 
 JSValue js_server_close(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic, JSValueConst* func_data){
@@ -39,7 +38,7 @@ JSValue js_server_close(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     return JS_UNDEFINED;
 }
 
-int socket_handle_connect(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data) {
+int server_handle_accept(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data) {
     struct JS_Server_Data* data = (struct JS_Server_Data*)user_data;
 
     // accept
@@ -88,48 +87,84 @@ int socket_handle_connect(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void*
     return EVCB_RET_DONE;
 }
 
-static void socket_handle_close(int fd, void* user_data) {
+static void server_handle_close(EvFD* fd, void* user_data) {
     struct JS_Server_Data* data = (struct JS_Server_Data*)user_data;
-    JSValue close_handler = data->promise -> resolve;
-    if(JS_IsFunction(data -> ctx, close_handler)) {
-        JSValue args[1] = { JS_UNDEFINED };
-        JS_Call(data -> ctx, close_handler, JS_UNDEFINED, 1, args);
+    JS_FreeValue(data -> ctx, data -> on_connection);
+    if(!JS_IsUndefined(data -> on_close)){
+        JS_Call(data -> ctx, data -> on_close, JS_UNDEFINED, 0, NULL);
+        JS_FreeValue(data -> ctx, data -> on_close);
     }
-
-    // clear
-    LJS_FreePromise(data -> promise);
     free(data);
 }
 
-static int open_socket(const char* protocol, const char* host, uint16_t port, const char* unix_path) {
-    int sockfd = -1;
+#define NONBLOCK(fd) fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+static inline int socket_create(const char* protocol){
+    if(strstr(protocol, "tcp")) return socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(strstr(protocol, "tcp6")) return socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(strstr(protocol, "unix")) return socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    return -1;
+}
+
+static bool socket_connect(int sockfd, const char* protocol, const char* host, uint16_t port, const char* unix_path) {
+    NONBLOCK(sockfd);
+    
     if(strstr(protocol, "tcp")) {
-        struct sockaddr_in addr_in;
-        memset(&addr_in, 0, sizeof(addr_in));
-        addr_in.sin_family = AF_INET;
-        addr_in.sin_port = htons(port);
-        addr_in.sin_addr.s_addr = inet_addr(host);
-        if(addr_in.sin_addr.s_addr == INADDR_NONE) return -2;
-        sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        struct sockaddr_in addr_in = {
+            .sin_family = AF_INET,
+            .sin_addr.s_addr = inet_addr(host),
+            .sin_port = htons(port)
+        };
+        if(inet_pton(AF_INET, host, &addr_in.sin_addr) != 1) return -2;
+
         connect(sockfd, (struct sockaddr*)&addr_in, sizeof(addr_in));
     }else if(strstr(protocol, "tcp6")) {
-        struct sockaddr_in6 addr_in6;
-        memset(&addr_in6, 0, sizeof(addr_in6));
-        addr_in6.sin6_family = AF_INET6;
-        addr_in6.sin6_port = htons(port);
+        struct sockaddr_in6 addr_in6 = {
+            .sin6_family = AF_INET6,
+            .sin6_port = htons(port)
+        };
         if(inet_pton(AF_INET6, host, &addr_in6.sin6_addr) != 1) return -2;
-        sockfd = socket(AF_INET6, SOCK_STREAM, 0);
+
         connect(sockfd, (struct sockaddr*)&addr_in6, sizeof(addr_in6));
     }else if(strstr(protocol, "unix")){
-        struct sockaddr_un addr_un;
-        memset(&addr_un, 0, sizeof(addr_un));
-        addr_un.sun_family = AF_UNIX;
+        struct sockaddr_un addr_un = {
+            .sun_family = AF_UNIX
+        };
         strncpy(addr_un.sun_path, unix_path, sizeof(addr_un.sun_path)-1);
-        sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+
         connect(sockfd, (struct sockaddr*)&addr_un, sizeof(addr_un));
     }
-    if(sockfd < 0) return -1;
-    return sockfd;
+    
+    return true;
+}
+
+static int socket_listen(int sockfd, const char* protocol, const char* host, uint16_t port, const char* unix_path) {
+    int bindres = -1;
+    if(strstr(protocol, "tcp")) {
+        struct sockaddr_in addr_in = {
+            .sin_family = AF_INET,
+            .sin_addr.s_addr = inet_addr(host),
+            .sin_port = htons(port)
+        };
+        if(inet_pton(AF_INET, host, &addr_in.sin_addr) != 1) return -2;
+
+        bindres = bind(sockfd, (struct sockaddr*)&addr_in, sizeof(addr_in));
+    }else if(strstr(protocol, "tcp6")) {
+        struct sockaddr_in6 addr_in6 = {
+            .sin6_family = AF_INET6,
+            .sin6_port = htons(port)
+        };
+        if(inet_pton(AF_INET6, host, &addr_in6.sin6_addr) != 1) return -2;
+
+        bindres = bind(sockfd, (struct sockaddr*)&addr_in6, sizeof(addr_in6));
+    }else if(strstr(protocol, "unix")){
+        struct sockaddr_un addr_un = {
+            .sun_family = AF_UNIX
+        };
+        strncpy(addr_un.sun_path, unix_path, sizeof(addr_un.sun_path)-1);
+
+        bindres = bind(sockfd, (struct sockaddr*)&addr_un, sizeof(addr_un));
+    }
+    return listen(sockfd, 128) == 0;
 }
 
 // Async DNS
@@ -153,8 +188,6 @@ struct dns_header {
     uint16_t nscount;
     uint16_t arcount;
 };
-
-
 
 // 生成随机事务ID
 static uint16_t generate_transaction_id() {
@@ -450,37 +483,27 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     if(addr == NULL) {
         return JS_EXCEPTION;
     }
-    const char *bindto = NULL;
-    URL_data bind_addr;
-    
-    if (argc <= 1) return JS_EXCEPTION;
-    const char* addr_str = JS_ToCString(ctx, argv[0]);
-    if(addr_str == NULL) {
-        return JS_EXCEPTION;
+    URL_data bind_addr = {};
+    if(LJS_parse_url(addr, &bind_addr, NULL) == false) {
+        JS_ThrowTypeError(ctx, "bind: invalid address");
+        goto fail1;
     }
-    char* addr_copied = strdup(addr_str);
-    if(LJS_parse_url(addr_copied, &bind_addr, NULL) == false) {
-        free(addr_copied);
-        return JS_ThrowTypeError(ctx, "bind: invalid address");
-    }
-    free(addr_copied);
 
     // 绑定地址
-    int sockfd = open_socket(bind_addr.protocol, bind_addr.host, bind_addr.port, bind_addr.path);
+    int sockfd = socket_create(bind_addr.protocol);
     uint32_t bufsize = BUFFER_SIZE;
-    if(sockfd < 0) {
-        return JS_ThrowTypeError(ctx, "bind: failed to create socket: %s", strerror(errno));
-    }
 
+    JSValue onclose = JS_UNDEFINED;
     if(argc == 3) {
         if(!JS_IsObject(argv[2])) {
-            return JS_ThrowTypeError(ctx, "bind: tcpsettings must be an object");
+            LJS_Throw(ctx, "bind: tcpsettings must be an object", NULL);
+            goto fail2;
         }
 
         JSValue val;
         if(JS_IsNumber(val = JS_GetPropertyStr(ctx, argv[2], "bufferSize"))){
             int bufferSize;
-            if(JS_ToInt32(ctx, &bufferSize, val)){
+            if(JS_ToInt32(ctx, &bufferSize, val) != -1){
                 setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufferSize, sizeof(bufferSize));
                 setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &bufferSize, sizeof(bufferSize));
             }
@@ -488,10 +511,13 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
         }
         if(JS_IsNumber(val = JS_GetPropertyStr(ctx, argv[2], "timeout"))){
             int timeout;
-            if(JS_ToInt32(ctx, &timeout, val)){
+            if(JS_ToInt32(ctx, &timeout, val) != -1){
                 setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
                 setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
             }
+        }
+        if(JS_IsFunction(ctx, val = JS_GetPropertyStr(ctx, argv[2], "onclose"))){
+            onclose = JS_DupValue(ctx, val);
         }
         // TCP设置
         if (strcmp(bind_addr.protocol, "unix") != 0){
@@ -500,34 +526,57 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
                 setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(val));
             }
             if(JS_IsBool(val = JS_GetPropertyStr(ctx, argv[2], "nodelay"))){
-                int nodelay = JS_ToBool(ctx, val);
+                bool nodelay = JS_ToBool(ctx, val);
                 setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
             }
             if(JS_IsBool(val = JS_GetPropertyStr(ctx, argv[2], "keepalive"))){
-                int keepalive = JS_ToBool(ctx, val);
+                bool keepalive = JS_ToBool(ctx, val);
                 setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, (const char *)&keepalive, sizeof(keepalive));
             }
-            if(JS_IsBool(val = JS_GetPropertyStr(ctx, argv[2], "bindto"))){
-                bindto = JS_ToCString(ctx, val);
-                if(bindto == NULL) {
-                    return JS_EXCEPTION;
+            if(JS_IsString(val = JS_GetPropertyStr(ctx, argv[2], "bindto"))){
+                const char* bindto = JS_ToCString(ctx, val);
+                if(bindto != NULL) {
+                    setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, bindto, strlen(bindto));
+                    JS_FreeCString(ctx, bindto);
                 }
-                setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, bindto, strlen(bindto));
             }
         }
     }
+
+    // start
+    if(!socket_listen(sockfd, bind_addr.protocol, bind_addr.host, bind_addr.port, bind_addr.path)){
+        LJS_Throw(ctx, "bind: failed to bind address: %s", NULL, strerror(errno));
+        goto fail3;
+    }
  
     // 添加到evloop
-    struct promise* promise = LJS_NewPromise(ctx);
     struct JS_Server_Data* data = malloc(sizeof(struct JS_Server_Data));
-    data->promise = promise;
-    data->on_connection = handler;
+    data->on_connection = JS_DupValue(ctx, handler);
     data->fd = sockfd;
     data->ctx = ctx;
     data->bufsize = bufsize;
-    LJS_evcore_attach(sockfd, false, socket_handle_connect, (EvWriteCallback)NULL, socket_handle_close, data);
+    data->on_close = onclose;
+    EvFD* evfd = LJS_evcore_attach(sockfd, false, 
+        server_handle_accept, data,    // read callback
+        NULL, NULL,                     // write callback
+        server_handle_close, data       // close callback
+    );
 
-    return promise -> promise;
+    if(evfd == NULL){
+        LJS_Throw(ctx, "bind: failed to add to event loop: %s", NULL, strerror(errno));
+        goto fail3;
+    }
+
+    JSValue func = JS_NewCFunctionData(ctx, js_server_close, 0, 0, 1, (JSValueConst[]){ JS_MKPTR(JS_TAG_OBJECT, evfd) });
+    return func;
+
+fail3:
+    close(sockfd);
+fail2:
+    LJS_free_url(&bind_addr);
+fail1:
+    JS_FreeCString(ctx, addr);
+    return JS_EXCEPTION;
 }
 
 static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
@@ -545,21 +594,26 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     }
     JS_FreeCString(ctx, addr_str);
 
-    int sockfd = open_socket(addr.protocol, addr.host, addr.port, addr.path);
+    int sockfd = socket_create(addr.protocol);
+    socket_connect(sockfd, addr.protocol, addr.host, addr.port, addr.path);
+    LJS_free_url(&addr);
     if(sockfd == -1) return LJS_Throw(ctx, "failed to connect: %s", NULL, strerror(errno));
 
     // TCP设置
     JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
     uint32_t buffer_size = BUFFER_SIZE;
-    JS_ToUint32(ctx, &buffer_size, JS_GetPropertyStr(ctx, obj, "bufferSize"));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
-    int timeout = 0;
-    JS_ToInt32(ctx, &timeout, JS_GetPropertyStr(ctx, obj, "timeout"));
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    if(-1 != JS_ToUint32(ctx, &buffer_size, JS_GetPropertyStr(ctx, obj, "bufferSize"))){
+        setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
+    }
+    uint32_t timeout = 0;
+    if(JS_ToUint32(ctx, &timeout, JS_GetPropertyStr(ctx, obj, "timeout")) != -1){
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    }
+    JS_FreeValue(ctx, obj);
 
-    JSValue pipe = LJS_NewFDPipe(ctx, sockfd, PIPE_READ | PIPE_WRITE, buffer_size, NULL);
+    JSValue pipe = LJS_NewFDPipe(ctx, sockfd, PIPE_READ | PIPE_WRITE | PIPE_SOCKET, buffer_size, NULL);
     return pipe;
 }
 
@@ -844,7 +898,9 @@ EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int 
         }
         freeaddrinfo(res);
     }
-    int fd = open_socket(protocol, hostname, port, hostname);
+    int fd = socket_create(protocol);
+    if(fd < 0) return NULL;
+    socket_connect(fd, protocol, hostname, port, hostname);
     if(ssl){
 #ifdef LJS_MBEDTLS
         LJS_init_ssl(fd, user_data);

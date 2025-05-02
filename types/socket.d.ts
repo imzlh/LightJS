@@ -20,7 +20,7 @@ declare module 'socket'{
         nodelay?: boolean,
         keepalive?: boolean,
         bindto?: string,
-        onclose: () => void
+        onclose?: () => void
     }) => CloseFunction;
 
     export const connect: (addr: string, settings?: {

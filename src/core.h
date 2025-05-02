@@ -36,9 +36,10 @@ enum {
 
 #define MAX_EVENTS 64
 #define MAX_QUERY_COUNT 32
-#define PIPE_READ 0b1
-#define PIPE_WRITE 0b10
-#define PIPE_AIO 0b100
+#define PIPE_READ 1
+#define PIPE_WRITE (1 << 1)
+#define PIPE_AIO (1 << 2)
+#define PIPE_SOCKET (1 << 3)
 #define MAX_MESSAGE_COUNT 10
 #define EV_REMOVE_ALL (EV_REMOVE_READ | EV_REMOVE_WRITE | EV_REMOVE_EOF)
 #define EVFD_BUFSIZE 16 * 1024
@@ -56,7 +57,7 @@ typedef JSValue (*PipeCallback)(JSContext* ctx, void* ptr, JSValueConst data);
 /* forward */ typedef enum EvPipeToNotifyType EvPipeToNotifyType;
 typedef int (*EvReadCallback)(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data);
 typedef void (*EvWriteCallback)(EvFD* evfd, void* opaque);
-typedef void (*EvCloseCallback)(int fd, void* opaque);
+typedef void (*EvCloseCallback)(EvFD* fd, void* opaque);
 typedef void (*EvINotifyCallback)(struct inotify_event* event, void* user_data);
 typedef void (*EvSyncCallback)(EvFD* evfd, void* user_data);
 typedef void (*EvTimerCallback)(uint64_t count, void* user_data);
@@ -243,7 +244,7 @@ EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj);
 // Core event loop
 bool LJS_evcore_init();
 bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
-int LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, EvWriteCallback wcb, EvCloseCallback ccb, void* opaque);
+EvFD* LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
 bool LJS_evcore_detach(int fd, uint8_t type);
 void LJS_evcore_set_memory(void* (*allocator)(size_t, void*), void* opaque);
 EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
@@ -255,7 +256,9 @@ bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size, EvWriteCallb
 bool LJS_evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size, const struct sockaddr *addr, socklen_t addr_len, EvWriteCallback callback, void* user_data);
 bool LJS_evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvPipeToNotify notify, void* nopaque);
 bool LJS_evfd_close(EvFD* evfd);
-bool LJS_evfd_destroy(EvFD* evfd);
+bool LJS_evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
+bool LJS_evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque);
+bool LJS_evfd_close2(EvFD* evfd, EvSyncCallback cb, void* opaque);
 bool LJS_evfd_clearbuf(EvFD* evfd);
 bool LJS_evfd_onclose(EvFD* fd, EvCloseCallback callback, void* user_data);
 int LJS_evfd_getfd(EvFD* evfd, int* timer_fd);
@@ -381,6 +384,7 @@ struct promise{
     JSValue resolve;
     JSValue reject;
     JSValue promise;
+    void* user_data;
 };
 
 /**
