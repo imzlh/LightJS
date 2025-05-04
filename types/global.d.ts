@@ -50,16 +50,6 @@ declare class Worker {
     terminate(): void;
 }
 
-declare function fetch(url: string, options?: {
-    method?: string;
-    headers?: Record<string, string>;
-    keepalive?: boolean;
-    referer?: string;
-    host?: string;  // 当URL为unix或ip地址时，需要用于指定请求的Host头
-    body?: Uint8Array | U8Pipe | string;
-}): Promise<import('http').Response>;
-
-
 /**
  * URL
  */

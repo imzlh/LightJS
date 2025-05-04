@@ -135,7 +135,9 @@
         "lrepl.h": "c",
         "setjmp.h": "c",
         "alltypes.h": "c",
-        "quickjs-opcode.h": "c"
+        "quickjs-opcode.h": "c",
+        "random.h": "c",
+        "xsum.h": "c"
     },
     "C_Cpp.errorSquiggles": "enabled"
 }

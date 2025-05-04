@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <assert.h>
 #include <sys/inotify.h>
 #include <arpa/inet.h>
 
@@ -75,7 +76,7 @@ typedef struct{
     char* source_str;   // free
     char *protocol;
     char *host;
-    int port;
+    uint16_t port;
     char *path;
     URL_query_data *query;
     char* query_string;
@@ -262,6 +263,8 @@ bool LJS_evfd_close2(EvFD* evfd, EvSyncCallback cb, void* opaque);
 bool LJS_evfd_clearbuf(EvFD* evfd);
 bool LJS_evfd_onclose(EvFD* fd, EvCloseCallback callback, void* user_data);
 int LJS_evfd_getfd(EvFD* evfd, int* timer_fd);
+bool LJS_evfd_yield(EvFD* evfd, bool yield_read, bool yield_write);
+bool LJS_evfd_consume(EvFD* evfd, bool consume_read, bool consume_write);
 bool LJS_evfd_isAIO(EvFD* evfd);
 #ifdef LJS_MBEDTLS
 bool LJS_evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, bool is_client, int protocol, int preset, EvSSLHandshakeCallback handshake_cb, void* user_data);
@@ -291,7 +294,7 @@ bool LJS_dns_resolve(
 );
 EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int bufsize);
 
-// URL module
+// HTTP module
 char* LJS_resolve_path(const char* path, const char* base);
 bool LJS_parse_query(char *query, URL_query_data *query_list[], int max_query_count);
 bool LJS_parse_url(const char *url, URL_data *url_struct, URL_data *base);
@@ -299,6 +302,8 @@ void LJS_free_url(URL_data *url_struct);
 char* LJS_format_url(URL_data *url_struct);
 JSValue LJS_NewResponse(JSContext *ctx, HTTP_data *data);
 void LJS_parse_from_fd(EvFD* fd, HTTP_data *data, bool is_client, HTTP_ParseCallback callback, void *userdata);
+JSValue LJS_NewWebSocket(JSContext *ctx, EvFD* fd, bool enable_mask);
+JSValue LJS_NewWebSocket(JSContext *ctx, EvFD* fd, bool enable_mask);
 
 // module
 uint8_t *LJS_tryGetJSFile(uint32_t *pbuf_len, char **filename);
@@ -321,8 +326,17 @@ bool LJS_init_ffi(JSContext *ctx);
 // --------------- HELPER FUNCTIONS ------------------------
 void free_js_malloc(JSRuntime *rt, void *opaque, void *ptr);
 void free_malloc(JSRuntime* rt, void* opaque, void* ptr);
+void base64_decode(const char *input, size_t len, uint8_t *output, size_t *output_len);
+void base64_decode(const char *input, size_t len, uint8_t *output, size_t *output_len);
+void base64_encode(const uint8_t *input, size_t len, char *output);
 
 // --------------- BUILT-IN FUNCTIONS ---------------------
+
+static inline const char* LJS_ToCString(JSContext *ctx, JSValueConst val, size_t* psize){
+    if(!JS_IsString(val)) return NULL;  // different from JS_ToCString
+    return JS_ToCStringLen(ctx, psize, val);
+}
+
 /**
  * 抛出一个错误，带有帮助信息
  * @param ctx 运行时上下文
@@ -394,6 +408,7 @@ struct promise{
 static inline struct promise* LJS_NewPromise(JSContext *ctx){
     struct promise* proxy = js_malloc(ctx, sizeof(struct promise));
     if(!proxy) return NULL;
+    assert(ctx != NULL);
     JSValue resolving_funcs[2];
     proxy -> ctx = ctx;
     proxy -> promise = JS_NewPromiseCapability(ctx, resolving_funcs);
@@ -403,14 +418,17 @@ static inline struct promise* LJS_NewPromise(JSContext *ctx){
 }
 
 static inline void LJS_FreePromise(struct promise* proxy){
+    if(!proxy -> ctx) return;
     JS_FreeValue(proxy -> ctx, proxy -> resolve);
     JS_FreeValue(proxy -> ctx, proxy -> reject);
     // WARN: 此处应该由用户决策，所有权是否转移到JS层？
     // JS_FreeValue(proxy -> ctx, proxy -> promise);
     js_free(proxy -> ctx, proxy);
+    proxy -> ctx = NULL;
 }
 
 static inline void LJS_Promise_Resolve(struct promise* proxy, JSValue value){
+    if(!proxy -> ctx) return;   // already done
     JSValue args[1] = {value};
     if(!proxy) return;
     JS_Call(proxy -> ctx, proxy -> resolve, proxy -> promise, 1, args);
@@ -418,6 +436,7 @@ static inline void LJS_Promise_Resolve(struct promise* proxy, JSValue value){
 }
 
 static inline void LJS_Promise_Reject(struct promise* proxy, const char* msg){
+    if(!proxy -> ctx) return;   // already done
     JSValue error = JS_NewError(proxy -> ctx);
     JS_SetPropertyStr(proxy -> ctx, error, "message", JS_NewString(proxy -> ctx, msg));
     JS_Call(proxy -> ctx, proxy -> reject, proxy -> promise, 1, (JSValueConst[]){error});

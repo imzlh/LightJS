@@ -14,6 +14,7 @@ with all its requirements smaller and less
  - ultra-fast and smaller than every engine
  - async support powered by hand-written eventloop
  - mbedtls not openssl, smaller and thread-safe
+ - high-level http capability, websocket, cookie, and so on
  - ....
 
 ## roadmap

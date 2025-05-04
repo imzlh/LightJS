@@ -21,7 +21,7 @@
 #include <mbedtls/ssl.h>
 #endif
 
-#define BUFFER_SIZE 64 * 1024
+#define BUFFER_SIZE 16 * 1024
 
 struct JS_Server_Data{
     JSValue on_connection;  // to handle a new connection
@@ -102,6 +102,7 @@ static inline int socket_create(const char* protocol){
     if(strstr(protocol, "tcp")) return socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if(strstr(protocol, "tcp6")) return socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if(strstr(protocol, "unix")) return socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    errno = EADDRNOTAVAIL;
     return -1;
 }
 
@@ -587,6 +588,7 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     }
     const char *addr_str = JS_ToCString(ctx, argv[0]);
     if(addr_str == NULL)  return JS_EXCEPTION;
+    uint32_t buffer_size = BUFFER_SIZE;
     URL_data addr = {};
     if(!LJS_parse_url((char*)addr_str, &addr, NULL)) {
         JS_FreeCString(ctx, addr_str);
@@ -595,14 +597,18 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     JS_FreeCString(ctx, addr_str);
 
     int sockfd = socket_create(addr.protocol);
+    if(sockfd <= 0){
+        LJS_free_url(&addr);
+        return LJS_Throw(ctx, "failed to create socket: %s", NULL, strerror(errno));
+    }
     socket_connect(sockfd, addr.protocol, addr.host, addr.port, addr.path);
     LJS_free_url(&addr);
     if(sockfd == -1) return LJS_Throw(ctx, "failed to connect: %s", NULL, strerror(errno));
 
     // TCP设置
     JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
-    uint32_t buffer_size = BUFFER_SIZE;
     if(-1 != JS_ToUint32(ctx, &buffer_size, JS_GetPropertyStr(ctx, obj, "bufferSize"))){
+        if(buffer_size <= 0) buffer_size = BUFFER_SIZE;
         setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
         setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
     }

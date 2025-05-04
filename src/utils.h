@@ -8,6 +8,11 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
+#define BUFFER_FOREACH_BYTE(_buffer, _index, _byte) \
+    uint32_t __i = (_buffer) -> start, _index = 0; \
+    uint8_t _byte = *(__i + (_buffer) -> buffer); \
+    for(; (__i) != (_buffer) -> end; (_index) += 1, __i = (__i) + 1 == (_buffer) -> end ? (_buffer) -> start : (__i) + 1, _byte = *(__i + (_buffer) -> buffer)) 
+
 /**
  * 环形缓冲区
  * [start, end)，指向缓冲区的有效数据
@@ -32,6 +37,23 @@ static inline void buffer_init(struct Buffer** buf, uint8_t* data, uint32_t size
     struct Buffer* buffer = *buf = (struct Buffer*)malloc(sizeof(struct Buffer));
     if(!buffer) return;
 
+    if(data)
+        buffer->buffer = data, buffer->is_dynamic = false;
+    else
+        buffer->buffer = (uint8_t*)malloc(size), buffer->is_dynamic = true;
+    buffer->start = 0;
+    buffer->end = 0;
+    buffer->size = size;
+    buffer->__aligned_ptr = NULL;
+}
+
+/**
+ * 初始化环形缓冲区，不分配内存
+ * @param buffer 缓冲区指针
+ * @param data 缓冲区数据
+ * @param size 缓冲区大小
+ */
+static inline void buffer_init2(struct Buffer* buffer, uint8_t* data, uint32_t size){
     if(data)
         buffer->buffer = data, buffer->is_dynamic = false;
     else
@@ -355,6 +377,10 @@ static inline ssize_t buffer_write(struct Buffer* buffer, int fd, uint32_t max_s
     ssize_t total = write(fd, buffer->buffer + read_pos, first_chunk);
     if (total < 0) return -1; else if(total == 0) goto end;
 
+#ifdef LJS_DEBUG
+    printf("buffer_write: %ld, %d, %d, %d\n", total, first_chunk, can_write, used);
+#endif
+
     if (can_write > first_chunk) {
         ssize_t n2 = write(fd, buffer->buffer, can_write - first_chunk);
         if (n2 > 0) total += n2;
@@ -428,7 +454,7 @@ static inline bool buffer_offset(struct Buffer* buffer, uint32_t offset, bool fo
 //     const int requestedSize = size + alignment - 1 + pointerSize;
 //     *raw = malloc(requestedSize);
 //     if(!*raw) abort();
-//     uintptr_t start = (uintptr_t)(*raw) + pointerSize;
+//     uintt start = (uintptr_t)(*raw) + pointerSize;
 //     void* aligned = (void*)((start + alignment - 1) & ~(alignment - 1));
 //     *(void**)((uintptr_t)aligned - pointerSize) = *raw;
 //     return aligned;

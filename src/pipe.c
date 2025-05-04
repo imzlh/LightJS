@@ -518,7 +518,7 @@ static JSValue js_U8Pipe_close(JSContext *ctx, JSValueConst this_val, int argc, 
 
 static void sync_promise_proxy(EvFD* fd, void* opaque){
     struct promise* promise = opaque;
-    if(((uintptr_t)promise -> user_data ++) == 1)
+    if(((uintptr_t)(promise -> user_data) ++) == 1)
         LJS_Promise_Resolve(promise, JS_UNDEFINED);
 }
 
