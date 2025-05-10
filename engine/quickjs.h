@@ -999,8 +999,8 @@ JS_EXTERN JSValue JS_NewPromiseCapability(JSContext *ctx, JSValue *resolving_fun
 JS_EXTERN JSPromiseStateEnum JS_PromiseState(JSContext *ctx,
                                              JSValueConst promise);
 JS_EXTERN JSValue JS_PromiseResult(JSContext *ctx, JSValueConst promise);
-JS_EXTERN bool JS_IsPromise(JSValueConst val);
 JS_EXTERN JSValue JS_PromiseHandleError(JSContext* ctx, JSValueConst promise);
+JS_EXTERN bool JS_IsPromise(JSValueConst val);
 
 JS_EXTERN JSValue JS_NewSymbol(JSContext *ctx, const char *description, bool is_global);
 
@@ -1249,7 +1249,7 @@ JS_EXTERN int JS_SetModuleExportList(JSContext *ctx, JSModuleDef *m,
 /* Version */
 
 #define QJS_VERSION_MAJOR 0
-#define QJS_VERSION_MINOR 9
+#define QJS_VERSION_MINOR 10
 #define QJS_VERSION_PATCH 0
 #define QJS_VERSION_SUFFIX ""
 
