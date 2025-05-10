@@ -261,6 +261,14 @@ if(LIBEXECINFO_LIBRARIES)
     list(APPEND ljs_libs execinfo)
 endif()
 
+# libexpat
+find_library(EXPAT_LIBRARIES expat)
+if(EXPAT_LIBRARIES)
+    message(STATUS "Building with expat support")
+    add_compile_definitions(LJS_LIBEXPAT)
+    list(APPEND ljs_libs expat)
+endif()
+
 add_library(ljs ${ljs_sources})
 target_compile_definitions(ljs PRIVATE ${ljs_defines})
 target_include_directories(ljs PUBLIC

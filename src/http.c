@@ -748,7 +748,11 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
     }else if (data->state == HTTP_HEADER){
         str_trim (line_data);
         if (line_data[0] == '\0'){
-            data->state = HTTP_BODY;
+            // POST PUT有body
+            if(data -> content_length == 0 && !strcmp(data -> method, "POST") && !strcmp(data -> method, "PUT"))
+                data -> state = HTTP_DONE;
+            else
+                data->state = HTTP_BODY;
             data->cb(data, NULL, 0, data->userdata);
             free(line_data);
             return EVCB_RET_DONE;
@@ -1177,6 +1181,7 @@ static JSValue js_response_get_locked(JSContext *ctx, JSValueConst this_val) {
 
 #define INIT_TOU8_TASK \
     RESPONSE_GET_OPAQUE(response, this_val); \
+    if(response -> data -> state != HTTP_BODY) return JS_ThrowTypeError(ctx, "Body is not available"); \
     struct promise *promise = LJS_NewPromise(ctx); \
     struct readall_promise* data = init_tou8_merge_task(promise, response); \
     read_body(response -> data, callback_tou8_merge, data, true);
@@ -2624,6 +2629,11 @@ struct JSEventStreamData {
     
 #define DEF_END_PROMISE(obj, handler) handler -> promise = LJS_NewPromise(ctx); \
     JS_SetPropertyStr(ctx, obj, "done", handler -> promise -> promise);
+#define DEF_RESPONSE(obj, handler) { \
+    JSValue response_obj = JS_NewObjectClass(ctx, response_class_id); \
+    JS_SetOpaque(response_obj, &handler -> request); \
+    JS_SetPropertyStr(ctx, obj, "request", response_obj); \
+}
 
 static void handler_close_cb(EvFD* fd, void* data){
     struct JSClientHandler* handler = data;
@@ -2653,6 +2663,7 @@ static void handler_parse_cb(HTTP_data *data, uint8_t *buffer, uint32_t len, voi
         JSValue obj = JS_NewObjectClass(ctx, handler_class_id);
         JS_SetOpaque(obj, handler);
         DEF_END_PROMISE(obj, handler);
+        DEF_RESPONSE(obj, handler);
 
         // parse Cookie header
         if(handler -> cookiejar.capacity > 0){ 
@@ -2930,9 +2941,13 @@ static JSValue js_handler_close(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_handler_reuse(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     GET_OPAQUE(this_val);
 
+    if(handler -> response.state != HTTP_DONE){
+        return JS_ThrowTypeError(ctx, "Response not read yet, please call response.*() to read body before reuse()");
+    }
     if(!handler -> header_sent){
         return JS_ThrowTypeError(ctx, "Headers not sent yet, please call done() first");
     }
+    
     if(!list_empty(&handler -> chunks)){
         return JS_ThrowTypeError(ctx, "Chunks not sent yet, please await for handler.end promise");
     }
@@ -3157,6 +3172,7 @@ param_err:
     if(!handler) return JS_ThrowOutOfMemory(ctx);
     init_handler(fd, ctx, handler);
     LJS_parse_from_fd(fd, &handler -> request, false, handler_parse_cb, handler);
+    handler -> promise = LJS_NewPromise(ctx);
     return handler -> promise -> promise;
 }
 

@@ -137,7 +137,9 @@
         "alltypes.h": "c",
         "quickjs-opcode.h": "c",
         "random.h": "c",
-        "xsum.h": "c"
+        "xsum.h": "c",
+        "expat.h": "c",
+        "sstream": "c"
     },
     "C_Cpp.errorSquiggles": "enabled"
 }

@@ -323,6 +323,9 @@ bool LJS_init_thread(JSContext* ctx);
 // ffi
 bool LJS_init_ffi(JSContext *ctx);
 
+// xml
+bool LJS_init_xml(JSContext* ctx);
+
 // --------------- HELPER FUNCTIONS ------------------------
 void free_js_malloc(JSRuntime *rt, void *opaque, void *ptr);
 void free_malloc(JSRuntime* rt, void* opaque, void* ptr);

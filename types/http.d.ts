@@ -23,6 +23,8 @@ interface FormData {
 declare module 'http' {
     export class Cookies {
         constructor(headers: Record<string, string> | Array<[string, string]>);
+        readonly request: Response;
+
         set(name: string, value: string): void;
         get(name: string): string | null;
         getAll(): Record<string, string>;

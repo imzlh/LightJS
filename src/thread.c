@@ -177,7 +177,6 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
                 JS_PROP_C_W_E);
             free(real_path);
         }
-        JS_FreeValue(ctx, meta_obj);
         JS_FreeValue(ctx, func_val);
     }
 
@@ -637,6 +636,7 @@ void LJS_init_context(App* app, char** init_list){
     if(!init_list || in(init_list, "timer")) LJS_init_timer(ctx);    // delay
     if(!init_list || in(init_list, "ffi")) LJS_init_ffi(ctx);
     if(!init_list || in(init_list, "vm")) LJS_init_vm(ctx);
+    if(!init_list || in(init_list, "xml")) LJS_init_xml(ctx);
 }
 
 static void* pthread_main(void* arg){

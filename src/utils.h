@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdbool.h>
+#include <stdio.h>
 
 #pragma once
 
@@ -138,7 +140,7 @@ static inline bool buffer_is_full(struct Buffer* buffer) {
 static inline uint32_t buffer_push(struct Buffer* buffer, 
                                  const uint8_t* data, 
                                  uint32_t length) {
-    if (!data || length == 0) return 0;
+    if (!data || length == 0 || buffer -> size == 0) return 0;
 
     uint32_t available = buffer_available(buffer);
     uint32_t can_write = MIN(length, available);
