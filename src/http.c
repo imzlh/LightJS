@@ -101,17 +101,23 @@ char* LJS_resolve_path(const char* path, const char* _base) {
     
     /* 处理绝对路径 */
     if (path[0] == '/') return normalize_path(path);
-    bool free_base = false;
-    char* base = (char*)_base;
+    char* base = strdup(_base);
     if(!base) {
         base = getcwd(NULL, 0);
-        free_base = true;
     }
 
     /* 拼接路径 */
     size_t base_len = strlen(base);
     size_t path_len = strlen(path);
     char* combined = malloc(base_len + path_len + 2);
+
+    // Remove filename from base path
+    if(base[base_len-1] != '/'){
+        char* slash = strrchr(base, '/');
+        if(slash){
+            *(slash +1) = '\0';
+        }
+    }
     
     int needs_slash = !(base_len && base[base_len-1] == '/') && 
                      !(path_len && path[0] == '/');
@@ -124,7 +130,7 @@ char* LJS_resolve_path(const char* path, const char* _base) {
     /* 标准化路径 */
     char* resolved = normalize_path(combined);
     free(combined);
-    if(free_base) free(base);
+    free(base);
     return resolved;
 }
 
@@ -185,7 +191,7 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
     if (!(source_str = strdup(_url))) {
         goto cleanup;
     }
-    url_struct->source_str = source_str;
+    url_struct -> source_str = source_str;
     url = source_str;
 
     if (!base) {
@@ -234,7 +240,7 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
         }
     }
 
-    if (!url_struct->host) {
+    if (!url_struct -> host) {
         char *host_end = strpbrk(url, ":/?#");
         char *user_pass_end = strrchr(url, '@'); // 使用最后一个@
 
@@ -243,10 +249,10 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
             char *colon = strchr(url, ':');
             if (colon) {
                 *colon = '\0';
-                url_struct->username = url;
-                url_struct->password = colon + 1;
+                url_struct -> username = url;
+                url_struct -> password = colon + 1;
             } else {
-                url_struct->username = url;
+                url_struct -> username = url;
             }
             url = user_pass_end + 1;
             host_end = strpbrk(url, ":/?#"); // 重新计算host_end
@@ -263,7 +269,7 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
             if (*end != '\0' || port < 0 || port > 65535) {
                 goto cleanup;
             }
-            url_struct->port = (int)port;
+            url_struct -> port = (int)port;
             // url = (port_end ? port_end : (port_str - strlen(port_str))) +1;
         } else {
             if(strcmp(url_struct -> protocol, "http") == 0){
@@ -281,21 +287,21 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
             }
         }
 
-        url_struct->host = url;
+        url_struct -> host = url;
         if (host_end) {
             *host_end = '\0';
             url = host_end;
         }
     }
 
-    if (!url_struct->path) {
+    if (!url_struct -> path) {
         char *path_start = url;
         char *query_start = strchr(path_start, '?');
         char *hash_start = strchr(query_start ? query_start : path_start, '#');
 
         if (hash_start) {
             *hash_start = '\0';
-            url_struct->hash = hash_start + 1;
+            url_struct -> hash = hash_start + 1;
         }
 
         if (query_start) {
@@ -306,19 +312,19 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
             if (!query_list || !LJS_parse_query(query_str, &query_list, MAX_QUERY_COUNT)) {
                 goto cleanup;
             }
-            url_struct->query = query_list;
+            url_struct -> query = query_list;
             query_list = NULL; // 防止重复释放
         }
 
         char *input_path = (*path_start == '/') ? path_start : "/";
         if (strcmp(input_path, "/") != 0) {
-            base_path_backup = strdup(base->path ? base->path : "/");
-            url_struct->path = LJS_resolve_path(input_path, base_path_backup);
-            if (!url_struct->path) {
+            base_path_backup = strdup(base -> path ? base -> path : "/");
+            url_struct -> path = LJS_resolve_path(input_path, base_path_backup);
+            if (!url_struct -> path) {
                 goto cleanup;
             }
         } else {
-            url_struct->path = strdup(input_path);
+            url_struct -> path = strdup(input_path);
         }
     }
 
@@ -326,12 +332,12 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
 
 cleanup:
     if (!result) {
-        free(url_struct->source_str);
-        free(url_struct->path);
+        free(url_struct -> source_str);
+        free(url_struct -> path);
         free(query_list);
-        url_struct->source_str = NULL;
-        url_struct->path = NULL;
-        url_struct->query = NULL;
+        url_struct -> source_str = NULL;
+        url_struct -> path = NULL;
+        url_struct -> query = NULL;
     }
     free(base_path_backup);
     return result;
@@ -647,7 +653,7 @@ static int parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len,
 // http chunk
 static int parse_evloop_chunk_callback(EvFD* evfd, uint8_t* chunk_data, uint32_t len, void* user_data){
     HTTP_data *data = user_data;
-    if (data->state == HTTP_BODY && data->chunked){
+    if (data -> state == HTTP_BODY && data -> chunked){
         data -> cb(data, chunk_data, len, data -> userdata);
         data -> content_read += len;
     }
@@ -664,9 +670,9 @@ static int parse_evloop_chunk_callback(EvFD* evfd, uint8_t* chunk_data, uint32_t
 // body: read once
 static int parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len, void* user_data){
     HTTP_data *data = user_data;
-    if (data->state != HTTP_BODY) return EVCB_RET_DONE ;
+    if (data -> state != HTTP_BODY) return EVCB_RET_DONE ;
     char* line_data = (char*)buffer;
-    if (data->chunked) {
+    if (data -> chunked) {
         // 处理chunked编码
         str_trim(line_data);
         uint32_t chunk_size = hex2int(line_data);
@@ -681,9 +687,9 @@ static int parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len,
     }else {
         // 读取fd
         COPY_BUF(databuf, buffer, len);
-        data->content_read += len;
-        data->cb(data, databuf, len, data->userdata);
-        if (data->content_read >= data->content_length)
+        data -> content_read += len;
+        data -> cb(data, databuf, len, data -> userdata);
+        if (data -> content_read >= data -> content_length)
             goto done;
 
         if(data -> __read_all){
@@ -699,8 +705,8 @@ end:
     return EVCB_RET_CONTINUE;   // 继续读取
 
 done:
-    data->state = HTTP_DONE;
-    data->cb(data, NULL, 0, data->userdata);
+    data -> state = HTTP_DONE;
+    data -> cb(data, NULL, 0, data -> userdata);
     free(buffer);
     return EVCB_RET_DONE;
 }
@@ -711,7 +717,7 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
     char* line_data = (char*)_line_data;
     if(!line_data) goto error2; // close
     // 是第一行
-    if (data->state == HTTP_INIT){
+    if (data -> state == HTTP_INIT){
         // 找空格解析参数
         char *param1 = line_data;
         str_trim (param1);
@@ -731,29 +737,29 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
         str_trim (param3);
 
         // GET / HTTP/1.1
-        if (data->is_client){
+        if (data -> is_client){
             strtoupper(param1);
-            data->method = strdup(param1);
-            data->path = strdup(param2);
-            data->version = parse_http_version (param3);
-            if (data->version < 1.0){
+            data -> method = strdup(param1);
+            data -> path = strdup(param2);
+            data -> version = parse_http_version (param3);
+            if (data -> version < 1.0){
                 goto error;
             }
         // HTTP/1.1 200 OK
         }else{
-            data->version = parse_http_version (param1);
-            data->status = atoi (param2);
+            data -> version = parse_http_version (param1);
+            data -> status = atoi (param2);
         }
-        data->state = HTTP_HEADER;
-    }else if (data->state == HTTP_HEADER){
+        data -> state = HTTP_HEADER;
+    }else if (data -> state == HTTP_HEADER){
         str_trim (line_data);
         if (line_data[0] == '\0'){
             // POST PUT有body
             if(data -> content_length == 0 && !strcmp(data -> method, "POST") && !strcmp(data -> method, "PUT"))
                 data -> state = HTTP_DONE;
             else
-                data->state = HTTP_BODY;
-            data->cb(data, NULL, 0, data->userdata);
+                data -> state = HTTP_BODY;
+            data -> cb(data, NULL, 0, data -> userdata);
             free(line_data);
             return EVCB_RET_DONE;
         }
@@ -773,7 +779,7 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
             char **header = malloc(sizeof(char*) * 2);
             header[0] = strdup(strtolower(name));
             header[1] = strdup(value);
-            data->headers[data->header_count++] = header;
+            data -> headers[data -> header_count++] = header;
         }
     }
 
@@ -783,21 +789,21 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
 error:
     LJS_evfd_close(evfd);
 error2:
-    data->state = HTTP_ERROR;
+    data -> state = HTTP_ERROR;
     free(_line_data);
     return EVCB_RET_DONE;
 }
 
 static void write_evloop_callback(EvFD* evfd, void *userdata){
     HTTP_data *data = userdata;
-    if (data->state != HTTP_HEADER)
+    if (data -> state != HTTP_HEADER)
         return;
-    if (data->header_writed == data->header_count){
-        data->state = HTTP_BODY;
+    if (data -> header_writed == data -> header_count){
+        data -> state = HTTP_BODY;
         return;
     }
     
-    char **header = data->headers[data->header_writed++];
+    char **header = data -> headers[data -> header_writed++];
     char *line = malloc(1024);
     sprintf(line, "%s: %s\r\n", header[0], header[1]);
     LJS_evfd_write(data -> fd, (uint8_t*)line, strlen(line), write_evloop_callback, data);
@@ -1016,37 +1022,37 @@ static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_si
     fd_task -> readed += read_size;
 
     // 空行
-    if (fd_task->state == FD_NEWLINE) {
-        fd_task->state = FD_HEADER;
+    if (fd_task -> state == FD_NEWLINE) {
+        fd_task -> state = FD_HEADER;
         return EVCB_RET_CONTINUE;
     }
 
     // ------WebKitFormBoundaryABC123
-    if (fd_task->state == FD_BOUNDARY) {
+    if (fd_task -> state == FD_BOUNDARY) {
         char* line = (char*) buffer;
-        if (line[0] != '-' || line[1] != '-' || strcmp(line + 2, fd_task->boundary) != 0) {
+        if (line[0] != '-' || line[1] != '-' || strcmp(line + 2, fd_task -> boundary) != 0) {
             // error
-            LJS_Promise_Reject(task->promise, "Invalid boundary");
+            LJS_Promise_Reject(task -> promise, "Invalid boundary");
             goto end;
         }
-        fd_task->state = FD_HEADER;
+        fd_task -> state = FD_HEADER;
         return EVCB_RET_CONTINUE;
     }
 
-    struct formdata_t* formdata = list_entry(fd_task->formdata.next, struct formdata_t, list);
+    struct formdata_t* formdata = list_entry(fd_task -> formdata.next, struct formdata_t, list);
 
     // Content-Disposition: form-data; name="file"; filename="test.txt"
-    if (fd_task->state == FD_HEADER) {
+    if (fd_task -> state == FD_HEADER) {
         char* _line = (char*) buffer;
         TRIM_START(line, _line, read_size);
 
         if (line == NULL) {
             // end of header
-            if (formdata->length == 0) fd_task->state = FD_NEWLINE;
-            else fd_task->state = FD_DATA;
+            if (formdata -> length == 0) fd_task -> state = FD_NEWLINE;
+            else fd_task -> state = FD_DATA;
 
-            uint8_t* buf = js_malloc(ctx, formdata->length);
-            LJS_evfd_readsize(evfd, formdata->length, buf, parse_evloop_body_callback, formdata);
+            uint8_t* buf = js_malloc(ctx, formdata -> length);
+            LJS_evfd_readsize(evfd, formdata -> length, buf, parse_evloop_body_callback, formdata);
 
             js_free(ctx, _line);
             return EVCB_RET_DONE;   // 切换模式
@@ -1055,7 +1061,7 @@ static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_si
         SPLIT_HEADER(line);
         if (!value) {
             // error
-            LJS_Promise_Reject(task->promise, "Invalid header");
+            LJS_Promise_Reject(task -> promise, "Invalid header");
             goto end_cleanup;
         }
 
@@ -1082,40 +1088,40 @@ static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_si
             } else {
                 filename = strdup(value);
             }
-            formdata->filename = filename;
-            formdata->type = type;
+            formdata -> filename = filename;
+            formdata -> type = type;
         } else if (strcmp(name, "Content-Type") == 0) {
-            formdata->type = strdup(value);
+            formdata -> type = strdup(value);
         } else if (strcmp(name, "Content-Length") == 0) {
             int len = atoi(value);
             if (len < 0) {
                 // error
-                LJS_Promise_Reject(task->promise, "Invalid content-length");
+                LJS_Promise_Reject(task -> promise, "Invalid content-length");
                 goto end_cleanup;
             }
-            formdata->length = len;
+            formdata -> length = len;
         } else {
             // ignore
         }
-        fd_task->state = FD_DATA;
+        fd_task -> state = FD_DATA;
         return EVCB_RET_CONTINUE;
     }
 
-    if (fd_task->state == FD_DATA) {
-        if (formdata->length < read_size) {
+    if (fd_task -> state == FD_DATA) {
+        if (formdata -> length < read_size) {
             // error
-            LJS_Promise_Reject(task->promise, "Failed to receive data: short readed");
+            LJS_Promise_Reject(task -> promise, "Failed to receive data: short readed");
             goto end_cleanup;
         }
 
         // already recv all data
-        formdata->data = buffer;
+        formdata -> data = buffer;
 
         // end
         if(fd_task -> readed == formdata -> length) goto end_callback;
 
         // newline: the buffer will be reused for header
-        fd_task->state = FD_NEWLINE;
+        fd_task -> state = FD_NEWLINE;
         uint8_t* buf = js_malloc(ctx, BUFFER_SIZE);
         LJS_evfd_readline(evfd, BUFFER_SIZE, buf, parse_evloop_body_callback, formdata);
 
@@ -1875,16 +1881,16 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
 static JSValue func_name(JSContext *ctx, JSValueConst this_val) { \
     struct JS_URL_struct *js_url_struct = JS_GetOpaque2(ctx, this_val, js_class_url_id); \
     if (!js_url_struct) return JS_EXCEPTION; \
-    URL_data *url_struct = js_url_struct->self; \
-    return (url_struct->field) ? JS_NewString(ctx, url_struct->field) : JS_UNDEFINED; \
+    URL_data *url_struct = js_url_struct -> self; \
+    return (url_struct -> field) ? JS_NewString(ctx, url_struct -> field) : JS_UNDEFINED; \
 }
 
 #define GETTER_INT(func_name, field, invalid_value) \
 static JSValue func_name(JSContext *ctx, JSValueConst this_val) { \
     struct JS_URL_struct *js_url_struct = JS_GetOpaque2(ctx, this_val, js_class_url_id); \
     if (!js_url_struct) return JS_EXCEPTION; \
-    URL_data *url_struct = js_url_struct->self; \
-    return (url_struct->field == invalid_value) ? JS_UNDEFINED : JS_NewInt32(ctx, url_struct->field); \
+    URL_data *url_struct = js_url_struct -> self; \
+    return (url_struct -> field == invalid_value) ? JS_UNDEFINED : JS_NewInt32(ctx, url_struct -> field); \
 }
 
 #define SETTER_STRING_DUP(func_name, field, err_msg) \
@@ -1893,8 +1899,8 @@ static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst val
     if (!js_url_struct) return JS_EXCEPTION; \
     const char *str = JS_ToCString(ctx, value); \
     if (!str) return LJS_Throw(ctx, err_msg, NULL); \
-    js_url_struct->dup_value[js_url_struct->dup_count++] = JS_DupValue(ctx, value); \
-    js_url_struct->self->field = (char*)str; \
+    js_url_struct -> dup_value[js_url_struct -> dup_count++] = JS_DupValue(ctx, value); \
+    js_url_struct -> self -> field = (char*)str; \
     return JS_UNDEFINED; \
 }
 
@@ -1904,8 +1910,8 @@ static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst val
     if (!js_url_struct) return JS_EXCEPTION; \
     const char *str = JS_ToCString(ctx, value); \
     if (!str) return LJS_Throw(ctx, err_msg, NULL); \
-    free(js_url_struct->self->field); \
-    js_url_struct->self->field = strdup(str); \
+    free(js_url_struct -> self -> field); \
+    js_url_struct -> self -> field = strdup(str); \
     JS_FreeCString(ctx, str); \
     return JS_UNDEFINED; \
 }
@@ -1917,7 +1923,7 @@ static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst val
     int32_t val; \
     if (JS_ToInt32(ctx, &val, value) < 0) return LJS_Throw(ctx, err_msg, NULL); \
     if (val < min || val > max) return JS_ThrowRangeError(ctx, #field " out of range"); \
-    js_url_struct->self->field = val; \
+    js_url_struct -> self -> field = val; \
     return JS_UNDEFINED; \
 }
 
@@ -2135,9 +2141,9 @@ static void js_url_finalizer(JSRuntime *rt, JSValue val) {
     struct JS_URL_struct *js_url_struct = JS_GetOpaque( val, js_class_url_id);
     if (!js_url_struct) return;
     
-    URL_data *url = js_url_struct->self;
+    URL_data *url = js_url_struct -> self;
 
-#define FREE_FIELD(field) do { if(url->field) free(url->field); } while(0)
+#define FREE_FIELD(field) do { if(url -> field) free(url -> field); } while(0)
     FREE_FIELD(protocol);
     FREE_FIELD(host);
     FREE_FIELD(path);
@@ -2146,16 +2152,16 @@ static void js_url_finalizer(JSRuntime *rt, JSValue val) {
     FREE_FIELD(hash);
 #undef FREE_FIELD
     
-    if (url->query) {
+    if (url -> query) {
         for (uint32_t i = 0; i < MAX_QUERY_COUNT; i++) {
-            free(url->query[i].key);
-            free(url->query[i].value);
+            free(url -> query[i].key);
+            free(url -> query[i].value);
         }
-        free(url->query);
+        free(url -> query);
     }
     
-    for (uint32_t i = 0; i < js_url_struct->dup_count; i++) {
-        JS_FreeValueRT(rt, js_url_struct->dup_value[i]);
+    for (uint32_t i = 0; i < js_url_struct -> dup_count; i++) {
+        JS_FreeValueRT(rt, js_url_struct -> dup_value[i]);
     }
     js_free_rt(rt, js_url_struct);
 }
@@ -2238,80 +2244,80 @@ struct CookieJar {
 };
 
 void init_cookie_jar(struct CookieJar *jar, int initial_capacity) {
-    jar->pairs = (struct CookiePair *)malloc(initial_capacity * sizeof(struct CookiePair));
-    jar->count = 0;
-    jar->capacity = initial_capacity;
-    jar->ref_count = 1;
-    jar->modified = NULL;
-    jar->mod_count = 0;
-    jar->mod_capacity = 0;
+    jar -> pairs = (struct CookiePair *)malloc(initial_capacity * sizeof(struct CookiePair));
+    jar -> count = 0;
+    jar -> capacity = initial_capacity;
+    jar -> ref_count = 1;
+    jar -> modified = NULL;
+    jar -> mod_count = 0;
+    jar -> mod_capacity = 0;
 }
 
 static void mark_modified(struct CookieJar *jar, struct CookiePair *pair) {
-    for (int i = 0; i < jar->mod_count; i++) {
-        if (jar->modified[i] == pair) return;
+    for (int i = 0; i < jar -> mod_count; i++) {
+        if (jar -> modified[i] == pair) return;
     }
 
-    if (jar->mod_count >= jar->mod_capacity) {
-        jar->mod_capacity += 8;
-        jar->modified = realloc(jar->modified, 
-            jar->mod_capacity * sizeof(struct CookiePair*));
+    if (jar -> mod_count >= jar -> mod_capacity) {
+        jar -> mod_capacity += 8;
+        jar -> modified = realloc(jar -> modified, 
+            jar -> mod_capacity * sizeof(struct CookiePair*));
     }
 
-    jar->modified[jar->mod_count++] = pair;
+    jar -> modified[jar -> mod_count++] = pair;
 }
 
 void free_cookie_jar(struct CookieJar *jar) {
-    assert(jar->ref_count == 0);    // self-ref
-    for (int i = 0; i < jar->count; i++) {
-        free(jar->pairs[i].name);
-        free(jar->pairs[i].value);
+    assert(jar -> ref_count == 0);    // self-ref
+    for (int i = 0; i < jar -> count; i++) {
+        free(jar -> pairs[i].name);
+        free(jar -> pairs[i].value);
     }
-    free(jar->pairs);
-    jar->count = 0;
-    jar->capacity = 0;
-    jar->mod_count = 0;
-    jar->mod_capacity = 0;
-    free(jar->modified);
+    free(jar -> pairs);
+    jar -> count = 0;
+    jar -> capacity = 0;
+    jar -> mod_count = 0;
+    jar -> mod_capacity = 0;
+    free(jar -> modified);
 }
 
 void set_cookie_pair(struct CookieJar *jar, const char *name, const char *value) {
-    for (int i = 0; i < jar->count; i++) {
-        if (strcmp(jar->pairs[i].name, name) == 0) {
-            free(jar->pairs[i].value);
-            jar->pairs[i].value = strdup(value);
+    for (int i = 0; i < jar -> count; i++) {
+        if (strcmp(jar -> pairs[i].name, name) == 0) {
+            free(jar -> pairs[i].value);
+            jar -> pairs[i].value = strdup(value);
             
             if (value[0] == '\0') {
-                free(jar->pairs[i].name);
-                if (i < jar->count - 1) {
-                    jar->pairs[i] = jar->pairs[jar->count - 1];
+                free(jar -> pairs[i].name);
+                if (i < jar -> count - 1) {
+                    jar -> pairs[i] = jar -> pairs[jar -> count - 1];
                 }
-                jar->count--;
+                jar -> count--;
             }
 
-            mark_modified(jar, &jar->pairs[i]);
+            mark_modified(jar, &jar -> pairs[i]);
             return;
         }
     }
 
     // New CookiePair
-    if (jar->count >= jar->capacity) {
-        jar->capacity = jar->capacity ? jar->capacity * 2 : 4;
-        jar->pairs = (struct CookiePair *)realloc(
-            jar->pairs, 
-            jar->capacity * sizeof(struct CookiePair)
+    if (jar -> count >= jar -> capacity) {
+        jar -> capacity = jar -> capacity ? jar -> capacity * 2 : 4;
+        jar -> pairs = (struct CookiePair *)realloc(
+            jar -> pairs, 
+            jar -> capacity * sizeof(struct CookiePair)
         );
     }
     
-    jar->pairs[jar->count].name = strdup(name);
-    jar->pairs[jar->count].value = strdup(value);
-    jar->count++;
-    mark_modified(jar, &jar->pairs[jar->count]);
+    jar -> pairs[jar -> count].name = strdup(name);
+    jar -> pairs[jar -> count].value = strdup(value);
+    jar -> count++;
+    mark_modified(jar, &jar -> pairs[jar -> count]);
 }
 
 struct CookiePair** get_modified_cookies(struct CookieJar *jar, int *count) {
-    *count = jar->mod_count;
-    return jar->modified;
+    *count = jar -> mod_count;
+    return jar -> modified;
 }
 
 // 解析Cookie字符串
@@ -2341,10 +2347,10 @@ void parse_set_cookie(struct CookieJar *jar, const char *set_cookie_str) {
     char *value = strndup(value_start, value_len);
     
     // 覆盖已存在的同名cookie
-    for (int i = 0; i < jar->count; i++) {
-        if (strcmp(jar->pairs[i].name, name) == 0) {
-            free(jar->pairs[i].value);
-            jar->pairs[i].value = strdup(value);
+    for (int i = 0; i < jar -> count; i++) {
+        if (strcmp(jar -> pairs[i].name, name) == 0) {
+            free(jar -> pairs[i].value);
+            jar -> pairs[i].value = strdup(value);
             free(name);
             free(value);
             return;
@@ -2393,9 +2399,9 @@ void parse_cookie_string(struct CookieJar *jar, const char *cookie_str) {
 
 // 查找特定cookie的值
 const char *get_cookie_value(struct CookieJar *jar, const char *name) {
-    for (int i = 0; i < jar->count; i++) {
-        if (strcmp(jar->pairs[i].name, name) == 0) {
-            return jar->pairs[i].value;
+    for (int i = 0; i < jar -> count; i++) {
+        if (strcmp(jar -> pairs[i].name, name) == 0) {
+            return jar -> pairs[i].value;
         }
     }
     return NULL;
@@ -2437,9 +2443,9 @@ static JSValue js_cookies_getAll(JSContext *ctx, JSValueConst this_val, int argc
     if(!jar) return JS_EXCEPTION;
 
     JSValue result = JS_NewObject(ctx);
-    for (int i = 0; i < jar->count; i++) {
-        JSValue name_val = JS_NewString(ctx, jar->pairs[i].name);
-        JSValue value_val = JS_NewString(ctx, jar->pairs[i].value);
+    for (int i = 0; i < jar -> count; i++) {
+        JSValue name_val = JS_NewString(ctx, jar -> pairs[i].name);
+        JSValue value_val = JS_NewString(ctx, jar -> pairs[i].value);
         JSValue arr = JS_NewArrayFrom(ctx, 2, (JSValueConst[]){name_val, value_val});
         JS_SetPropertyUint32(ctx, result, i, arr);
     }
@@ -2453,12 +2459,12 @@ static JSValue js_cookies_del(JSContext *ctx, JSValueConst this_val, int argc, J
     const char* name = JS_ToCString(ctx, argv[0]);
     if(!name) return JS_EXCEPTION;
 
-    for (int i = 0; i < jar->count; i++) {
-        if (strcmp(jar->pairs[i].name, name) == 0) {
-            free(jar->pairs[i].name);
-            free(jar->pairs[i].value);
-            jar->pairs[i] = jar->pairs[jar->count - 1];
-            jar->count--;
+    for (int i = 0; i < jar -> count; i++) {
+        if (strcmp(jar -> pairs[i].name, name) == 0) {
+            free(jar -> pairs[i].name);
+            free(jar -> pairs[i].value);
+            jar -> pairs[i] = jar -> pairs[jar -> count - 1];
+            jar -> count--;
             break;
         }
     }
@@ -2473,9 +2479,9 @@ static JSValue js_cookies_toString(JSContext *ctx, JSValueConst this_val, int ar
 
     char* cookie_str = js_malloc(ctx, 1);
     cookie_str[0] = '\0';
-    for (int i = 0; i < jar->count; i++) {
-        char* pair_str = js_malloc(ctx, strlen(jar->pairs[i].name) + strlen(jar->pairs[i].value) + 3);
-        sprintf(pair_str, "%s=%s", jar->pairs[i].name, jar->pairs[i].value);
+    for (int i = 0; i < jar -> count; i++) {
+        char* pair_str = js_malloc(ctx, strlen(jar -> pairs[i].name) + strlen(jar -> pairs[i].value) + 3);
+        sprintf(pair_str, "%s=%s", jar -> pairs[i].name, jar -> pairs[i].value);
         cookie_str = js_realloc(ctx, cookie_str, strlen(cookie_str) + strlen(pair_str) + 1);
         strcat(cookie_str, pair_str);
         free(pair_str);
@@ -2647,8 +2653,8 @@ static void handler_close_cb(EvFD* fd, void* data){
 
 static void handler_parse_cb(HTTP_data *data, uint8_t *buffer, uint32_t len, void* ptr){
     struct JSClientAsyncResult* async_result = ptr;
-    struct JSClientHandler* handler = async_result->handler;
-    JSContext* ctx = handler->ctx;
+    struct JSClientHandler* handler = async_result -> handler;
+    JSContext* ctx = handler -> ctx;
     bool error = data -> state == HTTP_ERROR;
     
     if(error){
@@ -2671,12 +2677,12 @@ static void handler_parse_cb(HTTP_data *data, uint8_t *buffer, uint32_t len, voi
             free_cookie_jar(&handler -> cookiejar);
         }
         bool has_cookie = false;
-        FIND_HEADER(handler->request, "cookie"){
+        FIND_HEADER(handler -> request, "cookie"){
             if(handler -> cookiejar.count == 0){
-                init_cookie_jar(&handler->cookiejar, 16);
+                init_cookie_jar(&handler -> cookiejar, 16);
                 handler -> cookiejar.ref_count ++;  // note: avoid free_cookie_jar(), this will trigger SIGSEGV
             }
-            parse_cookie_string(&handler->cookiejar, handler->request.headers[i][1]);
+            parse_cookie_string(&handler -> cookiejar, handler -> request.headers[i][1]);
             has_cookie = true;
         }
 
@@ -2684,7 +2690,7 @@ static void handler_parse_cb(HTTP_data *data, uint8_t *buffer, uint32_t len, voi
             JSAtom atom = JS_NewAtom(ctx, "cookies");
             if(JS_HasProperty(ctx, obj, atom)) JS_FreeValue(ctx, JS_GetProperty(ctx, obj, atom));
             JSValue cookie_jar = JS_NewObjectClass(ctx, cookie_jar_class_id);
-            JS_SetOpaque(cookie_jar, &handler->cookiejar);
+            JS_SetOpaque(cookie_jar, &handler -> cookiejar);
             JS_SetProperty(ctx, obj, atom, cookie_jar);
             JS_FreeAtom(ctx, atom);
         }
@@ -2707,9 +2713,9 @@ static inline void init_handler(EvFD* fd, JSContext* ctx, struct JSClientHandler
 }
 
 static inline struct JSClientAsyncResult* init_async_result(struct JSClientHandler* handler){
-    struct JSClientAsyncResult* async_result = js_malloc(handler->ctx, sizeof(struct JSClientAsyncResult));
+    struct JSClientAsyncResult* async_result = js_malloc(handler -> ctx, sizeof(struct JSClientAsyncResult));
     if(!async_result) return NULL;
-    async_result -> promise = LJS_NewPromise(handler->ctx);
+    async_result -> promise = LJS_NewPromise(handler -> ctx);
     async_result -> handler = handler;
     async_result -> reusing_obj = JS_UNDEFINED; // if reuse(), please set it after this
     return async_result;
@@ -2723,7 +2729,7 @@ static JSValue js_handler_status(JSContext *ctx, JSValueConst this_val, int argc
     if(JS_ToInt32(ctx, &code, argv[0]) == -1 || code < 100 || code > 599)
         return JS_ThrowTypeError(ctx, "Invalid status code");
 
-    handler->response.status = code;
+    handler -> response.status = code;
     return this_val;
 }
 
@@ -2741,18 +2747,18 @@ static JSValue js_handler_header(JSContext *ctx, JSValueConst this_val, int argc
     const char* value = argc == 1 ? NULL : LJS_ToCString(ctx, argv[1], NULL);
     if(!name) return JS_EXCEPTION;
 
-    FIND_HEADER(handler->response, name){
+    FIND_HEADER(handler -> response, name){
         if(value){
-            handler->response.headers[i][1] = js_strdup(ctx, value);
+            handler -> response.headers[i][1] = js_strdup(ctx, value);
         }else{
             // free header
-            char** current_el = handler->response.headers[i];
+            char** current_el = handler -> response.headers[i];
             free(current_el[0]);
             free(current_el[1]);
             free(current_el);
 
             // move last header to current position
-            char** endel = handler->response.headers[handler -> response.header_count - 1];
+            char** endel = handler -> response.headers[handler -> response.header_count - 1];
             handler -> response.headers[i] = endel;
         }
         goto free;
@@ -2765,7 +2771,7 @@ static JSValue js_handler_header(JSContext *ctx, JSValueConst this_val, int argc
     header[1] = js_strdup(ctx, value);
 
     if(strcasecmp(name, "transfer-encoding") == 0 && strcasecmp(value, "chunked") == 0){
-        handler->response.chunked = true;
+        handler -> response.chunked = true;
     }
 
 free:
@@ -2777,9 +2783,9 @@ free:
 static inline void chunk_append(JSContext* ctx, struct list_head* list, uint8_t* data, size_t len){
     struct JSChunkData* chunk = js_malloc(ctx, sizeof(struct JSChunkData) + len);
     if(!chunk) return;
-    chunk->len = len;
-    memcpy(chunk->data, data, len);
-    list_add_tail(&chunk->link, list);
+    chunk -> len = len;
+    memcpy(chunk -> data, data, len);
+    list_add_tail(&chunk -> link, list);
 }
 
 static inline void write_chunk(JSContext* ctx, EvFD* fd, uint8_t* data, size_t len){
@@ -2808,7 +2814,7 @@ static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, 
     if(handler -> response.chunked){
         // header not writed yet
         if(handler -> header_sent && list_empty(&handler -> chunks)){
-            chunk_append(ctx, &handler->chunks, data, len);
+            chunk_append(ctx, &handler -> chunks, data, len);
         }else{
             uint8_t* chunked = js_malloc(ctx, len + 16);
             if(!chunked){
@@ -2822,18 +2828,18 @@ static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, 
             memcpy(chunked + written, data, len);
             chunked[written + len] = '\r';
             chunked[written + len + 1] = '\n';
-            LJS_evfd_write(handler->fd, chunked, len + written + 2, write_then_free, chunked);
+            LJS_evfd_write(handler -> fd, chunked, len + written + 2, write_then_free, chunked);
         }
     }else{
         if(handler -> header_sent && list_empty(&handler -> chunks)){
             // cache
-            chunk_append(ctx, &handler->chunks, data, len);
+            chunk_append(ctx, &handler -> chunks, data, len);
         }else if(handler -> response.content_length >= handler -> response.content_read + len){
             // continue feed data
             len = handler -> response.content_length - handler -> response.content_read;
             uint8_t* data2 = js_malloc(ctx, len);
             memcpy(data2, data, len);   // avoid free after this function return
-            LJS_evfd_write(handler->fd, data2, len, write_then_free, data);
+            LJS_evfd_write(handler -> fd, data2, len, write_then_free, data);
         }else{
             LJS_Throw(ctx, "body already sent, cannot send more data.",
                 "If you want to send more data, please use chunked transfer-encoding or set larger content-length"
@@ -2860,19 +2866,19 @@ static void handler_wbody_sync(EvFD* fd, void* data){
         handler -> promise = NULL;
         return;
     }
-    struct list_head* cur = handler->chunks.prev;
+    struct list_head* cur = handler -> chunks.prev;
     struct JSChunkData* chunk = list_entry(cur, struct JSChunkData, link);
-    if (handler->response.chunked) {
+    if (handler -> response.chunked) {
         // write chunk
         JSContext* ctx = handler -> ctx;
         FORMAT_WRITE("%zx\r\n", 16, chunk -> len);
         LJS_evfd_write(fd, chunk -> data, chunk -> len, handler_wbody_sync, handler);
     } else {
         // continue write
-        LJS_evfd_write(fd, chunk->data, chunk->len, handler_wbody_sync, handler);
+        LJS_evfd_write(fd, chunk -> data, chunk -> len, handler_wbody_sync, handler);
     }
     list_del(cur);
-    js_free(handler->ctx, chunk);
+    js_free(handler -> ctx, chunk);
     handler -> sending_data = chunk -> data;    // free after current write
 }
 
@@ -2924,7 +2930,7 @@ static JSValue js_handler_done(JSContext *ctx, JSValueConst this_val, int argc, 
 
 void handler_close2_cb(JSContext* ctx, bool is_error, JSValueConst promise, void* data){
     struct JSClientHandler* handler = data;
-    LJS_evfd_close(handler->fd);
+    LJS_evfd_close(handler -> fd);
     handler -> destroy = true;
 }
 
@@ -2933,7 +2939,7 @@ static JSValue js_handler_close(JSContext *ctx, JSValueConst this_val, int argc,
     if(handler -> header_sent && list_empty(&handler -> chunks)){
         LJS_enqueue_promise_job(ctx, handler -> promise -> promise, handler_close2_cb, handler);
     }else{
-        LJS_evfd_close(handler->fd);
+        LJS_evfd_close(handler -> fd);
     }
     return JS_UNDEFINED;
 }
@@ -2981,12 +2987,12 @@ static inline uint32_t bswap_32(uint32_t x) {
 }
 
 static void sha1_init(SHA1_CTX *ctx) {
-    ctx->state[0] = 0x67452301;
-    ctx->state[1] = 0xEFCDAB89;
-    ctx->state[2] = 0x98BADCFE;
-    ctx->state[3] = 0x10325476;
-    ctx->state[4] = 0xC3D2E1F0;
-    ctx->count[0] = ctx->count[1] = 0;
+    ctx -> state[0] = 0x67452301;
+    ctx -> state[1] = 0xEFCDAB89;
+    ctx -> state[2] = 0x98BADCFE;
+    ctx -> state[3] = 0x10325476;
+    ctx -> state[4] = 0xC3D2E1F0;
+    ctx -> count[0] = ctx -> count[1] = 0;
 }
 
 static void sha1_transform(SHA1_CTX *ctx, const uint8_t* buffer) {
@@ -3004,11 +3010,11 @@ static void sha1_transform(SHA1_CTX *ctx, const uint8_t* buffer) {
         w[i] = rol(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
     }
     
-    a = ctx->state[0];
-    b = ctx->state[1];
-    c = ctx->state[2];
-    d = ctx->state[3];
-    e = ctx->state[4];
+    a = ctx -> state[0];
+    b = ctx -> state[1];
+    c = ctx -> state[2];
+    d = ctx -> state[3];
+    e = ctx -> state[4];
     
     // 主循环
     for (int i = 0; i < 80; i++) {
@@ -3030,23 +3036,23 @@ static void sha1_transform(SHA1_CTX *ctx, const uint8_t* buffer) {
     }
     
     // 更新状态
-    ctx->state[0] += a;
-    ctx->state[1] += b;
-    ctx->state[2] += c;
-    ctx->state[3] += d;
-    ctx->state[4] += e;
+    ctx -> state[0] += a;
+    ctx -> state[1] += b;
+    ctx -> state[2] += c;
+    ctx -> state[3] += d;
+    ctx -> state[4] += e;
 }
 
 static void sha1_update(SHA1_CTX *ctx, const uint8_t *data, size_t len) {
     uint32_t i, j;
     
-    j = (ctx->count[0] >> 3) & 63;
-    if ((ctx->count[0] += len << 3) < (len << 3)) ctx->count[1]++;
-    ctx->count[1] += (len >> 29);
+    j = (ctx -> count[0] >> 3) & 63;
+    if ((ctx -> count[0] += len << 3) < (len << 3)) ctx -> count[1]++;
+    ctx -> count[1] += (len >> 29);
     
     if (j + len > 63) {
-        memcpy(&ctx->buffer[j], data, (i = 64 - j));
-        sha1_transform(ctx, ctx->buffer);
+        memcpy(&ctx -> buffer[j], data, (i = 64 - j));
+        sha1_transform(ctx, ctx -> buffer);
         for (; i + 63 < len; i += 64) {
             sha1_transform(ctx, data + i);
         }
@@ -3055,7 +3061,7 @@ static void sha1_update(SHA1_CTX *ctx, const uint8_t *data, size_t len) {
         i = 0;
     }
     
-    memcpy(&ctx->buffer[j], &data[i], len - i);
+    memcpy(&ctx -> buffer[j], &data[i], len - i);
 }
 
 static void sha1_final(SHA1_CTX *ctx, uint8_t digest[SHA1_BLOCK_SIZE]) {
@@ -3063,18 +3069,18 @@ static void sha1_final(SHA1_CTX *ctx, uint8_t digest[SHA1_BLOCK_SIZE]) {
     uint8_t finalcount[8];
     
     for (i = 0; i < 8; i++) {
-        finalcount[i] = (uint8_t)((ctx->count[(i >= 4 ? 0 : 1)] >> 
+        finalcount[i] = (uint8_t)((ctx -> count[(i >= 4 ? 0 : 1)] >> 
                                  ((3 - (i & 3)) * 8)) & 255);
     }
     
     sha1_update(ctx, (uint8_t *)"\200", 1);
-    while ((ctx->count[0] & 504) != 448) {
+    while ((ctx -> count[0] & 504) != 448) {
         sha1_update(ctx, (uint8_t *)"\0", 1);
     }
     
     sha1_update(ctx, finalcount, 8);
     for (i = 0; i < SHA1_BLOCK_SIZE; i++) {
-        digest[i] = (uint8_t)((ctx->state[i>>2] >> ((3 - (i & 3)) * 8)) & 255);
+        digest[i] = (uint8_t)((ctx -> state[i>>2] >> ((3 - (i & 3)) * 8)) & 255);
     }
     
     memset(ctx, 0, sizeof(*ctx));

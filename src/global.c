@@ -36,41 +36,41 @@ static thread_local JSClassID evtarget_class_id;
 // 初始化 EvTarget
 static EvTarget *evtarget_new(JSContext* ctx){
     EvTarget *et = js_malloc(ctx, sizeof(EvTarget));
-    et->listeners = NULL;
-    et->listener_count = 0;
-    et->listener_capacity = 0;
+    et -> listeners = NULL;
+    et -> listener_count = 0;
+    et -> listener_capacity = 0;
     return et;
 }
 
 // 释放 EvTarget
 static void evtarget_free(EvTarget *et) {
-    for (int i = 0; i < et->listener_count; i++) {
-        JS_FreeValue(et -> ctx, et->listeners[i].callback);
-        js_free(et -> ctx ,et->listeners[i].type);
+    for (int i = 0; i < et -> listener_count; i++) {
+        JS_FreeValue(et -> ctx, et -> listeners[i].callback);
+        js_free(et -> ctx ,et -> listeners[i].type);
     }
-    js_free(et -> ctx, et->listeners);
+    js_free(et -> ctx, et -> listeners);
     js_free(et -> ctx, et);
 }
 
 // 添加事件监听器
 static void evtarget_on(EvTarget *et, const char *type, JSValue callback) {
-    if (et->listener_count >= et->listener_capacity) {
-        et->listener_capacity = et->listener_capacity ? et->listener_capacity * 2 : 8;
-        et->listeners = js_realloc(et -> ctx, et->listeners, et->listener_capacity * sizeof(Listener));
+    if (et -> listener_count >= et -> listener_capacity) {
+        et -> listener_capacity = et -> listener_capacity ? et -> listener_capacity * 2 : 8;
+        et -> listeners = js_realloc(et -> ctx, et -> listeners, et -> listener_capacity * sizeof(Listener));
     }
-    et->listeners[et->listener_count].type = strdup(type);
-    et->listeners[et->listener_count].callback = JS_DupValue(et -> ctx, callback);
-    et->listener_count++;
+    et -> listeners[et -> listener_count].type = strdup(type);
+    et -> listeners[et -> listener_count].callback = JS_DupValue(et -> ctx, callback);
+    et -> listener_count++;
 }
 
 // 移除事件监听器
 static void evtarget_off(EvTarget *et, const char *type, JSValue callback) {
-    for (int i = 0; i < et->listener_count; i++) {
-        if (strcmp(et->listeners[i].type, type) == 0 && JS_VALUE_GET_PTR(et->listeners[i].callback) == JS_VALUE_GET_PTR(callback)) {
-            JS_FreeValue(et -> ctx, et->listeners[i].callback);
-            js_free(et -> ctx, et->listeners[i].type);
-            memmove(&et->listeners[i], &et->listeners[i + 1], (et->listener_count - i - 1) * sizeof(Listener));
-            et->listener_count--;
+    for (int i = 0; i < et -> listener_count; i++) {
+        if (strcmp(et -> listeners[i].type, type) == 0 && JS_VALUE_GET_PTR(et -> listeners[i].callback) == JS_VALUE_GET_PTR(callback)) {
+            JS_FreeValue(et -> ctx, et -> listeners[i].callback);
+            js_free(et -> ctx, et -> listeners[i].type);
+            memmove(&et -> listeners[i], &et -> listeners[i + 1], (et -> listener_count - i - 1) * sizeof(Listener));
+            et -> listener_count--;
             break;
         }
     }
@@ -78,7 +78,7 @@ static void evtarget_off(EvTarget *et, const char *type, JSValue callback) {
 
 // 阻止默认行为
 static void event_prevent_default(Event *event) {
-    event->default_prevented = 1;
+    event -> default_prevented = 1;
 }
 
 static JSValue js_ev_prevent_default(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -88,14 +88,14 @@ static JSValue js_ev_prevent_default(JSContext *ctx, JSValueConst this_val, int 
 
 // 触发事件
 static void evtarget_fire(EvTarget *et, Event *event) {
-    for (int i = 0; i < et->listener_count; i++) {
-        if (strcmp(et->listeners[i].type, event->type) == 0) {
+    for (int i = 0; i < et -> listener_count; i++) {
+        if (strcmp(et -> listeners[i].type, event -> type) == 0) {
             JSContext *ctx = et ->ctx;
             JSValue argv[1];
             argv[0] = JS_NewObject(ctx);
-            JS_SetPropertyStr(ctx, argv[0], "type", JS_NewString(ctx, event->type));
+            JS_SetPropertyStr(ctx, argv[0], "type", JS_NewString(ctx, event -> type));
             JS_SetPropertyStr(ctx, argv[0], "preventDefault", JS_NewCFunction(ctx, js_ev_prevent_default, "preventDefault", 0));
-            JS_Call(ctx, et->listeners[i].callback, JS_UNDEFINED, 1, argv);
+            JS_Call(ctx, et -> listeners[i].callback, JS_UNDEFINED, 1, argv);
             JS_FreeValue(ctx, argv[0]);
         }
     }
@@ -104,16 +104,16 @@ static void evtarget_fire(EvTarget *et, Event *event) {
 // 创建 Event 对象
 static Event *event_new(JSContext *ctx, const char *type, JSValue data) {
     Event *event = js_malloc(ctx, sizeof(Event));
-    event->type = strdup(type);
-    event->default_prevented = 0;
-    event->data = data;
+    event -> type = strdup(type);
+    event -> default_prevented = 0;
+    event -> data = data;
     return event;
 }
 
 // 释放 Event 对象
 static void event_free(JSContext* ctx, Event *event) {
-    JS_FreeValue(ctx, event->data);
-    js_free(ctx, event->type);
+    JS_FreeValue(ctx, event -> data);
+    js_free(ctx, event -> type);
     js_free(ctx, event);
 }
 
@@ -347,6 +347,7 @@ static JSValue js_u8array_to_str(JSContext *ctx, JSValueConst this_val, int argc
     size_t len = 0;
     uint8_t *data = JS_GetUint8Array(ctx, &len, argv[0]);
     if(!data) return JS_EXCEPTION;
+    if(len == 0) return JS_NewStringLen(ctx, "", 0);
 
     while(*data == 0 && len != 0)
         data++, len--;

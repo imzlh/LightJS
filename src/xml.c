@@ -38,15 +38,15 @@ struct JSXMLParserCtx {
 #define PUSH(stack, el) list_add(&(el)->link, stack);
 
 static struct JSXMLParserCtx* new_jsxmlctx(JSContext* ctx) {
-    struct JSXMLParserCtx* jsxmlctx = malloc(sizeof(struct JSXMLParserCtx));
-    jsxmlctx->ctx = ctx;
-    init_list_head(&jsxmlctx->stack);
+    struct JSXMLParserCtx* jsxmlctx = js_malloc(ctx, sizeof(struct JSXMLParserCtx));
+    jsxmlctx -> ctx = ctx;
+    init_list_head(&jsxmlctx -> stack);
     return jsxmlctx;
 }
 
 static void free_jsxmlctx(struct JSXMLParserCtx* jsxmlctx) {
-    XML_ParserFree(jsxmlctx->parser);
-    free(jsxmlctx);
+    XML_ParserFree(jsxmlctx -> parser);
+    js_free(jsxmlctx -> ctx, jsxmlctx);
 }
 
 static void start_element(void* user_data, const XML_Char* name, const XML_Char** attrs) {
@@ -56,55 +56,56 @@ static void start_element(void* user_data, const XML_Char* name, const XML_Char*
         name = "__meta__";
     }
 
-    struct XMLElement* el = malloc(sizeof(struct XMLElement));
-    JSValue nameobj = JS_NewString(jsxmlctx->ctx, name);
-    el->name = nameobj;
-    el->obj = JS_NewObject(jsxmlctx->ctx);
-    el->children = JS_NewArray(jsxmlctx->ctx);
+    struct XMLElement* el = js_malloc(jsxmlctx -> ctx, sizeof(struct XMLElement));
+    JSValue nameobj = JS_NewString(jsxmlctx -> ctx, name);
+    el -> name = nameobj;
+    el -> obj = JS_NewObject(jsxmlctx -> ctx);
+    el -> children = JS_NewArray(jsxmlctx -> ctx);
+    el -> child_count = 0;
 
-    JSValue attrs_obj = JS_NewObject(jsxmlctx->ctx);
+    JSValue attrs_obj = JS_NewObject(jsxmlctx -> ctx);
     for (int i = 0; attrs[i]; i += 2) {
         char* name = (char*)attrs[i];
-        JSValue value = JS_NewString(jsxmlctx->ctx, attrs[i+1]);
-        JS_SetPropertyStr(jsxmlctx->ctx, attrs_obj, name, value);
+        JSValue value = JS_NewString(jsxmlctx -> ctx, attrs[i+1]);
+        JS_SetPropertyStr(jsxmlctx -> ctx, attrs_obj, name, value);
     }
-    el->attrs = attrs_obj;
+    el -> attrs = attrs_obj;
 
-    memset(&el->content, 0, sizeof(struct Buffer));
-    PUSH(&jsxmlctx->stack, el);
+    memset(&el -> content, 0, sizeof(struct Buffer));
+    PUSH(&jsxmlctx -> stack, el);
 }
 
 static void end_element(void* user_data, const XML_Char* name) {
     struct JSXMLParserCtx* jsxmlctx = (struct JSXMLParserCtx*)user_data;
-    struct XMLElement* el = FETCH(&jsxmlctx->stack);
+    struct XMLElement* el = FETCH(&jsxmlctx -> stack);
 
-    buffer_flat(&el->content);
-    char* content = (void*)el->content.buffer;
-    if(content) content[el->content.end] = '\0';
+    buffer_flat(&el -> content);
+    char* content = (void*)el -> content.buffer;
+    if(content) content[el -> content.end] = '\0';
     JSValue content_val = JS_NewStringLen(jsxmlctx -> ctx, content, el -> content.end);
-    buffer_free(&el->content);
+    buffer_free(&el -> content);
 
-    JSValue obj = el->obj;
-    JS_SetPropertyStr(jsxmlctx->ctx, obj, "name", el->name);
-    JS_SetPropertyStr(jsxmlctx->ctx, obj, "attributes", el->attrs);
-    JS_SetPropertyStr(jsxmlctx->ctx, obj, "content", content_val);
-    JS_SetPropertyStr(jsxmlctx->ctx, obj, "children", el->children);
-    if(el->child_count)
-        JS_SetLength(jsxmlctx->ctx, el->children, el->child_count);
-    POP(&jsxmlctx->stack);
-    struct XMLElement* parent = FETCH(&jsxmlctx->stack);
-    JS_SetPropertyStr(jsxmlctx->ctx, obj, "parent", JS_DupValue(jsxmlctx->ctx, parent->obj));
-    JS_SetPropertyUint32(jsxmlctx->ctx, parent->children, parent->child_count++, obj);
+    JSValue obj = el -> obj;
+    JS_SetPropertyStr(jsxmlctx -> ctx, obj, "name", el -> name);
+    JS_SetPropertyStr(jsxmlctx -> ctx, obj, "attributes", el -> attrs);
+    JS_SetPropertyStr(jsxmlctx -> ctx, obj, "content", content_val);
+    JS_SetPropertyStr(jsxmlctx -> ctx, obj, "children", el -> children);
+    if(el -> child_count)
+        JS_SetLength(jsxmlctx -> ctx, el -> children, el -> child_count);
+    POP(&jsxmlctx -> stack);
+    struct XMLElement* parent = FETCH(&jsxmlctx -> stack);
+    JS_SetPropertyStr(jsxmlctx -> ctx, obj, "parent", JS_DupValue(jsxmlctx -> ctx, parent -> obj));
+    JS_SetPropertyUint32(jsxmlctx -> ctx, parent -> children, parent -> child_count++, obj);
 
-    free(el);
+    js_free(jsxmlctx -> ctx, el);
 }
 
 static void char_data(void* user_data, const XML_Char* s, int len) {
     struct JSXMLParserCtx* jsxmlctx = (struct JSXMLParserCtx*)user_data;
-    struct XMLElement* el = FETCH(&jsxmlctx->stack);
+    struct XMLElement* el = FETCH(&jsxmlctx -> stack);
 
-    buffer_realloc(&el->content, el->content.size + len, true);
-    buffer_push(&el->content, (void*)s, len);
+    buffer_realloc(&el -> content, el -> content.size + len, true);
+    buffer_push(&el -> content, (void*)s, len);
 }
 
 static inline XML_Parser xml_start(JSContext* ctx, struct JSXMLParserCtx* jsxmlctx){
@@ -114,21 +115,21 @@ static inline XML_Parser xml_start(JSContext* ctx, struct JSXMLParserCtx* jsxmlc
     XML_SetCharacterDataHandler(parser, char_data);
 
     JSValue root_obj = JS_NewObject(ctx);
-    struct XMLElement* root = malloc(sizeof(struct XMLElement));
+    struct XMLElement* root = js_malloc(ctx, sizeof(struct XMLElement));
     memset(root, 0, sizeof(struct XMLElement));
-    root->name = JS_NewString(ctx, "<root>");
-    root->obj = root_obj;
-    root->children = JS_NewArray(ctx);
-    JS_SetPropertyStr(ctx, root_obj, "name", root->name);
-    JS_SetPropertyStr(ctx, root_obj, "children", root->children);
-    PUSH(&jsxmlctx->stack, root);
+    root -> name = JS_NewString(ctx, "<root>");
+    root -> obj = root_obj;
+    root -> children = JS_NewArray(ctx);
+    JS_SetPropertyStr(ctx, root_obj, "name", root -> name);
+    JS_SetPropertyStr(ctx, root_obj, "children", root -> children);
+    PUSH(&jsxmlctx -> stack, root);
     return parser;
 }
 
 static inline void xml_end(XML_Parser parser, struct JSXMLParserCtx* jsxmlctx) {
     XML_ParseBuffer(parser, 0, true);
-    struct XMLElement* root = FETCH(&jsxmlctx->stack);
-    JS_SetLength(jsxmlctx->ctx, root->children, root->child_count);
+    struct XMLElement* root = FETCH(&jsxmlctx -> stack);
+    JS_SetLength(jsxmlctx -> ctx, root -> children, root -> child_count);
     free_jsxmlctx(jsxmlctx);
 }
 
@@ -162,21 +163,21 @@ param_error:
         }
     }
 
-    JSValue root_obj = FETCH(&jsxmlctx->stack)->obj;
+    JSValue root_obj = FETCH(&jsxmlctx -> stack)->obj;
     xml_end(parser, jsxmlctx);
     JS_FreeCString(ctx, xmlstr);
     return root_obj;
 
 error:
     struct list_head* pos;
-    list_for_each(pos, &jsxmlctx->stack) {
+    list_for_each(pos, &jsxmlctx -> stack) {
         struct XMLElement* el = list_entry(pos, struct XMLElement, link);
-        JS_FreeValue(ctx, el->name);
-        JS_FreeValue(ctx, el->attrs);
-        JS_FreeValue(ctx, el->obj);
-        JS_FreeValue(ctx, el->children);
-        buffer_free(&el->content);
-        free(el);
+        JS_FreeValue(ctx, el -> name);
+        JS_FreeValue(ctx, el -> attrs);
+        JS_FreeValue(ctx, el -> obj);
+        JS_FreeValue(ctx, el -> children);
+        buffer_free(&el -> content);
+        js_free(ctx, el);
     }
 
     xml_end(parser, jsxmlctx);

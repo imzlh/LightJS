@@ -410,16 +410,16 @@ static bool get_all_files_or_dirs(
 
     struct dirent* ent;
     while ((ent = readdir(dir))!= NULL) {
-        if (ent->d_name[0] == '.' && (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0'))) {
+        if (ent -> d_name[0] == '.' && (ent -> d_name[1] == '\0' || (ent -> d_name[1] == '.' && ent -> d_name[2] == '\0'))) {
             continue;
         }
 
         // is dir?
-        if (ent->d_type == DT_DIR) {
-            char* new_path = js_malloc(ctx, strlen(path) + strlen(ent->d_name) + 2);
+        if (ent -> d_type == DT_DIR) {
+            char* new_path = js_malloc(ctx, strlen(path) + strlen(ent -> d_name) + 2);
             strcpy(new_path, path);
             strcat(new_path, "/");
-            strcat(new_path, ent->d_name);
+            strcat(new_path, ent -> d_name);
             if (!get_all_files_or_dirs(
                 ctx, new_path, 
                 list, list_length, list_used,
@@ -440,14 +440,14 @@ static bool get_all_files_or_dirs(
                 *dir_list_length += 16;
                 *dir_list = realloc(*dir_list, *dir_list_length * sizeof(char*));
             }
-            (*dir_list)[*dir_list_used] = strdup(ent->d_name);
+            (*dir_list)[*dir_list_used] = strdup(ent -> d_name);
             (*dir_list_used)++;
         }else{
             if (*list_used >= *list_length) {
                 *list_length += 16;
                 *list = realloc(*list, *list_length * sizeof(char*));
             }
-            (*list)[*list_used] = strdup(ent->d_name);
+            (*list)[*list_used] = strdup(ent -> d_name);
             (*list_used)++;
         }
     }
@@ -656,13 +656,13 @@ static JSValue js_stdio_scandir(JSContext *ctx, JSValueConst self, int argc, JSV
     JSValue arr = JS_NewArray(ctx);
     uint32_t i = 0;
     while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] == '.' && (ent->d_name[1] == '\0' || (ent->d_name[1] == '.' && ent->d_name[2] == '\0'))) {
+        if (ent -> d_name[0] == '.' && (ent -> d_name[1] == '\0' || (ent -> d_name[1] == '.' && ent -> d_name[2] == '\0'))) {
             continue;
         }
 
         JSValue obj = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, obj, "name", JS_NewString(ctx, ent->d_name));
-        JS_SetPropertyStr(ctx, obj, "type", dirent_type_to_str(ctx, ent->d_type));
+        JS_SetPropertyStr(ctx, obj, "name", JS_NewString(ctx, ent -> d_name));
+        JS_SetPropertyStr(ctx, obj, "type", dirent_type_to_str(ctx, ent -> d_type));
         JS_SetPropertyUint32(ctx, arr, i, obj);
         i++;
     }
@@ -756,8 +756,8 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
         JSValue pipe = JS_NewObjectClass(ctx, js_syncpipe_class_id);
         struct SyncPipe* piped = js_malloc(ctx, sizeof(struct SyncPipe));
         JS_SetOpaque(pipe, piped);
-        piped->fd = fd;
-        piped->size = fstat(fd, &st) == 0 ? st.st_size : -1;
+        piped -> fd = fd;
+        piped -> size = fstat(fd, &st) == 0 ? st.st_size : -1;
         return pipe;
     }else{
         return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, PIPE_BUF, NULL);
@@ -806,7 +806,7 @@ static int js_mod_stdio_init(JSContext *ctx, JSModuleDef *m) {
 }
 
 bool LJS_init_stdio(JSContext *ctx){
-    JSModuleDef *m = JS_NewCModule(ctx, "stdio", js_mod_stdio_init);
+    JSModuleDef *m = JS_NewCModule(ctx, "fs", js_mod_stdio_init);
     if (!m) return false;
     JS_AddModuleExportList(ctx, m, js_stdio_funcs, countof(js_stdio_funcs));
     JS_AddModuleExport(ctx, m, "SyncPipe");

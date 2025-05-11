@@ -1,6 +1,9 @@
 declare module 'process'{
     type ReactiveEnviron = Record<string, string>;
 
+    /**
+     * Note: 通过pipe.tty*操作进程pty，如大小、标题
+     */
     class Process{
         constructor(args: string[], options: {
             inheritPipe?: boolean,
@@ -11,9 +14,7 @@ declare module 'process'{
         readonly alive: boolean;
         readonly pid: number;
         readonly code: number;
-        readonly title: string;
         readonly pipe?: U8Pipe; // undefined if interitPipe
-        size: [number, number];
 
         readonly onclose: Promise<void>;
     }

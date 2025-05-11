@@ -1,4 +1,4 @@
-declare module "stdio" {
+declare module "fs" {
     type Stat = {
         mtime: bigint,
         atime: bigint,

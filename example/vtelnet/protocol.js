@@ -1,0 +1,30 @@
+export default {
+    // telnet protocol
+    IAC: 255,
+    DONT: 254,
+    DO: 253,
+    WONT: 252,
+    WILL: 251,
+    SE: 240,
+    NOP: 241,
+    DM: 242,
+    BRK: 243,
+    IP: 244,
+    AO: 245,
+    AYT: 246,
+    EC: 247,
+    EL: 248,
+    GA: 249,
+    SB: 250,
+    WILL_SUPPRESS_GO_AHEAD: 30,
+
+    ECHO: 1,
+    SGA: 3,
+    NAWS: 31,
+    TERMINAL_TYPE: 24,
+    TERMINAL_SPEED: 32,
+    LINEMODE: 34,
+    X_DISPLAY_LOCATION: 40,
+    ENVIRONMENT_OPTION: 69,
+    TTYPE: 24
+};

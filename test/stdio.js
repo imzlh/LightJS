@@ -1,4 +1,4 @@
-import { open, read, rename, scandir, stat, unlink, write } from "stdio";
+import { open, read, rename, scandir, stat, unlink, write } from "fs";
 
 console.log('test stdio');
 

@@ -3,8 +3,8 @@
  */
 
 import { self } from "process";
-import { scandir } from "stdio";
-// import { read } from "stdio";
+import { scandir } from "fs";
+// import { read } from "fs";
 
 /**
  * 

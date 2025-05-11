@@ -1,219 +1,98 @@
-==31220== Memcheck, a memory error detector
-==31220== Copyright (C) 2002-2024, and GNU GPL'd, by Julian Seward et al.
-==31220== Using Valgrind-3.24.0 and LibVEX; rerun with -h for copyright info
-==31220== Command: ./build/ljs test http http://172.23.224.1:8000/
-==31220== 
+==67730== Memcheck, a memory error detector
+==67730== Copyright (C) 2002-2024, and GNU GPL'd, by Julian Seward et al.
+==67730== Using Valgrind-3.24.0 and LibVEX; rerun with -h for copyright info
+==67730== Command: ./build/ljs test process
+==67730== 
 epoll_ctl: Operation not permitted
-==31220== Invalid write of size 1
-==31220==    at 0x1E18EC: base64_encode (global.c:207)
-==31220==    by 0x203DD2: ws_random_key (http.c:1335)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==  Address 0x497fb1e is 0 bytes after a block of size 30 alloc'd
-==31220==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==31220==    by 0x203DB3: ws_random_key (http.c:1334)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220== 
-==31220== Invalid write of size 1
-==31220==    at 0x1E1929: base64_encode (global.c:208)
-==31220==    by 0x203DD2: ws_random_key (http.c:1335)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==  Address 0x497fb1f is 1 bytes after a block of size 30 alloc'd
-==31220==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==31220==    by 0x203DB3: ws_random_key (http.c:1334)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220== 
-==31220== Invalid write of size 1
-==31220==    at 0x1E1949: base64_encode (global.c:210)
-==31220==    by 0x203DD2: ws_random_key (http.c:1335)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==  Address 0x497fb20 is 2 bytes after a block of size 30 alloc'd
-==31220==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==31220==    by 0x203DB3: ws_random_key (http.c:1334)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220== 
-==31220== Invalid read of size 1
-==31220==    at 0x48B7ACF: strnlen (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==31220==    by 0x4021ABC: printf_core (vfprintf.c:600)
-==31220==    by 0x40630FF: vfprintf (vfprintf.c:690)
-==31220==    by 0x40635AE: vsnprintf (vsnprintf.c:49)
-==31220==    by 0x40627BD: snprintf (snprintf.c:9)
-==31220==    by 0x204721: js_fetch (http.c:1443)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==  Address 0x497fb1e is 0 bytes after a block of size 30 alloc'd
-==31220==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==31220==    by 0x203DB3: ws_random_key (http.c:1334)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220== 
-==31220== Invalid read of size 1
-==31220==    at 0x4021AD4: printf_core (vfprintf.c:601)
-==31220==    by 0x40630FF: vfprintf (vfprintf.c:690)
-==31220==    by 0x40635AE: vsnprintf (vsnprintf.c:49)
-==31220==    by 0x40627BD: snprintf (snprintf.c:9)
-==31220==    by 0x204721: js_fetch (http.c:1443)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==  Address 0x497fb20 is 2 bytes after a block of size 30 alloc'd
-==31220==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==31220==    by 0x203DB3: ws_random_key (http.c:1334)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220== 
-==31220== Invalid read of size 1
-==31220==    at 0x4064C6E: ??? (memcpy.s:24)
-==31220==    by 0x40311A3: __fwritex (fwrite.c:23)
-==31220==    by 0x4021EA9: out (vfprintf.c:135)
-==31220==    by 0x4021EA9: printf_core (vfprintf.c:641)
-==31220==    by 0x40630FF: vfprintf (vfprintf.c:690)
-==31220==    by 0x40635AE: vsnprintf (vsnprintf.c:49)
-==31220==    by 0x40627BD: snprintf (snprintf.c:9)
-==31220==    by 0x204721: js_fetch (http.c:1443)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==  Address 0x497fb1e is 0 bytes after a block of size 30 alloc'd
-==31220==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==31220==    by 0x203DB3: ws_random_key (http.c:1334)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220== 
-==31220== Invalid read of size 1
-==31220==    at 0x4064C6B: ??? (memcpy.s:22)
-==31220==    by 0x40311A3: __fwritex (fwrite.c:23)
-==31220==    by 0x4021EA9: out (vfprintf.c:135)
-==31220==    by 0x4021EA9: printf_core (vfprintf.c:641)
-==31220==    by 0x40630FF: vfprintf (vfprintf.c:690)
-==31220==    by 0x40635AE: vsnprintf (vsnprintf.c:49)
-==31220==    by 0x40627BD: snprintf (snprintf.c:9)
-==31220==    by 0x204721: js_fetch (http.c:1443)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==  Address 0x497fb1f is 1 bytes after a block of size 30 alloc'd
-==31220==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==31220==    by 0x203DB3: ws_random_key (http.c:1334)
-==31220==    by 0x2046D0: js_fetch (http.c:1442)
-==31220==    by 0x14A9DE: js_call_c_function (quickjs.c:16263)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220==    by 0x15C0A4: js_async_function_resume (quickjs.c:19448)
-==31220==    by 0x15C83F: js_async_function_call (quickjs.c:19567)
-==31220==    by 0x14B428: JS_CallInternal (quickjs.c:16478)
-==31220==    by 0x14E009: JS_CallInternal (quickjs.c:16859)
-==31220==    by 0x15B743: async_func_resume (quickjs.c:19193)
-==31220== 
-==31220== 
-==31220== Process terminating with default action of signal 2 (SIGINT)
-==31220==    at 0x4068347: ??? (syscall_cp.s:29)
-==31220==    by 0x4065CB4: __syscall_cp_c (pthread_cancel.c:33)
-==31220==    by 0x4043347: epoll_pwait (epoll.c:28)
-==31220==    by 0x1DE186: LJS_evcore_run (eventloop.c:977)
-==31220==    by 0x11DAC6: main (main.c:249)
-==31220== 
-==31220== HEAP SUMMARY:
-==31220==     in use at exit: 152,857 bytes in 1,773 blocks
-==31220==   total heap usage: 3,487 allocs, 1,714 frees, 398,363 bytes allocated
-==31220== 
-==31220== LEAK SUMMARY:
-==31220==    definitely lost: 56 bytes in 1 blocks
-==31220==    indirectly lost: 128 bytes in 2 blocks
-==31220==      possibly lost: 46,503 bytes in 498 blocks
-==31220==    still reachable: 106,170 bytes in 1,272 blocks
-==31220==         suppressed: 0 bytes in 0 blocks
-==31220== Rerun with --leak-check=full to see details of leaked memory
-==31220== 
-==31220== For lists of detected and suppressed errors, rerun with: -s
-==31220== ERROR SUMMARY: 9 errors from 7 contexts (suppressed: 0 from 0)
+==67730== Invalid write of size 8
+==67730==    at 0x1E591C: LJS_FreePromise (core.h:430)
+==67730==    by 0x1E59C7: LJS_Promise_Resolve (core.h:438)
+==67730==    by 0x1E7487: evwrite_callback (pipe.c:472)
+==67730==    by 0x1DEAFB: handle_write (eventloop.c:674)
+==67730==    by 0x1DF771: LJS_evcore_run (eventloop.c:1082)
+==67730==    by 0x11EB66: main (main.c:249)
+==67730==  Address 0x49a3df0 is 0 bytes inside a block of size 64 free'd
+==67730==    at 0x48B2ECF: free (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==67730==    by 0x120D13: js_def_free (quickjs.c:1887)
+==67730==    by 0x120125: js_free_rt (quickjs.c:1501)
+==67730==    by 0x1203C0: js_free (quickjs.c:1587)
+==67730==    by 0x1E5917: LJS_FreePromise (core.h:429)
+==67730==    by 0x1E59C7: LJS_Promise_Resolve (core.h:438)
+==67730==    by 0x1E7487: evwrite_callback (pipe.c:472)
+==67730==    by 0x1DEAFB: handle_write (eventloop.c:674)
+==67730==    by 0x1DF771: LJS_evcore_run (eventloop.c:1082)
+==67730==    by 0x11EB66: main (main.c:249)
+==67730==  Block was alloc'd at
+==67730==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==67730==    by 0x120CF5: js_def_malloc (quickjs.c:1882)
+==67730==    by 0x120057: js_malloc_rt (quickjs.c:1482)
+==67730==    by 0x120318: js_malloc (quickjs.c:1565)
+==67730==    by 0x1E57F3: LJS_NewPromise (core.h:412)
+==67730==    by 0x1E7648: js_U8Pipe_write (pipe.c:491)
+==67730==    by 0x14BA7E: js_call_c_function (quickjs.c:16263)
+==67730==    by 0x14C4C8: JS_CallInternal (quickjs.c:16478)
+==67730==    by 0x14F4B0: JS_CallInternal (quickjs.c:16896)
+==67730==    by 0x15C7E3: async_func_resume (quickjs.c:19193)
+==67730==    by 0x15D144: js_async_function_resume (quickjs.c:19448)
+==67730==    by 0x15D8DF: js_async_function_call (quickjs.c:19567)
+==67730== 
+==67730== Invalid write of size 8
+==67730==    at 0x1E591C: LJS_FreePromise (core.h:430)
+==67730==    by 0x1E59C7: LJS_Promise_Resolve (core.h:438)
+==67730==    by 0x1E71E9: evread_callback (pipe.c:430)
+==67730==    by 0x1DDF8B: handle_read (eventloop.c:455)
+==67730==    by 0x1DF4F0: LJS_evcore_run (eventloop.c:1025)
+==67730==    by 0x11EB66: main (main.c:249)
+==67730==  Address 0x49a88c0 is 0 bytes inside a block of size 64 free'd
+==67730==    at 0x48B2ECF: free (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==67730==    by 0x120D13: js_def_free (quickjs.c:1887)
+==67730==    by 0x120125: js_free_rt (quickjs.c:1501)
+==67730==    by 0x1203C0: js_free (quickjs.c:1587)
+==67730==    by 0x1E5917: LJS_FreePromise (core.h:429)
+==67730==    by 0x1E59C7: LJS_Promise_Resolve (core.h:438)
+==67730==    by 0x1E71E9: evread_callback (pipe.c:430)
+==67730==    by 0x1DDF8B: handle_read (eventloop.c:455)
+==67730==    by 0x1DF4F0: LJS_evcore_run (eventloop.c:1025)
+==67730==    by 0x11EB66: main (main.c:249)
+==67730==  Block was alloc'd at
+==67730==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==67730==    by 0x120CF5: js_def_malloc (quickjs.c:1882)
+==67730==    by 0x120057: js_malloc_rt (quickjs.c:1482)
+==67730==    by 0x120318: js_malloc (quickjs.c:1565)
+==67730==    by 0x1E57F3: LJS_NewPromise (core.h:412)
+==67730==    by 0x1E7C33: js_U8Pipe_readline (pipe.c:552)
+==67730==    by 0x14BA7E: js_call_c_function (quickjs.c:16263)
+==67730==    by 0x14C4C8: JS_CallInternal (quickjs.c:16478)
+==67730==    by 0x14F4B0: JS_CallInternal (quickjs.c:16896)
+==67730==    by 0x15C7E3: async_func_resume (quickjs.c:19193)
+==67730==    by 0x15D144: js_async_function_resume (quickjs.c:19448)
+==67730==    by 0x15D8DF: js_async_function_call (quickjs.c:19567)
+==67730== 
+[31m error [0m[32mTry[0m [32mstd[0m [32merror:Error
+    Failed to bind FD: Operation not permitted
+[0m 
+[31m error [0m[31mError[0m: Failed to bind FD: Operation not permitted
+  
+ 
+==67730== 
+==67730== Process terminating with default action of signal 2 (SIGINT)
+==67730==    at 0x4068347: ??? (syscall_cp.s:29)
+==67730==    by 0x4065CB4: __syscall_cp_c (pthread_cancel.c:33)
+==67730==    by 0x4043347: epoll_pwait (epoll.c:28)
+==67730==    by 0x1DF2E8: LJS_evcore_run (eventloop.c:987)
+==67730==    by 0x11EB66: main (main.c:249)
+==67730== 
+==67730== HEAP SUMMARY:
+==67730==     in use at exit: 167,122 bytes in 1,764 blocks
+==67730==   total heap usage: 3,602 allocs, 1,838 frees, 536,652 bytes allocated
+==67730== 
+==67730== LEAK SUMMARY:
+==67730==    definitely lost: 136 bytes in 4 blocks
+==67730==    indirectly lost: 131 bytes in 3 blocks
+==67730==      possibly lost: 60,533 bytes in 466 blocks
+==67730==    still reachable: 106,322 bytes in 1,291 blocks
+==67730==         suppressed: 0 bytes in 0 blocks
+==67730== Rerun with --leak-check=full to see details of leaked memory
+==67730== 
+==67730== For lists of detected and suppressed errors, rerun with: -s
+==67730== ERROR SUMMARY: 2 errors from 2 contexts (suppressed: 0 from 0)

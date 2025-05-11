@@ -197,11 +197,11 @@ static JSValue stream_poll(JSContext* ctx, void* ptr, JSValueConst data){
     // write to zlib
     char* error;
 loop:
-    uint8_t* outbuf = stream->zstream.next_out;
+    uint8_t* outbuf = stream -> zstream.next_out;
     while(stream -> zstream.avail_in){
-        int res = stream->compress
-            ? deflate(&stream->zstream, Z_NO_FLUSH)
-            : inflate(&stream->zstream, Z_NO_FLUSH);
+        int res = stream -> compress
+            ? deflate(&stream -> zstream, Z_NO_FLUSH)
+            : inflate(&stream -> zstream, Z_NO_FLUSH);
 
         switch (res) {
             case Z_STREAM_END:
@@ -219,15 +219,15 @@ loop:
             default:
                 // full
                 if (stream -> zstream.avail_out == 0 || stream -> zstream.avail_in == 0) {
-                    JSValue chunk = JS_NewUint8Array(ctx, outbuf, stream->zstream.next_out - outbuf, free_js_malloc, NULL, false);
-                    LJS_Promise_Resolve(stream->poll_promise, chunk);
+                    JSValue chunk = JS_NewUint8Array(ctx, outbuf, stream -> zstream.next_out - outbuf, free_js_malloc, NULL, false);
+                    LJS_Promise_Resolve(stream -> poll_promise, chunk);
 
                     outbuf = js_malloc(ctx, LJS_ZLIB_CHUNK_SIZE);
                     if (!outbuf) {
                         JS_ThrowOutOfMemory(ctx);
                     }
-                    stream->zstream.next_out = outbuf;
-                    stream->zstream.avail_out = LJS_ZLIB_CHUNK_SIZE;
+                    stream -> zstream.next_out = outbuf;
+                    stream -> zstream.avail_out = LJS_ZLIB_CHUNK_SIZE;
                 }
             break;  // have some data to consume
         }

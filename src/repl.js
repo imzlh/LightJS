@@ -25,7 +25,7 @@
  */
 
 import { exit, self, signals, stdin, stdout } from 'process';
-import { read, write } from 'stdio';
+import { read, write } from 'fs';
 import { Sandbox } from 'vm';
 
 /**

@@ -87,40 +87,50 @@ fail:
     return buf;
 }
 
-// static char* js_module_format(JSContext *ctx,
-//     const char *module_base_name, const char *module_name, void *opaque)
-// {
-//     App* app = JS_GetContextOpaque(ctx);
-//     if(JS_IsFunction(ctx, app -> module_format)){
-//         JSValue argv[2] = {
-//             JS_NewString(ctx, module_base_name),
-//             JS_NewString(ctx, module_name),
-//         };
-//         JSValue ret = JS_Call(ctx, app -> module_format, JS_UNDEFINED, 2, argv);
-//         if(JS_IsException(ret)){
-//             LJS_ThrowWithError(ctx, "failed to resolve module format", NULL);
-//             return NULL;
-//         }
-//         if(JS_IsString(ret)){
-//             return (char*)JS_ToCString(ctx, ret);
-//         }else{
-//             LJS_Throw(ctx, "invaild return value of custom module format",
-//                 "return value must be a string(module name or path) contains module format.");
-//             return NULL;
-//         }
-//     }else{
-//         if(JS_IsRegisteredClass())
-//     }
-// }
+static char* js_module_format(JSContext *ctx,
+    const char *module_base_name, const char *module_name, void *opaque)
+{
+    App* app = JS_GetContextOpaque(ctx);
+    if(JS_IsFunction(ctx, app -> module_format)){
+        JSValue argv[2] = {
+            JS_NewString(ctx, module_base_name),
+            JS_NewString(ctx, module_name),
+        };
+        JSValue ret = JS_Call(ctx, app -> module_format, JS_UNDEFINED, 2, argv);
+        if(JS_IsException(ret)){
+            LJS_ThrowWithError(ctx, "failed to resolve module format", NULL);
+            return NULL;
+        }
+        if(JS_IsString(ret)){
+            const char* modpath = JS_ToCString(ctx, ret);
+            char* modpath_dup = js_strdup(ctx, modpath);
+            JS_FreeCString(ctx, modpath);
+            return modpath_dup;
+        }else{
+            LJS_Throw(ctx, "invaild return value of custom module format",
+                "return value must be a string(module name or path) contains module format.");
+            return NULL;
+        }
+    }else if(module_name[0] == '.'){
+        char* module_name_path = LJS_resolve_path(module_name, module_base_name);
+        char* module_path = js_strdup(ctx, module_name_path);
+        free(module_name_path);
+        return module_path;
+    }else{
+        return js_strdup(ctx, module_name);
+    }
+}
 
 static JSModuleDef *js_module_loader(JSContext *ctx,
-                              const char *module_name, void *opaque)
+                              const char *_modname, void *opaque)
 {
     JSModuleDef *m;
     char* buf;
     uint32_t buf_len;
     App* app = JS_GetContextOpaque(ctx);
     bool use_loader = JS_IsFunction(ctx, app -> module_loader);
+
+    char* module_name = strdup(_modname);  // avoid const cast error
 
     if(use_loader){
         JSValue argv[1] = { JS_NewString(ctx, module_name) };
@@ -177,9 +187,9 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
                 JS_PROP_C_W_E);
             free(real_path);
         }
-        JS_FreeValue(ctx, func_val);
     }
 
+    free(module_name);
     return m;
 }
 
@@ -303,16 +313,16 @@ App* LJS_create_app(
     JSContext* ctx = JS_NewContextRaw(rt);
     if(!ctx) return NULL;
     App* app = (App*)malloc(sizeof(App));
-    app->ctx = ctx;
-    app->module = module;
-    app->script_path = script_path;
-    app->argv = argv;
-    app->argc = argc;
-    app->module_loader = JS_UNDEFINED;
-    app->module_format = JS_UNDEFINED;
-    app->worker = NULL;
+    app -> ctx = ctx;
+    app -> module = module;
+    app -> script_path = script_path;
+    app -> argv = argv;
+    app -> argc = argc;
+    app -> module_loader = JS_UNDEFINED;
+    app -> module_format = JS_UNDEFINED;
+    app -> worker = NULL;
 
-    init_list_head(&app->workers);
+    init_list_head(&app -> workers);
 
     if(parent && worker){
         // 分配worker专用资源
@@ -363,69 +373,69 @@ static inline void msglist_clear(JSContext* ctx, struct list_head* list){
 void LJS_destroy_app(App* app) {
     if (!app) return;
 
-    if (app->worker) {
+    if (app -> worker) {
         // 关闭eventfd文件描述符
-        if (app->worker->efd_worker2main >= 0) {
-            close(app->worker->efd_worker2main);
+        if (app -> worker -> efd_worker2main >= 0) {
+            close(app -> worker -> efd_worker2main);
         }
-        if (app->worker->efd_main2worker >= 0) {
-            close(app->worker->efd_main2worker);
+        if (app -> worker -> efd_main2worker >= 0) {
+            close(app -> worker -> efd_main2worker);
         }
         
         // remove lock
-        pthread_mutex_destroy(&app->worker->lock);
+        pthread_mutex_destroy(&app -> worker -> lock);
 
         // free msgcallback
-        if(!JS_IsUndefined(app->worker-> worker_msgcb))
-            JS_FreeValue(app->ctx, app->worker-> worker_msgcb);
-        if(!JS_IsUndefined(app->worker->main_msgcb))
-            JS_FreeValue(app->worker->parent->ctx, app->worker->main_msgcb);
-        if(!JS_IsUndefined(app->worker->destroy_cb))
-            JS_FreeValue(app->worker->parent->ctx, app->worker->destroy_cb);
+        if(!JS_IsUndefined(app -> worker-> worker_msgcb))
+            JS_FreeValue(app -> ctx, app -> worker-> worker_msgcb);
+        if(!JS_IsUndefined(app -> worker -> main_msgcb))
+            JS_FreeValue(app -> worker -> parent -> ctx, app -> worker -> main_msgcb);
+        if(!JS_IsUndefined(app -> worker -> destroy_cb))
+            JS_FreeValue(app -> worker -> parent -> ctx, app -> worker -> destroy_cb);
 
         // free queue
-        msglist_clear(app->ctx, &app->worker->main_msg);
-        msglist_clear(app->ctx, &app->worker->worker_msg);
+        msglist_clear(app -> ctx, &app -> worker -> main_msg);
+        msglist_clear(app -> ctx, &app -> worker -> worker_msg);
 
         // free error
-        if(app->worker->error){
-            js_free(app->ctx, app->worker->error->message);
-            js_free(app->ctx, app->worker->error);
+        if(app -> worker -> error){
+            js_free(app -> ctx, app -> worker -> error -> message);
+            js_free(app -> ctx, app -> worker -> error);
         }
         
         // 释放worker结构体
-        js_free(app->ctx, app->worker);
+        js_free(app -> ctx, app -> worker);
     }
 
     // sandbox can be auto destroyed, however workers not.
-    if(!list_empty(&app->workers)){
+    if(!list_empty(&app -> workers)){
         struct list_head* pos, *tmp;
-        list_for_each_safe(pos, tmp, &app->workers){
+        list_for_each_safe(pos, tmp, &app -> workers){
             App* child = list_entry(pos, App, link);
             LJS_destroy_app(child);
         }
     }
 
-    if (!JS_IsUndefined(app->module_loader)) {
-        JS_FreeValue(app->ctx, app->module_loader);
+    if (!JS_IsUndefined(app -> module_loader)) {
+        JS_FreeValue(app -> ctx, app -> module_loader);
     }
-    if (!JS_IsUndefined(app->module_format)) {
-        JS_FreeValue(app->ctx, app->module_format);
+    if (!JS_IsUndefined(app -> module_format)) {
+        JS_FreeValue(app -> ctx, app -> module_format);
     }
-    if (app->ctx) {
-        JS_FreeContext(app->ctx);
+    if (app -> ctx) {
+        JS_FreeContext(app -> ctx);
     }
 
     // free args
-    if (app->script_path) js_free(app->ctx, app->script_path);
-    if (app->argv) {
-        for (uint32_t i = 0; i < app->argc; i++) {
-            js_free(app->ctx, app->argv[i]);
+    if (app -> script_path) js_free(app -> ctx, app -> script_path);
+    if (app -> argv) {
+        for (uint32_t i = 0; i < app -> argc; i++) {
+            js_free(app -> ctx, app -> argv[i]);
         }
-        js_free(app->ctx, app->argv);
+        js_free(app -> ctx, app -> argv);
     }
 
-    js_free(app->ctx, app);
+    js_free(app -> ctx, app);
 }
 
 
@@ -579,7 +589,7 @@ void LJS_init_runtime(JSRuntime* rt){
     JS_SetHostPromiseRejectionTracker(rt, js_handle_promise_reject, NULL);
 
     // 初始化ES6模块
-    JS_SetModuleLoaderFunc(rt, /* js_module_format */ NULL, js_module_loader, NULL);
+    JS_SetModuleLoaderFunc(rt, js_module_format, js_module_loader, NULL);
 
     // atomic
     JS_SetCanBlock(rt, true);
@@ -622,7 +632,7 @@ void LJS_init_context(App* app, char** init_list){
             LJS_init_process(ctx, app -> script_path, app -> argc, app -> argv);
             LJS_init_thread(ctx);
         }
-        if(!init_list || in(init_list, "stdio"))
+        if(!init_list || in(init_list, "fs"))
             LJS_init_stdio(ctx);
         if(!init_list || in(init_list, "http"))
             LJS_init_http(ctx);

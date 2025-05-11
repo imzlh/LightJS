@@ -1,7 +1,7 @@
 /// <reference path="./process.d.ts" />
 /// <reference path="./socket.d.ts" />
 
-type IModule = 'pipe' | 'socket' | 'process' | 'stdio' | 'console' | 'event' | 'module' | 'url' | 'timer' |
+type IModule = 'pipe' | 'socket' | 'process' | 'fs' | 'console' | 'event' | 'module' | 'url' | 'timer' |
     /* ES6 features */ 'base' | 'date' | 'eval' | 'regexp' | 'json' | 'proxy' | 'mapset' | 'typedarray' | 'promise' | 'bigint' | 'weakmap' | 'performance';
 type TypedArray = Int8Array | Uint8Array | Uint8ClampedArray | Int16Array | Uint16Array | Int32Array | Uint32Array | Float32Array | Float64Array;
 
@@ -163,6 +163,8 @@ declare class U8Pipe {
     set ttySize(size: { rows: number, cols: number });
     get ttySize(): { rows: number, cols: number };
     get isTTY(): boolean;
+    get ttyTitle(): string;
+    set ttyTitle(title: string);
 
     // features for fd.
     /**

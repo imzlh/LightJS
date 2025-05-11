@@ -69,7 +69,7 @@ static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
         1024 * 64
 #endif
     );
-    void *fault_addr = _info->si_addr;
+    void *fault_addr = _info -> si_addr;
     switch(sig){
         case SIGSEGV: snprintf(info, 128, "Segmentation fault at %p", fault_addr); break;
         case SIGBUS: snprintf(info, 128, "Bus error at %p", fault_addr); break;
