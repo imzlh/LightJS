@@ -12,26 +12,25 @@ static JSRuntime *runtime;
 static App* app;
 
 static inline void run_jobs(){
-#ifdef LJS_DEBUG
-    printf("run_jobs\n");
-#endif
+    int jobs = 0;
 
-    js_run_promise_jobs();  // thread-local jobs
+    do{
+        jobs = js_run_promise_jobs();  // thread-local jobs
 
-    int res = 1;
-    JSRuntime* rt = JS_GetRuntime(app -> ctx);
-    JSContext* ectx;
-    while(res == 1){
-        res = JS_ExecutePendingJob(rt, &ectx);
-        if(res < 0){    // error
-            LJS_dump_error(ectx, JS_GetException(ectx));
+        int res = 1;
+        JSRuntime* rt = JS_GetRuntime(app -> ctx);
+        JSContext* ectx;
+        while(res){
+            res = JS_ExecutePendingJob(rt, &ectx);
+            if(res < 0){    // error
+                LJS_dump_error(ectx, JS_GetException(ectx));
+            }
+            if(res > 0) jobs++;
         }
 #ifdef LJS_DEBUG
-        printf("JS_ExecutePendingJob: %d\n", res);
+        printf("run jobs: %d\n", jobs);
 #endif
-    }
-
-    while(js_run_promise_jobs()){}  // run again if there are more jobs
+    }while(jobs);
 }
 
 static bool check_promise_resolved(void* opaque){

@@ -1,98 +1,113 @@
-==67730== Memcheck, a memory error detector
-==67730== Copyright (C) 2002-2024, and GNU GPL'd, by Julian Seward et al.
-==67730== Using Valgrind-3.24.0 and LibVEX; rerun with -h for copyright info
-==67730== Command: ./build/ljs test process
-==67730== 
+==20725== Memcheck, a memory error detector
+==20725== Copyright (C) 2002-2024, and GNU GPL'd, by Julian Seward et al.
+==20725== Using Valgrind-3.24.0 and LibVEX; rerun with -h for copyright info
+==20725== Command: ./build/ljs test process
+==20725== 
 epoll_ctl: Operation not permitted
-==67730== Invalid write of size 8
-==67730==    at 0x1E591C: LJS_FreePromise (core.h:430)
-==67730==    by 0x1E59C7: LJS_Promise_Resolve (core.h:438)
-==67730==    by 0x1E7487: evwrite_callback (pipe.c:472)
-==67730==    by 0x1DEAFB: handle_write (eventloop.c:674)
-==67730==    by 0x1DF771: LJS_evcore_run (eventloop.c:1082)
-==67730==    by 0x11EB66: main (main.c:249)
-==67730==  Address 0x49a3df0 is 0 bytes inside a block of size 64 free'd
-==67730==    at 0x48B2ECF: free (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==67730==    by 0x120D13: js_def_free (quickjs.c:1887)
-==67730==    by 0x120125: js_free_rt (quickjs.c:1501)
-==67730==    by 0x1203C0: js_free (quickjs.c:1587)
-==67730==    by 0x1E5917: LJS_FreePromise (core.h:429)
-==67730==    by 0x1E59C7: LJS_Promise_Resolve (core.h:438)
-==67730==    by 0x1E7487: evwrite_callback (pipe.c:472)
-==67730==    by 0x1DEAFB: handle_write (eventloop.c:674)
-==67730==    by 0x1DF771: LJS_evcore_run (eventloop.c:1082)
-==67730==    by 0x11EB66: main (main.c:249)
-==67730==  Block was alloc'd at
-==67730==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==67730==    by 0x120CF5: js_def_malloc (quickjs.c:1882)
-==67730==    by 0x120057: js_malloc_rt (quickjs.c:1482)
-==67730==    by 0x120318: js_malloc (quickjs.c:1565)
-==67730==    by 0x1E57F3: LJS_NewPromise (core.h:412)
-==67730==    by 0x1E7648: js_U8Pipe_write (pipe.c:491)
-==67730==    by 0x14BA7E: js_call_c_function (quickjs.c:16263)
-==67730==    by 0x14C4C8: JS_CallInternal (quickjs.c:16478)
-==67730==    by 0x14F4B0: JS_CallInternal (quickjs.c:16896)
-==67730==    by 0x15C7E3: async_func_resume (quickjs.c:19193)
-==67730==    by 0x15D144: js_async_function_resume (quickjs.c:19448)
-==67730==    by 0x15D8DF: js_async_function_call (quickjs.c:19567)
-==67730== 
-==67730== Invalid write of size 8
-==67730==    at 0x1E591C: LJS_FreePromise (core.h:430)
-==67730==    by 0x1E59C7: LJS_Promise_Resolve (core.h:438)
-==67730==    by 0x1E71E9: evread_callback (pipe.c:430)
-==67730==    by 0x1DDF8B: handle_read (eventloop.c:455)
-==67730==    by 0x1DF4F0: LJS_evcore_run (eventloop.c:1025)
-==67730==    by 0x11EB66: main (main.c:249)
-==67730==  Address 0x49a88c0 is 0 bytes inside a block of size 64 free'd
-==67730==    at 0x48B2ECF: free (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==67730==    by 0x120D13: js_def_free (quickjs.c:1887)
-==67730==    by 0x120125: js_free_rt (quickjs.c:1501)
-==67730==    by 0x1203C0: js_free (quickjs.c:1587)
-==67730==    by 0x1E5917: LJS_FreePromise (core.h:429)
-==67730==    by 0x1E59C7: LJS_Promise_Resolve (core.h:438)
-==67730==    by 0x1E71E9: evread_callback (pipe.c:430)
-==67730==    by 0x1DDF8B: handle_read (eventloop.c:455)
-==67730==    by 0x1DF4F0: LJS_evcore_run (eventloop.c:1025)
-==67730==    by 0x11EB66: main (main.c:249)
-==67730==  Block was alloc'd at
-==67730==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
-==67730==    by 0x120CF5: js_def_malloc (quickjs.c:1882)
-==67730==    by 0x120057: js_malloc_rt (quickjs.c:1482)
-==67730==    by 0x120318: js_malloc (quickjs.c:1565)
-==67730==    by 0x1E57F3: LJS_NewPromise (core.h:412)
-==67730==    by 0x1E7C33: js_U8Pipe_readline (pipe.c:552)
-==67730==    by 0x14BA7E: js_call_c_function (quickjs.c:16263)
-==67730==    by 0x14C4C8: JS_CallInternal (quickjs.c:16478)
-==67730==    by 0x14F4B0: JS_CallInternal (quickjs.c:16896)
-==67730==    by 0x15C7E3: async_func_resume (quickjs.c:19193)
-==67730==    by 0x15D144: js_async_function_resume (quickjs.c:19448)
-==67730==    by 0x15D8DF: js_async_function_call (quickjs.c:19567)
-==67730== 
+==20725== Conditional jump or move depends on uninitialised value(s)
+==20725==    at 0x1E7AAF: u8pipe_handle_close (pipe.c:268)
+==20725==    by 0x1E7EE1: js_u8pipe_cleanup (pipe.c:318)
+==20725==    by 0x12C7F4: free_object (quickjs.c:5661)
+==20725==    by 0x12C8C2: free_gc_object (quickjs.c:5681)
+==20725==    by 0x12C968: free_zero_refcount (quickjs.c:5703)
+==20725==    by 0x12CB12: js_free_value_rt (quickjs.c:5751)
+==20725==    by 0x12CBDB: JS_FreeValueRT (quickjs.c:5782)
+==20725==    by 0x12CC1E: JS_FreeValue (quickjs.c:5789)
+==20725==    by 0x1EC074: LJS_NewFDPipe (pipe.c:1165)
+==20725==    by 0x21AB85: js_process_init (process.c:703)
+==20725==    by 0x1783BF: js_execute_sync_module (quickjs.c:29306)
+==20725==    by 0x178B7E: js_inner_module_evaluation (quickjs.c:29424)
+==20725== 
+==20725== Conditional jump or move depends on uninitialised value(s)
+==20725==    at 0x1DE47D: evfd_ctl (eventloop.c:234)
+==20725==    by 0x1DE6A4: check_queue_status (eventloop.c:282)
+==20725==    by 0x1E16B7: LJS_evfd_write (eventloop.c:1560)
+==20725==    by 0x1E8CDD: js_U8Pipe_write (pipe.c:534)
+==20725==    by 0x14CA8E: js_call_c_function (quickjs.c:16263)
+==20725==    by 0x14D4D8: JS_CallInternal (quickjs.c:16478)
+==20725==    by 0x1504C0: JS_CallInternal (quickjs.c:16896)
+==20725==    by 0x15D7F3: async_func_resume (quickjs.c:19193)
+==20725==    by 0x15E154: js_async_function_resume (quickjs.c:19448)
+==20725==    by 0x15E8EF: js_async_function_call (quickjs.c:19567)
+==20725==    by 0x14D4D8: JS_CallInternal (quickjs.c:16478)
+==20725==    by 0x1500B9: JS_CallInternal (quickjs.c:16859)
+==20725== 
+==20725== Conditional jump or move depends on uninitialised value(s)
+==20725==    at 0x1DE47D: evfd_ctl (eventloop.c:234)
+==20725==    by 0x1DE6A4: check_queue_status (eventloop.c:282)
+==20725==    by 0x1E134A: LJS_evfd_readline (eventloop.c:1473)
+==20725==    by 0x1E9380: js_U8Pipe_readline (pipe.c:605)
+==20725==    by 0x14CA8E: js_call_c_function (quickjs.c:16263)
+==20725==    by 0x14D4D8: JS_CallInternal (quickjs.c:16478)
+==20725==    by 0x1504C0: JS_CallInternal (quickjs.c:16896)
+==20725==    by 0x15D7F3: async_func_resume (quickjs.c:19193)
+==20725==    by 0x15E154: js_async_function_resume (quickjs.c:19448)
+==20725==    by 0x15E8EF: js_async_function_call (quickjs.c:19567)
+==20725==    by 0x14D4D8: JS_CallInternal (quickjs.c:16478)
+==20725==    by 0x1500B9: JS_CallInternal (quickjs.c:16859)
+==20725== 
 [31m error [0m[32mTry[0m [32mstd[0m [32merror:Error
     Failed to bind FD: Operation not permitted
 [0m 
 [31m error [0m[31mError[0m: Failed to bind FD: Operation not permitted
   
  
-==67730== 
-==67730== Process terminating with default action of signal 2 (SIGINT)
-==67730==    at 0x4068347: ??? (syscall_cp.s:29)
-==67730==    by 0x4065CB4: __syscall_cp_c (pthread_cancel.c:33)
-==67730==    by 0x4043347: epoll_pwait (epoll.c:28)
-==67730==    by 0x1DF2E8: LJS_evcore_run (eventloop.c:987)
-==67730==    by 0x11EB66: main (main.c:249)
-==67730== 
-==67730== HEAP SUMMARY:
-==67730==     in use at exit: 167,122 bytes in 1,764 blocks
-==67730==   total heap usage: 3,602 allocs, 1,838 frees, 536,652 bytes allocated
-==67730== 
-==67730== LEAK SUMMARY:
-==67730==    definitely lost: 136 bytes in 4 blocks
-==67730==    indirectly lost: 131 bytes in 3 blocks
-==67730==      possibly lost: 60,533 bytes in 466 blocks
-==67730==    still reachable: 106,322 bytes in 1,291 blocks
-==67730==         suppressed: 0 bytes in 0 blocks
-==67730== Rerun with --leak-check=full to see details of leaked memory
-==67730== 
-==67730== For lists of detected and suppressed errors, rerun with: -s
-==67730== ERROR SUMMARY: 2 errors from 2 contexts (suppressed: 0 from 0)
+==20725== Syscall param read(buf) points to unaddressable byte(s)
+==20725==    at 0x4068347: ??? (syscall_cp.s:29)
+==20725==    by 0x4065CB4: __syscall_cp_c (pthread_cancel.c:33)
+==20725==    by 0x406A49E: read (read.c:6)
+==20725==    by 0x1DDDAC: buffer_read (utils.h:219)
+==20725==    by 0x1DE946: handle_read (eventloop.c:348)
+==20725==    by 0x1E1A44: LJS_evfd_pipeTo (eventloop.c:1640)
+==20725==    by 0x1E9985: pipeto_init_fd2fd (pipe.c:681)
+==20725==    by 0x1EA8E0: js_U8Pipe_pipeTo (pipe.c:836)
+==20725==    by 0x14CA8E: js_call_c_function (quickjs.c:16263)
+==20725==    by 0x14D4D8: JS_CallInternal (quickjs.c:16478)
+==20725==    by 0x1504C0: JS_CallInternal (quickjs.c:16896)
+==20725==    by 0x15D7F3: async_func_resume (quickjs.c:19193)
+==20725==  Address 0x49c7920 is 0 bytes inside a block of size 4,097 free'd
+==20725==    at 0x48B2ECF: free (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==20725==    by 0x1DDA5E: buffer_free (utils.h:75)
+==20725==    by 0x1E01C9: handle_close (eventloop.c:820)
+==20725==    by 0x1E0548: LJS_evcore_run (eventloop.c:1043)
+==20725==    by 0x11FB76: main (main.c:248)
+==20725==  Block was alloc'd at
+==20725==    at 0x48B0733: malloc (in /usr/libexec/valgrind/vgpreload_memcheck-amd64-linux.so)
+==20725==    by 0x1DD9D3: buffer_init (utils.h:45)
+==20725==    by 0x1E0E39: LJS_evfd_new (eventloop.c:1253)
+==20725==    by 0x1EC04E: LJS_NewFDPipe (pipe.c:1162)
+==20725==    by 0x219501: js_process_constructor (process.c:531)
+==20725==    by 0x14CA8E: js_call_c_function (quickjs.c:16263)
+==20725==    by 0x15D008: JS_CallConstructorInternal (quickjs.c:19047)
+==20725==    by 0x1502B7: JS_CallInternal (quickjs.c:16878)
+==20725==    by 0x15D7F3: async_func_resume (quickjs.c:19193)
+==20725==    by 0x15E154: js_async_function_resume (quickjs.c:19448)
+==20725==    by 0x15E8EF: js_async_function_call (quickjs.c:19567)
+==20725==    by 0x14D4D8: JS_CallInternal (quickjs.c:16478)
+==20725== 
+evfd_read: Bad file descriptor
+==20725== 
+==20725== Process terminating with default action of signal 2 (SIGINT)
+==20725==    at 0x4068347: ??? (syscall_cp.s:29)
+==20725==    by 0x4065CB4: __syscall_cp_c (pthread_cancel.c:33)
+==20725==    by 0x4043347: epoll_pwait (epoll.c:28)
+==20725==    by 0x1E0415: LJS_evcore_run (eventloop.c:1016)
+==20725==    by 0x11FB76: main (main.c:248)
+==20725== 
+==20725== HEAP SUMMARY:
+==20725==     in use at exit: 170,401 bytes in 1,817 blocks
+==20725==   total heap usage: 3,739 allocs, 1,922 frees, 550,637 bytes allocated
+==20725== 
+==20725== LEAK SUMMARY:
+==20725==    definitely lost: 256 bytes in 7 blocks
+==20725==    indirectly lost: 149 bytes in 3 blocks
+==20725==      possibly lost: 67,413 bytes in 511 blocks
+==20725==    still reachable: 102,583 bytes in 1,296 blocks
+==20725==         suppressed: 0 bytes in 0 blocks
+==20725== Rerun with --leak-check=full to see details of leaked memory
+==20725== 
+==20725== Use --track-origins=yes to see where uninitialised values come from
+==20725== For lists of detected and suppressed errors, rerun with: -s
+==20725== ERROR SUMMARY: 5 errors from 4 contexts (suppressed: 0 from 0)
+bash: line 1: $'ls\r\EOAO\EA\EO\EOA\EA\EOA\EA\EO\EOA\EA\EA\EO\EA\EOA\EA\EA\EA\EO\EOA\EA\EOA\EA\EO\EO\EOA\EA\EOA\EA\EO\EOAO\EOA\EOA\EOA': command not found
+bash: line 9: $'\032': command not found

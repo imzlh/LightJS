@@ -647,6 +647,7 @@ void LJS_init_context(App* app, char** init_list){
     if(!init_list || in(init_list, "ffi")) LJS_init_ffi(ctx);
     if(!init_list || in(init_list, "vm")) LJS_init_vm(ctx);
     if(!init_list || in(init_list, "xml")) LJS_init_xml(ctx);
+    if(!init_list || in(init_list, "crypto")) LJS_init_crypto(ctx);
 }
 
 static void* pthread_main(void* arg){

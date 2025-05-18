@@ -61,25 +61,25 @@ typedef void (*EvWriteCallback)(EvFD* evfd, void* opaque);
 typedef void (*EvCloseCallback)(EvFD* fd, void* opaque);
 typedef void (*EvINotifyCallback)(struct inotify_event* event, void* user_data);
 typedef void (*EvSyncCallback)(EvFD* evfd, void* user_data);
+typedef void (*EvFinalizerCallback)(EvFD* evfd, struct Buffer* buffer, void* user_data);
 typedef void (*EvTimerCallback)(uint64_t count, void* user_data);
 typedef void (*EvSSLHandshakeCallback)(EvFD* evfd, void* user_data);
 typedef bool (*EvPipeToFilter)(struct Buffer* buf, void* user_data);
 typedef void (*EvPipeToNotify)(struct EvFD* from, struct EvFD* to, EvPipeToNotifyType type, void* user_data);
 typedef void (*JSPromiseCallback)(JSContext* ctx, bool is_error, JSValue result, void* user_data);
 
-typedef struct{
-    char *key;
-    char *value;
-} URL_query_data;
+typedef struct {
+    char* key;
+    char* value;
+    struct list_head link;
+} URL_query;
 
 typedef struct{
-    char* source_str;   // free
     char *protocol;
     char *host;
     uint16_t port;
     char *path;
-    URL_query_data *query;
-    char* query_string;
+    struct list_head query; // URL_query
     char *hash;
     char* username;
     char* password;
@@ -225,6 +225,7 @@ void js_handle_promise_reject(
 void LJS_dump_error(JSContext *ctx, JSValueConst exception);
 
 // exports
+extern EvFD *pstdin, *pstdout, *pstderr;
 bool LJS_init_global_helper(JSContext *ctx);
 bool LJS_init_vm(JSContext *ctx);
 bool LJS_init_console(JSContext *ctx);
@@ -260,14 +261,17 @@ bool LJS_evfd_close(EvFD* evfd);
 bool LJS_evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
 bool LJS_evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque);
 bool LJS_evfd_close2(EvFD* evfd, EvSyncCallback cb, void* opaque);
+bool LJS_evfd_shutdown(EvFD* evfd); // note: read all and then close
+bool LJS_evfd_closed(EvFD* evfd);
 bool LJS_evfd_clearbuf(EvFD* evfd);
 bool LJS_evfd_onclose(EvFD* fd, EvCloseCallback callback, void* user_data);
+bool LJS_evfd_finalizer(EvFD* evfd, EvFinalizerCallback callback, void* user_data);
 int LJS_evfd_getfd(EvFD* evfd, int* timer_fd);
 bool LJS_evfd_yield(EvFD* evfd, bool yield_read, bool yield_write);
 bool LJS_evfd_consume(EvFD* evfd, bool consume_read, bool consume_write);
 bool LJS_evfd_isAIO(EvFD* evfd);
 #ifdef LJS_MBEDTLS
-bool LJS_evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, bool is_client, int protocol, int preset, EvSSLHandshakeCallback handshake_cb, void* user_data);
+bool LJS_evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, bool is_client, int preset, EvSSLHandshakeCallback handshake_cb, void* user_data);
 void LJS_evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
 bool LJS_evfd_remove_sni(const char* name);
 bool LJS_evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config);
@@ -296,7 +300,6 @@ EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int 
 
 // HTTP module
 char* LJS_resolve_path(const char* path, const char* base);
-bool LJS_parse_query(char *query, URL_query_data *query_list[], int max_query_count);
 bool LJS_parse_url(const char *url, URL_data *url_struct, URL_data *base);
 void LJS_free_url(URL_data *url_struct);
 char* LJS_format_url(URL_data *url_struct);
@@ -325,6 +328,9 @@ bool LJS_init_ffi(JSContext *ctx);
 
 // xml
 bool LJS_init_xml(JSContext* ctx);
+
+// crypto
+bool LJS_init_crypto(JSContext *ctx);
 
 // --------------- HELPER FUNCTIONS ------------------------
 void free_js_malloc(JSRuntime *rt, void *opaque, void *ptr);
@@ -421,25 +427,26 @@ static inline struct promise* LJS_NewPromise(JSContext *ctx){
 }
 
 static inline void LJS_FreePromise(struct promise* proxy){
-    if(!proxy -> ctx) return;
+    assert(NULL != proxy -> ctx);   // error: already free
     JS_FreeValue(proxy -> ctx, proxy -> resolve);
     JS_FreeValue(proxy -> ctx, proxy -> reject);
     // WARN: 此处应该由用户决策，所有权是否转移到JS层？
     // JS_FreeValue(proxy -> ctx, proxy -> promise);
-    js_free(proxy -> ctx, proxy);
+    JSContext* ctx = proxy -> ctx;
     proxy -> ctx = NULL;
+    js_free(ctx, proxy);
+    
 }
 
 static inline void LJS_Promise_Resolve(struct promise* proxy, JSValue value){
-    if(!proxy -> ctx) return;   // already done
+    assert(NULL != proxy -> ctx);   // error: already free
     JSValue args[1] = {value};
-    if(!proxy) return;
     JS_Call(proxy -> ctx, proxy -> resolve, proxy -> promise, 1, args);
     LJS_FreePromise(proxy);
 }
 
 static inline void LJS_Promise_Reject(struct promise* proxy, const char* msg){
-    if(!proxy -> ctx) return;   // already done
+    assert(NULL != proxy -> ctx);   // error: already free
     JSValue error = JS_NewError(proxy -> ctx);
     JS_SetPropertyStr(proxy -> ctx, error, "message", JS_NewString(proxy -> ctx, msg));
     JS_Call(proxy -> ctx, proxy -> reject, proxy -> promise, 1, (JSValueConst[]){error});
@@ -482,4 +489,10 @@ static inline void LJS_FreeJSValueProxy(struct JSValueProxy* proxy){
 static inline void JS_PromiseCatch(JSContext* ctx, JSValueConst promise, JSValueConst onRejected){
     if(JS_IsPromise(promise))
         JS_SetProperty(ctx, promise, JS_ATOM_catch, onRejected);
+}
+
+static inline bool LJS_IsMainContext(JSContext* ctx){
+    App* app = JS_GetContextOpaque(ctx);
+    if(!app -> worker) return true;
+    return false;
 }

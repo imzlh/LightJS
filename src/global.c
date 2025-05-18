@@ -649,6 +649,9 @@ int js_run_promise_jobs(){
         struct promise_data* data = list_entry(cur, struct promise_data, list);
         JSPromiseStateEnum res = JS_PromiseState(data -> ctx, data -> promise);
         if(res != JS_PROMISE_PENDING){
+#ifdef LJS_DEBUG
+            printf("Promise job done: %p\n", data);
+#endif
             const bool error = res == JS_PROMISE_REJECTED;
             if(error) JS_PromiseHandleError(data -> ctx, data -> promise);    // catch()
             data -> callback(

@@ -71,4 +71,6 @@ declare module "fs" {
     export function stat(path: string): Stat;
 
     export function open(path: string, flags: OpenFlag, mode?: number): U8Pipe;
+
+    export function copy(src: string, dest: string): void;
 }

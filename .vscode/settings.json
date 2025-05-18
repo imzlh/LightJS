@@ -139,7 +139,13 @@
         "random.h": "c",
         "xsum.h": "c",
         "expat.h": "c",
-        "sstream": "c"
+        "sstream": "c",
+        "httpmeta.h": "c",
+        "istream": "c",
+        "sendfile.h": "c",
+        "aes.h": "c",
+        "md.h": "c",
+        "debug.h": "c"
     },
     "C_Cpp.errorSquiggles": "enabled"
 }

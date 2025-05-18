@@ -70,7 +70,7 @@ declare class URL {
     query: string;
     hash: string;
 
-    getQuery(name: string): string | null;
+    getQuery(): Record<string, string[]>;
     delQuery(name: string): void;
     addQuery(name: string, value: string): void;
 

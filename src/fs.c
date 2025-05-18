@@ -12,6 +12,7 @@
 #include <threads.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/sendfile.h>
 
 // class SyncPipe
 static thread_local JSClassID js_syncpipe_class_id;
@@ -694,6 +695,47 @@ static JSValue js_stdio_rename(JSContext *ctx, JSValueConst self, int argc, JSVa
     return JS_UNDEFINED;
 }
 
+// copy: based on async splice
+static JSValue js_stdio_copy(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
+    if(argc != 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) 
+        return LJS_Throw(ctx, "invalid arguments", "stdio.copy(src: string, dst: string): void");
+    
+    size_t src_len;
+    const char *src = JS_ToCStringLen(ctx, &src_len, argv[0]);
+    size_t dst_len;
+    const char *dst = JS_ToCStringLen(ctx, &dst_len, argv[1]);
+    if (!src || !dst) return JS_EXCEPTION;
+
+    int src_fd = open(src, O_RDONLY);
+    if(src_fd < 0) goto oserr;
+    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if(dst_fd < 0){
+        close(src_fd);
+        goto oserr;
+    }
+
+    struct stat st;
+    if(fstat(src_fd, &st) < 0) goto oserr;
+    off_t size = st.st_size;
+
+    int ret;
+    off_t offset = 0;
+
+    while (offset < size) {
+        ret = sendfile(dst_fd, src_fd, &offset, EVFD_BUFSIZE);
+        if (ret == -1) {
+            close(src_fd);
+            close(dst_fd);
+            goto oserr;
+        }
+    }
+
+    return JS_UNDEFINED;
+
+oserr:
+    return LJS_Throw(ctx, "failed to copy file: %s", NULL, strerror(errno));
+}
+
 // open
 static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc < 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) 
@@ -781,7 +823,8 @@ static const JSCFunctionListEntry js_stdio_funcs[] = {
     JS_CFUNC_DEF("open", 2, js_stdio_open),
     JS_CFUNC_DEF("stat", 1, js_stdio_stat),
     JS_CFUNC_DEF("read", 2, js_stdio_read),
-    JS_CFUNC_DEF("rename", 2, js_stdio_rename)
+    JS_CFUNC_DEF("rename", 2, js_stdio_rename),
+    JS_CFUNC_DEF("copy", 2, js_stdio_copy),
 };
 
 static int js_mod_stdio_init(JSContext *ctx, JSModuleDef *m) {

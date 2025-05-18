@@ -1,4 +1,4 @@
-import { Process, stderr, stdin, stdout } from "process";
+import { exit, Process, self, signals, stderr, stdin, stdout } from "process";
 
 console.log("Starting process.js");
 
@@ -13,12 +13,19 @@ await test("std", async () => {
 });
 
 await test("subproc", async () => {
-    const proc = new Process(['ls'], {
-        inheritPipe: true
+    const proc = new Process(['bash'], {
+        inheritPipe: false
     });
     console.log(proc.alive, proc.pid);
+    assert(proc.pipe);
+    await proc.pipe.write(encodeStr("echo 'Hello, world!'\n"));
     assert(proc.alive);
     assert(proc.pid > 0);
+    await proc.pipe.pipeTo(stdout);
     await proc.onclose;
     assert(!proc.alive);
 });
+
+self.signal(signals.SIGTERM, () => {
+    exit(0);
+})

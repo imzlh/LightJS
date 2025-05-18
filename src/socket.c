@@ -675,7 +675,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
 
     struct promise* promise = LJS_NewPromise(ctx);
     mbedtls_ssl_config* config = NULL;
-    LJS_evfd_initssl(fd, &config, is_client, MBEDTLS_SSL_TRANSPORT_STREAM, preset, ssl_handshake_callback, promise);
+    LJS_evfd_initssl(fd, &config, is_client, preset, ssl_handshake_callback, promise);
 
     // chipers
     if(ciphers){
@@ -907,15 +907,15 @@ EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int 
     int fd = socket_create(protocol);
     if(fd < 0) return NULL;
     socket_connect(fd, protocol, hostname, port, hostname);
+    EvFD* evfd = LJS_evfd_new(fd, false, true, true, bufsize, NULL, NULL);
     if(ssl){
 #ifdef LJS_MBEDTLS
-        LJS_init_ssl(fd, user_data);
-        // ...
-        return true;
+        mbedtls_ssl_config* config = NULL;
+        LJS_evfd_initssl(evfd, &config, true, MBEDTLS_SSL_PRESET_DEFAULT, NULL, NULL);
 #else
-        close(fd);
+        LJS_evfd_close(evfd);
         return NULL;
 #endif
     }
-    return LJS_evfd_new(fd, false, true, true, bufsize, NULL, NULL);
+    return evfd;
 }

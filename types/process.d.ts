@@ -4,17 +4,17 @@ declare module 'process'{
     /**
      * Note: 通过pipe.tty*操作进程pty，如大小、标题
      */
-    class Process{
+    class Process<P extends boolean | undefined>{
         constructor(args: string[], options: {
-            inheritPipe?: boolean,
+            inheritPipe?: P,
             env?: Record<string, string>,
             cwd?: string
-        })
+        });
 
         readonly alive: boolean;
         readonly pid: number;
         readonly code: number;
-        readonly pipe?: U8Pipe; // undefined if interitPipe
+        readonly pipe: P extends true? undefined : U8Pipe; // undefined if interitPipe
 
         readonly onclose: Promise<void>;
     }

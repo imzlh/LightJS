@@ -30,6 +30,8 @@ export class TelnetServer {
             if(!pty.pipe) throw new Error("Failed to create pty");
             const pipe = pty.pipe;
             client.pipeTo(pty.pipe, (data) => {
+                // debug?
+                console.log(`PTY -> Client:`, decodeStr(data));
                 // parse telnet command
                 if(data.includes(TP.IAC)){
                     const pos = data.indexOf(TP.IAC);
@@ -102,6 +104,7 @@ export class TelnetServer {
             });
             pty.pipe.ttyTitle = "LightJS Telnet Server";
             pty.pipe.ttySize = { rows: 24, cols: 80 };
+            console.log(`New client connected, pid=${pty.pid}, active=${pty.code}`)
         }catch(e){
             console.error('Handle client error', e);
             await client.write(encodeStr("Error: " + /** @type {Error} */ (e).message + "\r\n"));

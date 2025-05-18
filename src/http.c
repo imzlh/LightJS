@@ -2,6 +2,7 @@
 #include "../engine/cutils.h"
 #include "../engine/list.h"
 #include "core.h"
+#include "httpmeta.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -90,6 +91,62 @@ static char* normalize_path(const char* path) {
     return result;
 }
 
+
+static inline void strtoupper(char* str){
+    while (*str != '\0'){
+        if('a' <= *str && *str <= 'z')
+            *str = toupper(*str);
+        str ++;
+    }
+}
+
+static inline char* strtolower(char* str){
+    char* p = str;
+    while (*p != '\0'){
+        if('A' <= *p && *p <= 'Z')
+            *p = tolower(*p);
+        p++;
+    }
+    return str;
+}
+
+
+static inline int hex_char_to_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    else if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    else if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    else return -1;
+}
+
+static char* url_decode(char* str) {
+    if (!str) return NULL;
+    
+    char *src = str;
+    char *dst = str;
+    
+    while (*src) {
+        if (*src == '%') {
+            if (src[1] && src[2]) {
+                const int high = hex_char_to_value(src[1]);
+                const int low = hex_char_to_value(src[2]);
+                if (high != -1 && low != -1) {
+                    *dst++ = (high << 4) | low;
+                    src += 3;
+                    continue;
+                }
+            }
+            *dst++ = *src++; // 保留无效编码
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0'; // 终止字符串
+    return str;
+}
+
 /**
  * 解析路径，别忘了手动free
  * @param base 基础路径
@@ -134,32 +191,33 @@ char* LJS_resolve_path(const char* path, const char* _base) {
     return resolved;
 }
 
-/**
- * 解析Query字符串
- * 严重警告：请确保query深拷贝，释放会导致空指针错误
- */
-bool LJS_parse_query(char *query, URL_query_data *query_list[], int max_query_count){
+static inline bool url_parse_query(char *query, struct list_head *query_list){
     if(query == NULL || strlen(query) == 0){
         return false;
     }
-    URL_query_data *query_obj = malloc(sizeof(URL_query_data));
-    if(query_obj == NULL){
-        return false;
-    }
-    for(uint32_t i = 0; i < max_query_count; i++){
-        char *eq_pos = strchr(query, '='),
-            *next_query = strchr(query, '&');
+    while(true){
+        URL_query* query_obj = malloc(sizeof(URL_query));
+        if(query_obj == NULL){
+            return false;
+        }
+
+        char *eq_pos = strchr(query, '=');
+
+        char* next_query = strchr(eq_pos ? eq_pos : query, '&');
         if( // 只有key
             eq_pos == NULL || 
             (eq_pos != NULL && next_query != NULL && next_query < eq_pos) // 出现&前有=
         ){
-            query_obj -> key = query;
+            query_obj -> key = url_decode(strdup(query));
         }else{  // 有value和key
             eq_pos[0] = '\0';
-            query_obj -> key = query;
-            query_obj -> value = eq_pos + 1;
+            query_obj -> key = url_decode(strdup(query));
+            if(next_query){
+                *next_query = '\0';
+            }
+            query_obj -> value = url_decode(strdup(eq_pos + 1));
         }
-        query_list[i] = query_obj;
+        list_add_tail(&query_obj -> link, query_list);
 
         // 处理下一个query
         if(next_query != NULL && next_query[1] != '\0'){
@@ -173,105 +231,172 @@ bool LJS_parse_query(char *query, URL_query_data *query_list[], int max_query_co
 
 static URL_data *default_url;
 
+static void url_query_dup(URL_data* source, URL_data* dest){
+    struct list_head *cur, *tmp;
+    list_for_each_safe(cur, tmp, &source -> query) {
+        URL_query* query = list_entry(cur, URL_query, link);
+        URL_query* new_query = malloc(sizeof(URL_query));
+        if(new_query == NULL){
+            return;
+        }
+        new_query -> key = strdup(query -> key);
+        new_query -> value = strdup(query -> value);
+        list_add_tail(&new_query -> link, &dest -> query);
+    }
+}
+
 /**
  * 解析URL
  * 务必使用memset(url_struct, 0, sizeof(URL_data))初始化url_struct
  */
 bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
-    bool result = false;
-    char *url = NULL;
-    URL_query_data *query_list = NULL;
-    char *source_str = NULL;
-    char *base_path_backup = NULL; // 用于暂存base路径
-
     if (strlen(_url) == 0) {
-        goto cleanup;
+        goto error;
     }
+    init_list_head(&url_struct -> query);
+    char* url = strdup(_url);
 
-    if (!(source_str = strdup(_url))) {
-        goto cleanup;
-    }
-    url_struct -> source_str = source_str;
-    url = source_str;
-
+    // fallback to default url if base is NULL
     if (!base) {
         if (!default_url) {
             if (!(default_url = calloc(1, sizeof(URL_data)))) {
-                goto cleanup;
+                goto error;
             }
         }
         base = default_url;
     }
 
     // 检查起始字符
-    if(url[0] == '/'){
+#define dup(c) c ? strdup(c) : NULL
+    if(url[0] == '/'){  // path
         if(url[1] == '/'){
-            url_struct -> protocol = base -> protocol;
+            url_struct -> protocol = dup(base -> protocol);
+            goto skip_protocol;
         }else{
-            url_struct -> protocol = base -> protocol;
-            url_struct -> host = base -> host;
+            url_struct -> protocol = dup(base -> protocol);
+            url_struct -> host = dup(base -> host);
             url_struct -> port = base -> port;
+            goto skip_host;
         }
-    }else if(url[0] == '?'){
-        url_struct -> protocol = base -> protocol;
-        url_struct -> host = base -> host;
+    }else if(url[0] == '?'){    // query
+        url_struct -> protocol = dup(base -> protocol);
+        url_struct -> host = dup(base -> host);
         url_struct -> port = base -> port;
-        url_struct -> path = base -> path;
-    }else if(url[0] == '#'){
-        url_struct -> protocol = base -> protocol;
-        url_struct -> host = base -> host;
+        url_struct -> path = dup(base -> path);
+        // find hash?
+        char *hash_start = strchr(url, '#');
+        if(hash_start){
+            *hash_start = '\0';
+            url_struct -> hash = url_decode(strdup(hash_start + 1));
+        }
+
+        // parse query
+        char *query_str = url + 1;
+        if (!url_parse_query(query_str, &url_struct -> query)) {
+            goto error;
+        }
+        return true;    // finished
+    }else if(url[0] == '#'){    // hash
+        url_struct -> protocol = dup(base -> protocol);
+        url_struct -> host = dup(base -> host);
         url_struct -> port = base -> port;
-        url_struct -> path = base -> path;
-        url_struct -> query = base -> query;
+        url_struct -> path = dup(base -> path);
+        url_query_dup(base, url_struct);
 
         url += 1;
-        url_struct -> hash = url;
-        return true;
+        url_struct -> hash = url_decode(strdup(url));
+        return true;    // finished
+#undef dup
     }
 
+    
     if(!url_struct -> protocol){
         char* pos = strstr(url, "://");
         if(pos){
             pos[0] = '\0';
-            url_struct -> protocol = url;
+            url_struct -> protocol = strtolower(strdup(url));
             url = pos + 3;
         }else{
-            return false;
+            goto error;
         }
     }
 
+skip_protocol:
     if (!url_struct -> host) {
-        char *host_end = strpbrk(url, ":/?#");
-        char *user_pass_end = strrchr(url, '@'); // 使用最后一个@
+        char *user_pass_end = strchr(url, '@'); // User&Pass field
 
-        if (user_pass_end && (!host_end || user_pass_end < host_end)) {
-            *user_pass_end = '\0';
-            char *colon = strchr(url, ':');
-            if (colon) {
-                *colon = '\0';
-                url_struct -> username = url;
-                url_struct -> password = colon + 1;
-            } else {
-                url_struct -> username = url;
+        // have user&pass field
+        // e.g: http://user:pass@example.com:81/path
+        // note: http://user@example.com/path can also be valid
+        if (user_pass_end) {
+            char* host_end = strpbrk(user_pass_end, ":/?#");
+            if(host_end && user_pass_end > host_end){
+                // invaild u&p field, skip
+                goto skip_up;
             }
-            url = user_pass_end + 1;
-            host_end = strpbrk(url, ":/?#"); // 重新计算host_end
-        }
 
-        if (host_end && *host_end == ':') {
+            char *last_at = user_pass_end;
+            char *current = user_pass_end + 1;
+
+            while ((current = strchr(current, '@')) != NULL) {
+                if (!host_end || current < host_end) {
+                    last_at = current;
+                    current++; 
+                } else {
+                    break;
+                }
+            }
+
+            if (last_at) {
+                *last_at = '\0';
+                char *colon = strchr(url, ':');
+                if (colon) {
+                    *colon = '\0';
+                    url_struct->username = url_decode(strdup(url));
+                    url_struct->password = url_decode(strdup(colon + 1));
+                } else {
+                    url_struct->username = url_decode(strdup(url));
+                }
+                url = last_at + 1; 
+            }
+        }
+skip_up:
+        char* host = url;
+        char* host_end = strpbrk(url, ":/?#");
+        if(*host == '['){   // ipv6
+            char* ipv6_end = strchr(host, ']');
+            if(ipv6_end){
+                url_struct -> host = strndup(host, ipv6_end - host);
+                host_end = ipv6_end + 1;
+
+                // check if ipv6 vaild
+                for(char* p = host + 1; p < ipv6_end; p++) {
+                    if(!strpbrk(p, ":.0123456789")){
+                        goto error;
+                    }
+                }
+            }else{
+                goto error;
+            }
+        }
+        if (host_end && *host_end == ':') { // port field
             *host_end = '\0';
             char *port_str = host_end + 1;
             char *port_end = strpbrk(port_str, "/?#");
             if (port_end) *port_end = '\0';
 
+            if(strlen(port_str) > 5){
+                goto error; // port too long, 65535 max
+            }
+
             char *end;
             long port = strtol(port_str, &end, 10);
             if (*end != '\0' || port < 0 || port > 65535) {
-                goto cleanup;
+                goto error;
             }
-            url_struct -> port = (int)port;
-            // url = (port_end ? port_end : (port_str - strlen(port_str))) +1;
-        } else {
+            url_struct -> port = (uint16_t)port;
+            if(port_end) url = port_end +1;
+        } else if(url_struct -> protocol) {                        // use default port
             if(strcmp(url_struct -> protocol, "http") == 0){
                 url_struct -> port = 80;
             } else if(strcmp(url_struct -> protocol, "https") == 0){
@@ -287,13 +412,10 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
             }
         }
 
-        url_struct -> host = url;
-        if (host_end) {
-            *host_end = '\0';
-            url = host_end;
-        }
+        url_struct -> host = strdup(host);
     }
 
+skip_host:
     if (!url_struct -> path) {
         char *path_start = url;
         char *query_start = strchr(path_start, '?');
@@ -301,100 +423,102 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
 
         if (hash_start) {
             *hash_start = '\0';
-            url_struct -> hash = hash_start + 1;
+            url_struct -> hash = url_decode(strdup(hash_start + 1));
         }
 
         if (query_start) {
             *query_start = '\0';
             char *query_str = query_start + 1;
-
-            query_list = malloc(MAX_QUERY_COUNT * sizeof(URL_query_data));
-            if (!query_list || !LJS_parse_query(query_str, &query_list, MAX_QUERY_COUNT)) {
-                goto cleanup;
+            if (!url_parse_query(query_str, &url_struct -> query)) {
+                goto error;
             }
-            url_struct -> query = query_list;
-            query_list = NULL; // 防止重复释放
         }
 
         char *input_path = (*path_start == '/') ? path_start : "/";
-        if (strcmp(input_path, "/") != 0) {
-            base_path_backup = strdup(base -> path ? base -> path : "/");
-            url_struct -> path = LJS_resolve_path(input_path, base_path_backup);
+        if (*input_path != '/') {
+            // Note: LJS_resolve_path will motify input path
+            char* bpath = strdup(base -> path ? base -> path : "/");
+            url_struct -> path = LJS_resolve_path(url_decode(input_path), bpath);
+            free(bpath);
             if (!url_struct -> path) {
-                goto cleanup;
+                goto error;
             }
         } else {
-            url_struct -> path = strdup(input_path);
+            url_struct -> path = url_decode(strdup(input_path));
         }
     }
 
-    result = true;
+    return true;
 
-cleanup:
-    if (!result) {
-        free(url_struct -> source_str);
-        free(url_struct -> path);
-        free(query_list);
-        url_struct -> source_str = NULL;
-        url_struct -> path = NULL;
-        url_struct -> query = NULL;
-    }
-    free(base_path_backup);
-    return result;
+error:
+    LJS_free_url(url_struct);
+    return false;
 }
 
 
 void LJS_free_url(URL_data *url_struct){
-    if( url_struct -> query ){
-        free(url_struct -> query);
-        free(url_struct -> query_string);
+#define free2(ptr) if(ptr) free(ptr)
+    if(url_struct -> query.next != NULL && !list_empty(&url_struct -> query)){
+        struct list_head *cur, *tmp;
+        list_for_each_safe(cur, tmp, &url_struct -> query) {
+            URL_query* query = list_entry(cur, URL_query, link);
+            free(query -> key);
+            free(query -> value);
+            free(query);
+        }
     }
-    free(url_struct -> path);
-    free(url_struct -> source_str);
+    free2(url_struct -> protocol);
+    free2(url_struct -> host);
+    free2(url_struct -> path);
+    free2(url_struct -> username);
+    free2(url_struct -> password);
+    free2(url_struct -> hash);
+#undef free2
 }
 
 char* LJS_format_url(URL_data *url_struct){
     // Scheme://login:password@address:port/path/to/resource?query_string#fragment
     char* data = malloc(2048);
     if(!data) LJS_panic("Out of memory");
-    data[0] = '\0';
-    strcat(data, url_struct -> protocol);
-    strcat(data, "://");
+    size_t datapos = 0;
+#define PUT(str) memcpy(data + datapos, str , strlen(str)); datapos += strlen(str)
+    PUT(url_struct -> protocol);
+    PUT("://");
     if(url_struct -> username != NULL){
-        strcat(data, url_struct -> username);
+        PUT(url_struct -> username);
         if(url_struct -> password != NULL){
-            strcat(data, ":");
-            strcat(data, url_struct -> password);
+            PUT(":");
+            PUT(url_struct -> password);
         }
-        strcat(data, "@");
+        PUT("@");
     }
-    strcat(data, url_struct -> host);
+    PUT(url_struct -> host);
     if(url_struct -> port != 0){
         char port_str[10];
         sprintf(port_str, ":%d", url_struct -> port);
-        strcat(data, port_str);
+        PUT(port_str);
     }
-    strcat(data, url_struct -> path);
-    if(url_struct -> query != NULL){
-        strcat(data, "?");
-        for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
-            if(url_struct -> query[i].key == NULL){
-                break;
+    PUT(url_struct -> path);
+    if(!list_empty(&url_struct -> query)){
+        PUT("?");
+        struct list_head *cur, *tmp;
+        list_for_each_safe(cur, tmp, &url_struct -> query) {
+            URL_query* query = list_entry(cur, URL_query, link);
+            PUT(query -> key);
+            if(query -> value != NULL){
+                PUT("=");
+                PUT(query -> value);
             }
-            if(i != 0){
-                strcat(data, "&");
-            }
-            strcat(data, url_struct -> query[i].key);
-            if(url_struct -> query[i].value != NULL){
-                strcat(data, "=");
-                strcat(data, url_struct -> query[i].value);
-            }
+            PUT("&");
         }
+        datapos--;
     }
     if(url_struct -> hash != NULL){
-        strcat(data, "#");
-        strcat(data, url_struct -> hash);
+        PUT("#");
+        PUT(url_struct -> hash);
     }
+    data[datapos] = '\0';
+#undef PUT
     return data;
 }
 
@@ -628,23 +752,6 @@ static inline char* find_header(HTTP_data *data, const char* name){
     return NULL;
 }
 
-static inline void strtoupper(char* str){
-    while (*str != '\0'){
-        if('a' <= *str && *str <= 'z')
-            *str = toupper(*str);
-        str ++;
-    }
-}
-
-static inline char* strtolower(char* str){
-    char* p = str;
-    while (*p != '\0'){
-        *p = tolower(*p);
-        p++;
-    }
-    return str;
-}
-
 #define COPY_BUF(var, buf, len) uint8_t* var = malloc(len); memcpy(var, buf, len);
 
 // predef
@@ -715,7 +822,7 @@ done:
 static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, void* userdata){
     HTTP_data *data = userdata;
     char* line_data = (char*)_line_data;
-    if(!line_data) goto error2; // close
+    if(!line_data && len == 0 && data -> state < HTTP_BODY) goto error2; // close
     // 是第一行
     if (data -> state == HTTP_INIT){
         // 找空格解析参数
@@ -761,6 +868,7 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
                 data -> state = HTTP_BODY;
             data -> cb(data, NULL, 0, data -> userdata);
             free(line_data);
+            data -> cb = NULL;
             return EVCB_RET_DONE;
         }
 
@@ -926,15 +1034,18 @@ static void callback_tou8_merge(HTTP_data *data, uint8_t *buffer, uint32_t len, 
     if(data -> state == HTTP_DONE){
         // merge u8arrs
         struct list_head *tmp, *cur;
-        int length = task -> response -> data -> content_read;
+        int length = task -> response -> data -> content_length
+            ? task -> response -> data -> content_length
+            : task -> response -> data -> content_read;
         JSContext* ctx = task -> promise -> ctx;
         uint8_t* merged_buf = js_malloc(ctx, length +1);
-        int copy_len = 0;
+        size_t copy_len = 0;
 
         list_for_each_safe(cur, tmp, &task -> u8arrs){
             struct buf_link *bufobj = list_entry(cur, struct buf_link, list);
-            memcpy(merged_buf + copy_len, bufobj -> buf, bufobj -> len);
-            copy_len += bufobj -> len;
+            size_t copy_len2 = MIN(bufobj -> len, length - copy_len);
+            memcpy(merged_buf + copy_len, bufobj -> buf, copy_len2);
+            copy_len += copy_len2;
             free(bufobj -> buf);
             free(bufobj);
         }
@@ -1312,6 +1423,8 @@ void fetch_resolve(HTTP_data *data, uint8_t *buffer, uint32_t len, void* ptr){
     JSContext *ctx = promise -> ctx;
     JSValue obj = LJS_NewResponse(ctx, data);
     LJS_Promise_Resolve(promise, obj);
+    // del onclose callback
+    LJS_evfd_onclose(data -> fd, NULL, NULL);
 }
 
 void ws_resolve(HTTP_data *data, uint8_t *buffer, uint32_t len, void* ptr){
@@ -1319,6 +1432,8 @@ void ws_resolve(HTTP_data *data, uint8_t *buffer, uint32_t len, void* ptr){
     JSContext *ctx = promise -> ctx;
     JSValue obj = LJS_NewWebSocket(ctx, data -> fd, data -> is_client);
     LJS_Promise_Resolve(promise, obj);
+    // del onclose callback
+    LJS_evfd_onclose(data -> fd, NULL, NULL);
 }
 
 bool body_chunked_filter(struct Buffer* buf, void* user_data){
@@ -1834,47 +1949,57 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
 
     if(argc == 1){
         const char *url = JS_ToCString(ctx, argv[0]);
-        if(url == NULL){
-            free(url_struct);
-            return LJS_Throw(ctx, "Invalid URL", NULL);
+        if(url == NULL || !LJS_parse_url(url, url_struct, NULL)){
+            JS_FreeCString(ctx, url);
+            LJS_Throw(ctx, "Invalid URL", NULL);
+            goto error;
         }
-        // 深拷贝
-        LJS_parse_url(url, url_struct, NULL);
+        JS_FreeCString(ctx, url);
     }else if(argc == 2){
         const char *url = JS_ToCString(ctx, argv[0]);
         if(JS_IsObject(argv[1])){
             URL_data *base_url = JS_GetOpaque2(ctx, argv[1], js_class_url_id);
             if(base_url == NULL){
-                free(url_struct);
-                return LJS_Throw(ctx, "Invalid base URL", NULL);
+                LJS_Throw(ctx, "Invalid base URL", NULL);
+                goto error;
             }
             // 创建引用
             js_url_struct -> template = JS_DupValue(ctx, argv[1]);
         }else{
             URL_data *base_url = js_malloc(ctx, sizeof(URL_data));
             if(base_url == NULL){
-                free(url_struct);
-                return JS_ThrowOutOfMemory(ctx);
+                JS_ThrowOutOfMemory(ctx);
+                goto error;
             }
             memset(base_url, 0, sizeof(URL_data));
             const char *base_url_str = JS_ToCString(ctx, argv[1]);
-            if(base_url_str == NULL){
-                free(url_struct);
-                return LJS_Throw(ctx, "Invalid base URL", NULL);
+            if(base_url_str == NULL || !LJS_parse_url(base_url_str, base_url, NULL)){
+                free(base_url);
+                LJS_Throw(ctx, "Invalid base URL", NULL);
+                goto error;
             }
-            // 拷贝
-            LJS_parse_url(base_url_str, base_url, NULL);
             js_url_struct -> base = base_url;
             // 解析
-            LJS_parse_url(url, url_struct, base_url);
+            if(!LJS_parse_url(url, url_struct, base_url)){
+                free(base_url);
+                LJS_Throw(ctx, "Invalid URL", NULL);
+                goto error;
+            }
+            JS_FreeCString(ctx, base_url_str);
         }
     }else if(argc != 0){
         JS_ThrowTypeError(ctx, "URL constructor takes 0 or 1 argument");
-        free(url_struct);
-        return JS_EXCEPTION;
+        goto error;
     }
     js_url_struct -> self = url_struct;
-    return JS_NewObjectClass(ctx, js_class_url_id);
+
+    JSValue obj =  JS_NewObjectClass(ctx, js_class_url_id);
+    JS_SetOpaque(obj, js_url_struct);
+    return obj;
+
+error:
+    js_free(ctx, js_url_struct);
+    return JS_EXCEPTION;
 }
 
 #define GETTER_STRING(func_name, field) \
@@ -1963,38 +2088,13 @@ JSValue js_url_addQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
         }
     }
 
-    if(url_struct -> query == NULL){
-        URL_query_data *query_list = js_malloc(ctx, sizeof(URL_query_data) * MAX_QUERY_COUNT);
-        if(query_list == NULL){
-            return JS_ThrowOutOfMemory(ctx);
-        }
-        memset(query_list, 0, sizeof(URL_query_data) * MAX_QUERY_COUNT);
-        url_struct -> query = query_list;
+    URL_query* query = js_malloc(ctx, sizeof(URL_query));
+    if(query == NULL){
+        return JS_ThrowOutOfMemory(ctx);
     }
-
-    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
-        if(url_struct -> query[i].key == NULL){
-            if(value == NULL){
-                url_struct -> query[i].key = js_malloc(ctx, strlen(key) + 1);
-                if(url_struct -> query[i].key == NULL){
-                    return JS_ThrowOutOfMemory(ctx);
-                }
-                memcpy(url_struct -> query[i].key, key, strlen(key) + 1);
-            }else{
-                url_struct -> query[i].key = js_malloc(ctx, strlen(key) + 1);
-                if(url_struct -> query[i].key == NULL){
-                    return JS_ThrowOutOfMemory(ctx);
-                }
-                url_struct -> query[i].value = js_malloc(ctx, strlen(value) + 1);
-                if(url_struct -> query[i].value == NULL){
-                    return JS_ThrowOutOfMemory(ctx);
-                }
-                memcpy(url_struct -> query[i].key, key, strlen(key) + 1);
-                memcpy(url_struct -> query[i].value, value, strlen(value) + 1);
-            }
-            break;
-        }
-    }
+    query -> key = js_strdup(ctx, key);
+    query -> value = value? js_strdup(ctx, value) : NULL;
+    list_add_tail(&url_struct -> query, &query -> link);
     return JS_UNDEFINED;
 }
 
@@ -2002,10 +2102,6 @@ JSValue js_url_delQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     struct JS_URL_struct *js_url_struct = JS_GetOpaque2(ctx, this_val, js_class_url_id);
     if(js_url_struct == NULL){
         return JS_EXCEPTION;
-    }
-    
-    if(NULL == js_url_struct -> self -> query){
-        return JS_UNDEFINED;
     }
 
     uint32_t del_id = -1;
@@ -2026,15 +2122,19 @@ JSValue js_url_delQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
 
     uint32_t key_occurrence = 0;
     bool found = false;
-    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
-        if(js_url_struct -> self -> query[i].key == NULL){
-            break;
-        }
-        if(strcmp(js_url_struct -> self -> query[i].key, key) == 0){
+    struct list_head* pos;
+    list_for_each(pos, &js_url_struct -> self -> query){
+        URL_query* query = list_entry(pos, URL_query, link);
+        if(strcmp(query -> key, key) == 0){
             if(del_id == -1 || del_id == key_occurrence){
-                js_url_struct -> self -> query[i].key = NULL;
-                js_url_struct -> self -> query[i].value = NULL;
                 found = true;
+                js_free(ctx, query -> key);
+                if(query -> value != NULL){
+                    js_free(ctx, query -> value);
+                }
+                js_free(ctx, query);
+                list_del(pos);
+                break;
             }
             key_occurrence++;
         }
@@ -2071,27 +2171,30 @@ static JSValue js_url_getQueryStr(JSContext *ctx, JSValueConst this_val){
         return JS_EXCEPTION;
     }
     URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> query == NULL){
-        return JS_UNDEFINED;
-    }
     char *query_str = js_malloc(ctx, 1024);
+    
+    size_t qoffset = 0;
     if(query_str == NULL){
         return JS_ThrowOutOfMemory(ctx);
     }
-    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
-        if(url_struct -> query[i].key == NULL){
-            break;
+
+#define PUT(str) memcpy(query_str + qoffset, str, strlen(str)); qoffset += strlen(str);
+#define PUTC(c) query_str[qoffset++] = c;
+    
+    struct list_head* pos;
+    list_for_each(pos, &url_struct -> query){
+        URL_query* query = list_entry(pos, URL_query, link);
+        PUT(query -> key);
+        if(query -> value){
+            PUTC('='); PUT(query -> value);
         }
-        if(i != 0){
-            strcat(query_str, "&");
-        }
-        strcat(query_str, url_struct -> query[i].key);
-        if(url_struct -> query[i].value != NULL){
-            strcat(query_str, "=");
-            strcat(query_str, url_struct -> query[i].value);
-        }
+        PUTC('&');
     }
-    JSValue query_val = JS_NewString(ctx, query_str);
+    if(qoffset > 0){
+        qoffset -= 1;    
+    }
+    query_str[qoffset] = '\0';
+    JSValue query_val = JS_NewStringLen(ctx, query_str, qoffset);
     free(query_str);
     return query_val;
 }
@@ -2102,16 +2205,23 @@ static JSValue js_url_getQuery(JSContext *ctx, JSValueConst this_val, int argc, 
         return JS_EXCEPTION;
     }
     URL_data *url_struct = js_url_struct -> self;
-    if(url_struct -> query == NULL){
-        return JS_UNDEFINED;
-    }
     JSValue query_obj = JS_NewObject(ctx);
-    for(uint32_t i = 0; i < MAX_QUERY_COUNT; i++){
-        if(url_struct -> query[i].key == NULL){
-            break;
+    struct list_head* pos;
+    list_for_each(pos, &url_struct -> query){
+        URL_query* query = list_entry(pos, URL_query, link);
+        JSValue value_arr;
+        int64_t len = 0;
+        if(JS_IsUndefined(value_arr = JS_GetPropertyStr(ctx, query_obj, query -> key))){
+            value_arr = JS_NewArray(ctx);
+            JS_SetPropertyStr(ctx, query_obj, query -> key, value_arr);
+        }else{
+            JS_GetLength(ctx, value_arr, &len);
         }
-        JSValue value_val = JS_NewString(ctx, url_struct -> query[i].value);
-        JS_SetPropertyStr(ctx, query_obj, url_struct -> query[i].key, value_val);
+        if(query -> value){
+            JSValue value_val = JS_NewString(ctx, query -> value);
+            JS_SetPropertyUint32(ctx, value_arr, len ++, value_val);
+        }
+        JS_SetLength(ctx, value_arr, len);
     }
     return query_obj;
 }
@@ -2124,16 +2234,27 @@ JSValue js_url_setQueryStr(JSContext *ctx, JSValueConst this_val, JSValue value)
     }
     URL_data *url_struct = js_url_struct -> self;
     const char *query = JS_ToCString(ctx, value);
-    if(query == NULL){
+
+    // clear previous query
+    struct list_head *pos, *tmp;
+    list_for_each_safe(pos, tmp, &url_struct -> query){
+        URL_query* query = list_entry(pos, URL_query, link);
+        js_free(ctx, query -> key);
+        if(query -> value != NULL){
+            js_free(ctx, query -> value);
+        }
+        js_free(ctx, query);
+    }
+    init_list_head(&url_struct -> query);   // clear
+
+    // parse
+    char* query2 = js_strdup(ctx, query);
+    JS_FreeCString(ctx, query);
+    if(!url_parse_query(query2, &url_struct -> query)){
+        js_free(ctx, query2);
         return LJS_Throw(ctx, "Invalid query string", NULL);
     }
-    URL_query_data* query_list = js_malloc(ctx, sizeof(URL_query_data) * MAX_QUERY_COUNT);
-    char* query_str = strdup(query);
-    if(!LJS_parse_query(query_str, &query_list, MAX_QUERY_COUNT)){
-        return LJS_Throw(ctx, "Failed to parse query string", NULL);
-    }
-    url_struct -> query_string = query_str;
-    url_struct -> query = query_list;
+    js_free(ctx, query2);
     return JS_UNDEFINED;
 }
 
@@ -2142,23 +2263,7 @@ static void js_url_finalizer(JSRuntime *rt, JSValue val) {
     if (!js_url_struct) return;
     
     URL_data *url = js_url_struct -> self;
-
-#define FREE_FIELD(field) do { if(url -> field) free(url -> field); } while(0)
-    FREE_FIELD(protocol);
-    FREE_FIELD(host);
-    FREE_FIELD(path);
-    FREE_FIELD(username);
-    FREE_FIELD(password);
-    FREE_FIELD(hash);
-#undef FREE_FIELD
-    
-    if (url -> query) {
-        for (uint32_t i = 0; i < MAX_QUERY_COUNT; i++) {
-            free(url -> query[i].key);
-            free(url -> query[i].value);
-        }
-        free(url -> query);
-    }
+    LJS_free_url(url);
     
     for (uint32_t i = 0; i < js_url_struct -> dup_count; i++) {
         JS_FreeValueRT(rt, js_url_struct -> dup_value[i]);
@@ -2884,6 +2989,12 @@ static void handler_wbody_sync(EvFD* fd, void* data){
 
 static inline void handler_write_all_header(JSContext* ctx, struct JSClientHandler* handler){
     EvFD* fd = handler -> fd;
+
+    // status
+    const char* status_str = http_get_reason_by_code(handler -> response.status);
+    FORMAT_WRITE("HTTP/1.1 %d %s\r\n", 128, handler -> response.status, status_str);
+
+    // all headers
     while(handler -> response.header_writed < handler -> response.header_count){
         FORMAT_WRITE("%s: %s\r\n", 1024, 
             handler -> response.headers[handler -> response.header_writed][0], 
@@ -2909,6 +3020,8 @@ static inline void handler_write_all_header(JSContext* ctx, struct JSClientHandl
         handler -> cookiejar.mod_count = 0;
     }
 
+    // done
+    LJS_evfd_write(fd, (void*)"\r\n", 2, NULL, NULL);
     handler -> header_sent = true;
 }
 
@@ -3163,6 +3276,40 @@ static JSValue js_handler_constructor(JSContext* ctx, JSValueConst new_target, i
     );
 }
 
+static JSValue js_handler_static_status(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    if(argc == 0 || !JS_IsNumber(argv[0])){
+        return LJS_Throw(ctx, "Handler.status() requires one number argument",
+            "Handler.status(code: number): string"
+        );
+    }
+
+    uint32_t reason = 200;
+    JS_ToUint32(ctx, &reason, argv[0]);
+    if(reason < 100 || reason > 599){
+        return LJS_Throw(ctx, "Invalid status code %d",
+            "RFC 7231 defines status codes in the range 100-599, please use a valid code",
+            reason
+        );
+    }
+
+    return JS_NewString(ctx, http_get_reason_by_code(reason));
+}
+
+static JSValue js_handler_static_mimetype(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    if(argc == 0 || !JS_IsString(argv[0])){
+        return LJS_Throw(ctx, "Handler.mimetype() requires one string argument",
+            "Handler.mimetype(fileextention: string): string"
+        );
+    }
+
+    const char* ext = JS_ToCString(ctx, argv[0]);
+    if(!ext) return JS_EXCEPTION;
+
+    const char* mimetype = get_mime_by_ext(ext);
+    JS_FreeCString(ctx, ext);
+    return JS_NewString(ctx, mimetype);
+}
+
 static JSValue js_handler_static_from(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc == 0){
 param_err:
@@ -3219,6 +3366,12 @@ static JSCFunctionListEntry handler_proto_funcs[] = {
     JS_CFUNC_DEF("header", 2, js_handler_header)
 };
 
+static JSCFunctionListEntry handler_static_funcs[] = {
+    JS_CFUNC_DEF("from", 1, js_handler_static_from),
+    JS_CFUNC_DEF("status", 1, js_handler_static_status),
+    JS_CFUNC_DEF("mimetype", 1, js_handler_static_mimetype)
+};
+
 static JSClassDef handler_class = {
     "Handler",
     .finalizer = handler_finalizer
@@ -3242,10 +3395,7 @@ int init_http(JSContext *ctx, JSModuleDef *m){
     JS_SetModuleExport(ctx, m, "Handler", handler_ctor);
 
     // Handler.prototype.from
-    JSValue handler_ctor_proto = JS_NewObjectProto(ctx, JS_GetPrototype(ctx, handler_ctor));
-    JSValue handler_from = JS_NewCFunction(ctx, js_handler_static_from, "from", 1);
-    JS_SetPropertyStr(ctx, handler_ctor_proto, "from", handler_from);
-    JS_SetPrototype(ctx, handler_ctor, handler_ctor_proto);
+    JS_SetPropertyFunctionList(ctx, handler_ctor, handler_static_funcs, countof(handler_static_funcs));
 
     // Cookies
     JSValue cookie_ctor = JS_NewCFunction2(ctx, js_cookies_constructor, "Cookies", 1, JS_CFUNC_constructor, 0);
