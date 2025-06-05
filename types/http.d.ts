@@ -21,6 +21,16 @@ interface FormData {
 }
 
 declare module 'http' {
+    export class Headers {
+        constructor();
+        append(key: string, value: string): void;
+        delete(key: string): boolean;
+        get(key: string): string | null;
+        getall(key?: string): string[];
+        set(key: string, value: string): void;
+        has(key: string): boolean;
+    }
+
     export class Cookies {
         constructor(headers: Record<string, string> | Array<[string, string]>);
         readonly request: Response;
@@ -56,10 +66,11 @@ declare module 'http' {
         formData(): Promise<FormData[]>;
 
         get locked(): boolean;
-        get headers(): Record<string, string>;
         get body(): U8Pipe;
         get status(): number;
         get ok(): boolean;
+
+        readonly headers: Headers;
     }
 
     export class Handler {
@@ -81,37 +92,47 @@ declare module 'http' {
 
         private constructor();
 
-        send(data: string | Uint8Array | ArrayBuffer): void;
+        send(data: string | Uint8Array | ArrayBuffer): this;
         close(): void;
         reuse(): Promise<this>;
         ws(): WebSocket;
-        status(code: number): void;
-
-        /**
-         * 设置头。注意有重复会替换，如果不需要替换请用数组包装，如
-         * ```ts
-         * // 这里只是演示，实际上建议使用Cookies类(Handler.cookies)
-         * res.header('Set-Cookie', ['a=b', 'c=d']);
-         * ```
-         */
-        header(key: string, value: string | null): void;
-
-        /**
-         * 删除头
-         */
-        header(key: string, value?: undefined): string[];
-
-        /**
-         * 强制添加头，不会替换。对于类似于多Auth的场景，可以用此方法添加额外的Auth头。
-         */
-        header(key: string, value: string[]): void;
+        status(code: number): this;
 
         /**
          * 结束header内容，立即发送给客户端。之后就可以流式写入body了。<br>
-         * 注意：除非设置chunked，否则需要提前定义`Content-Length`
+         * 注意
+         *  - 除非设置chunked，否则需要提前定义`Content-Length`
+         *  - 务必有body，或者指定`done(true)`，否则会一直等待数据
+         *  - 如果没有调用`chunked()`，会使用HTTP/1.0，此时不会长连接
+         *  - `reuse()`前，务必确保响应处理完毕(`await handler.end`)
          */
-        done(): Promise<void>;
+        done(no_body?: boolean): this;
+
+        /**
+         * Note: 别忘记再次调用`done()`指示客户端chunk发送完毕
+         * @example
+         * ```ts
+         * const handler = Handler.from(pipe);
+         * // 第一次done指示发送header，此后chunked发送
+         * // 最后done()指示chunk发送完毕
+         * handler.status(200).chunked().done().send('hello').done();
+         * ```
+         */
+        chunked(): this;
+
+        /**
+         * `handler.headers.delete`的快捷方式
+         */
+        header(key: string, value?: null): this;
+
+        /**
+         * `handler.headers.set`的快捷方式
+         */
+        header(key: string, value: string): this;
 
         end: Promise<void>;
+        request: Response & { path: string };
+
+        headers: Headers;
     }
 }

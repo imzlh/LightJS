@@ -31,8 +31,8 @@ declare const console: {
     clear: () => void;
 }
 
-declare function setTimeout(callback: () => void, timeout: number): void;
-declare function setInterval(callback: () => void, timeout: number): void;
+declare function setTimeout(callback: () => void, timeout: number): number;
+declare function setInterval(callback: () => void, timeout: number): number;
 declare function clearTimer(intervalId: number): void;
 declare function delay(time_ms: number): Promise<void>;
 
@@ -43,8 +43,14 @@ declare function encodeStr(str: string): Uint8Array;
 declare function decodeStr(data: Uint8Array): string;
 
 declare class Worker {
+    // Note: static methods are only available in Worker threads
+    static postMessage: (data: any) => void;
+    // @ts-ignore
+    static onmessage: (data: any) => void;  // setter getter
+    static exit: (code: number, reason?: string) => void;
+
     constructor(url: string, module?: boolean);
-    onmessage: (data: any) => any;  // setter getter
+    onmessage: (data: any) => void;  // setter getter
     onclose: () => any;  // setter getter
     postMessage(data: any): void;
     terminate(): void;
@@ -71,6 +77,7 @@ declare class URL {
     hash: string;
 
     getQuery(): Record<string, string[]>;
+    getQuery(name: string): string[];
     delQuery(name: string): void;
     addQuery(name: string, value: string): void;
 

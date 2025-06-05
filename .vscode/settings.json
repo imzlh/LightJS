@@ -1,5 +1,6 @@
 {
     "files.associations": {
+        "*.h": "cpp",
         "bit": "c",
         "compare": "c",
         "limits": "c",
@@ -145,7 +146,8 @@
         "sendfile.h": "c",
         "aes.h": "c",
         "md.h": "c",
-        "debug.h": "c"
+        "debug.h": "c",
+        "cstring": "c"
     },
     "C_Cpp.errorSquiggles": "enabled"
 }

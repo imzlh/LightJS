@@ -40,21 +40,20 @@ static inline char* str_repeat(char* c, int n) {
     return s;
 }
 
-static JSValue getClassName(JSContext *ctx, JSValue prototype) {
+static const char* getClassName(JSContext *ctx, JSValue prototype) {
     JSValue constructor, name;
 
     // 从原型中获取构造函数
-    constructor = JS_GetPropertyStr(ctx, prototype, "constructor");
-    JS_FreeValue(ctx, constructor);
+    constructor = JS_GetProperty(ctx, prototype, JS_ATOM_constructor);
     if (JS_IsException(constructor))
-        return JS_UNDEFINED;
+        return NULL;
 
     // 从构造函数中获取name属性
-    name = JS_GetPropertyStr(ctx, constructor, "name");
+    name = JS_GetProperty(ctx, constructor, JS_ATOM_name);
     if (JS_IsException(name))
-        return JS_UNDEFINED;
+        return NULL;
 
-    return name;
+    return JS_ToCString(ctx, name);
 }
 
 #define PRINT_INDENT(depth) char* indent = str_repeat(" ", depth *4); \
@@ -64,15 +63,11 @@ static JSValue getClassName(JSContext *ctx, JSValue prototype) {
 /**
  * 打印 JSValue 值
  */
-void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visited[], FILE* target_fd) {
+void print_jsvalue(JSContext *ctx, JSValueConst val, int depth, JSValue visited[], FILE* target_fd) {
     JS_DupValue(ctx, val); // 复制值，防止被修改
-    
-    // 防止递归过深
-    int free_visited = 0;
-    if (NULL == visited) {
-        visited = js_malloc(ctx, MAX_OUTPUT_LEN * sizeof(JSValue));
-        if(!visited) return;
-        free_visited = 1;
+    if(depth == 64){        // max depth
+        fprintf(target_fd, ANSI_RED "..." ANSI_RESET);
+        return;
     }
 
     // uninitialed?
@@ -131,14 +126,14 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
 
         // 检查是否已经访问过
         for (int i = 0; i < depth; i++) {
-            if (JS_IsSameValue(ctx, val, *visited[i])) {
+            if (JS_IsSameValue(ctx, val, visited[i])) {
                 fprintf(target_fd, ANSI_RED "[circular]" ANSI_RESET);
                 goto end;
             }
         }
 
         // 将当前数组标记为已访问
-        visited[depth] = &val;
+        visited[depth] = val;
 
         int length;
         JSValue length_val = JS_GetPropertyStr(ctx, val, "length");
@@ -150,7 +145,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
             goto end;
         }
         
-        fprintf(target_fd, ANSI_GREEN "[" ANSI_RESET);
+        fprintf(target_fd, ANSI_GREEN " [" ANSI_RESET);
         char* indent = str_repeat(" ", (depth + 1) * 4);
         for (uint32_t i = 0; i < length; i++) {
             if (i > 0) {
@@ -160,7 +155,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
                 fprintf(target_fd, "\n%s", indent);
             }
             JSValue element = JS_GetPropertyUint32(ctx, val, i);
-            LJS_print_value(ctx, element, depth + 1, visited, target_fd);
+            print_jsvalue(ctx, element, depth + 1, visited, target_fd);
             JS_FreeValue(ctx, element);
         }
         if(length > 8) printf("\n%s", str_repeat(" ", depth * 4));
@@ -168,7 +163,7 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
         free(indent);
 
     end:
-        visited[depth] = NULL;
+        visited[depth] = JS_NULL;
     } else if (JS_IsObject(val)) {
         // Error检查
         if(JS_IsError(ctx, val) && depth == 0){
@@ -233,6 +228,46 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
                     break;
             }
             fprintf(target_fd, ANSI_MAGENTA "Promise(" ANSI_RESET ANSI_YELLOW "<%s>" ANSI_RESET ANSI_MAGENTA ")" ANSI_RESET, state_str);
+
+            if(state != JS_PROMISE_PENDING){
+                JSValue res = JS_PromiseResult(ctx, val);
+                print_jsvalue(ctx, res, depth + 1, visited, target_fd);
+            }
+            goto end;
+        }
+
+        // TypedArray or ArrayBuffer
+        size_t psize;
+        uint8_t* buf;
+        if(JS_IsArrayBuffer(val)){
+            buf = JS_GetArrayBuffer(ctx, &psize, val);
+
+            printf(ANSI_MAGENTA "ArrayBuffer(" ANSI_BLUE "%ld" ANSI_MAGENTA ") {" ANSI_RESET, psize);
+
+            goto print_buffer;
+        }
+
+        if(JS_GetTypedArrayType(val) != -1){
+            buf = JS_GetUint8Array(ctx, &psize, val);
+
+            printf(ANSI_MAGENTA "TypedArray(" ANSI_BLUE "%ld" ANSI_MAGENTA ")" ANSI_RESET " {" , psize);
+            
+print_buffer:
+            if(buf == NULL){
+                fprintf(target_fd, ANSI_RED "null" ANSI_RESET);
+                goto end;
+            }
+            char* indent = str_repeat(" ", (depth + 1) * 4);
+            for(int i = 0; i < MIN(psize, 128); i += 16){
+                printf("\n%s", indent);
+                for(int j = 0; j < MIN(psize - i, 16); j++){
+                    printf(ANSI_BLUE "%02x" ANSI_RESET ", ", buf[i + j]);
+                }
+            }
+
+            printf("\n%s}", indent + 4);
+            free(indent);
+
             goto end;
         }
 
@@ -244,79 +279,60 @@ void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visit
 
         // 检查是否已经访问过
         for (int i = 0; i < depth; i++) {
-            if (JS_IsSameValue(ctx, val, *visited[i])) {
+            if (JS_IsSameValue(ctx, val, visited[i])) {
                 fprintf(target_fd, ANSI_RED "[circular]" ANSI_RESET);
                 goto end;
             }
         }
 
         // 将当前对象标记为已访问
-        visited[depth] = &val;
-
-        // prototype是class?
-        JSValue proto = JS_GetPrototype(ctx, val);
-        if(JS_IsObject(proto) && JS_IsRegisteredClass(JS_GetRuntime(ctx), JS_GetClassID(proto))){
-            // 获取getter setter
-            JSPropertyEnum* classprops;
-            uint32_t len;
-            if (-1 == JS_GetOwnPropertyNames(ctx, &classprops, &len, val, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY))
-                goto obj_norm;
-
-            char* indent = str_repeat(" ", (depth + 1) * 4);
-            int vaild = 0;
-            for (int i = 0; i < len; i++) {
-                JSPropertyDescriptor desc;
-                if (-1 != JS_GetOwnProperty(ctx, &desc, val, classprops[i].atom)) {
-                    if (desc.flags & JS_PROP_GETSET) {
-                        bool setter = JS_IsFunction(ctx, desc.getter);
-                        bool getter = JS_IsFunction(ctx, desc.setter);
-                        const char *key_str = JS_AtomToCString(ctx, classprops[i].atom);
-                        if((setter || getter) && depth){    // indent
-                            fprintf(target_fd, "\n%s", indent);
-                        }
-                        vaild ++;
-                        if(getter){
-                            const char *key_str = JS_AtomToCString(ctx, classprops[i].atom);
-                            fprintf(target_fd, ANSI_BLUE "get " ANSI_YELLOW "%s" ANSI_RESET "()", key_str);
-
-                            // try get
-                            JSValue get_val = JS_Call(ctx, desc.getter, val, 0, NULL);
-                            if(!JS_IsException(get_val)){
-                                fprintf(target_fd, ":");
-                                LJS_print_value(ctx, get_val, depth + 1, visited, target_fd);
-                                JS_FreeValue(ctx, get_val);
-                            }
-                            JS_FreeCString(ctx, key_str);
-                        }else if(setter){
-                            printf(ANSI_BLUE "set " ANSI_YELLOW "%s" ANSI_RESET "()", key_str);
-                        }
-                    }
-                }
-            }
-
-            free(indent);
-            JS_FreePropertyEnum(ctx, classprops, len);
-            if(vaild == 0) goto obj_norm;
-        }
+        visited[depth] = val;
 
         // 检查是否为Class
         JSClassID class_id = JS_GetClassID(val);
+        bool show_proto = false;
         if(JS_IsRegisteredClass(JS_GetRuntime(ctx), class_id)){
-            JSValue class_name = getClassName(ctx, val);
-            const char *class_name_str = JS_ToCString(ctx, class_name);
-            if(!class_name_str) fprintf(target_fd, ANSI_MAGENTA "Object(Unknown)" ANSI_RESET);
-            else{
-                if(strcmp(class_name_str, "Object") != 0)
-                    fprintf(target_fd, ANSI_MAGENTA "%s" ANSI_RESET, class_name_str);
-                JS_FreeCString(ctx, class_name_str);
+            const char* class_name = getClassName(ctx, val);
+            if(NULL == class_name){
+                fprintf(target_fd, ANSI_MAGENTA "Object(Unknown)" ANSI_RESET);
+            }else{
+                if(strcmp(class_name, "Object") != 0){
+                    fprintf(target_fd, ANSI_MAGENTA "%s" ANSI_RESET, class_name);
+                    show_proto = true;
+                }
+                JS_FreeCString(ctx, class_name);
             }
         }
 
+        // toString?
+        JSValue tostr = JS_GetProperty(ctx, val, JS_ATOM_toString);
+        if(show_proto && JS_IsFunction(ctx, tostr)){
+            JSValue proto_str = JS_Call(ctx, tostr, val, 0, NULL);
+            if(JS_IsException(proto_str)){
+                JS_ResetUncatchableError(ctx);
+            }else{
+                const char* proto_str_str = JS_ToCString(ctx, proto_str);
+                if(memcmp("[object ", JS_ToCString(ctx, proto_str), 8) == 0){
+                    JS_FreeCString(ctx, proto_str_str);
+                    JS_FreeValue(ctx, proto_str);
+                    goto obj_restart;
+                }
+                if(strlen(proto_str_str) > 100 || strchr(proto_str_str, '\n')){
+                    fprintf(target_fd, "<<< \n%s\n<<<", proto_str_str);
+                }else{
+                    fprintf(target_fd, "(" ANSI_GREEN " %s" ANSI_RESET ")", proto_str_str);
+                }
+                JS_FreeCString(ctx, proto_str_str);
+            }
+            JS_FreeValue(ctx, proto_str);
+            goto end1;
+        }
+
+obj_restart:
         // 读取对象键名
-obj_norm:
         JSPropertyEnum *props;
         uint32_t len;
-        if (JS_GetOwnPropertyNames(ctx, &props, &len, val, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY)) {
+        if (-1 == JS_GetOwnPropertyNames(ctx, &props, &len, val, JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK | JS_GPN_PRIVATE_MASK)) {
             fprintf(target_fd, ANSI_MAGENTA "Object()" ANSI_RESET);
             goto end1;
         }
@@ -325,33 +341,61 @@ obj_norm:
         char* indent = str_repeat(" ", (depth +1) * 4);
 
         for (int i = 0; i < len; i++) {
+            JSPropertyDescriptor desc;
+            if (-1 == JS_GetOwnProperty(ctx, &desc, val, props[i].atom)) {
+                continue;
+            }
+            
             if(len > 4) {
                 fprintf(target_fd, "\n%s", indent);
             }
 
-            JSValue key = JS_AtomToValue(ctx, props[i].atom);
-            const char *key_str = JS_ToCString(ctx, key);
-            fprintf(target_fd, ANSI_YELLOW "%s" ANSI_RESET ": ", key_str);
+            JSValue atom_val = JS_AtomToValue(ctx, props[i].atom);
+            const char *key_str = JS_AtomToCString(ctx, props[i].atom);
+            if(props[i].is_enumerable || !JS_IsSymbol(atom_val))
+                fprintf(target_fd, ANSI_YELLOW "%s" ANSI_RESET ": ", key_str);
+            else
+                fprintf(target_fd, ANSI_RED "Symbol(" ANSI_RESET "%s" ANSI_RED ")" ANSI_RESET ": ", key_str);
             JS_FreeCString(ctx, key_str);
+            JS_FreeValue(ctx, atom_val);
 
-            JSValue prop_val = JS_GetProperty(ctx, val, props[i].atom);
-            if (JS_IsException(prop_val)) {
-                fprintf(target_fd, ANSI_RED "[failed]" ANSI_RESET);
-                continue;
+            if(desc.flags & JS_PROP_GETSET){
+                if(!JS_IsUndefined(desc.setter)){
+                    fprintf(target_fd, ANSI_GREEN "set " ANSI_RESET);
+                }
+                if(!JS_IsUndefined(desc.getter)){
+                    fprintf(target_fd, ANSI_GREEN "get" ANSI_RESET);
+                    JSValue getres = JS_Call(ctx, desc.getter, val, 0, NULL);
+
+                    if(JS_IsException(getres)){
+                        JS_ResetUncatchableError(ctx);
+                    }else{
+                        fprintf(target_fd, "() => ");
+                        print_jsvalue(ctx, getres, depth + 1, visited, target_fd);
+                        JS_FreeValue(ctx, getres);
+                    }
+                }
+            }else{
+                print_jsvalue(ctx, desc.value, depth + 1, visited, target_fd);
             }
-            LJS_print_value(ctx, prop_val, depth + 1, visited, target_fd);
-            JS_FreeValue(ctx, prop_val);
-            JS_FreeValue(ctx, key);
             
-            if (i != len - 1) fprintf(target_fd, ", ");
+            if ( i != len - 1 ) fprintf(target_fd, ", ");
             if ( i == MAX_OBJECT_PROP_LEN ){
                 fprintf(target_fd, "\n%s...", indent);
                 break;
             }
         }
 
+        if(show_proto){
+            JSValue proto = JS_GetPrototype(ctx, val);
+            if(!JS_IsUndefined(proto) && !JS_IsException(proto)){
+                fprintf(target_fd, ",\n%s" ANSI_MAGENTA ANSI_BOLD "__proto__ " ANSI_RESET ":", indent);
+                print_jsvalue(ctx, proto, depth + 1, visited, target_fd);
+            }
+        }
+
         if(len > 4) {
-            fprintf(target_fd, "\n%s", indent);
+            fprintf(target_fd, "\n%s", indent + 4);
         } else {
             fprintf(target_fd, " ");
         }
@@ -361,7 +405,7 @@ obj_norm:
         free(indent);
 
 end1:
-        visited[depth] = NULL;
+        visited[depth] = JS_NULL;
     } else if (JS_IsSymbol(val)) {
         const char *str = JS_ToCString(ctx, val);
         fprintf(target_fd, ANSI_MAGENTA "Symbol(" ANSI_RESET "%s" ANSI_MAGENTA ")" ANSI_RESET, str);
@@ -370,37 +414,47 @@ end1:
         fprintf(target_fd, ANSI_RED "[value: %d]" ANSI_RESET, JS_VALUE_GET_TAG(val));
     }
 
-    if (free_visited) {
-        js_free(ctx, visited);
-    }
     JS_FreeValue(ctx, val);
 }
 
+static inline void printval_internal(JSContext *ctx, int argc, JSValueConst *argv, FILE *target_fd) {
+    for(int i = 0; i < argc; i++){
+        JSValue val = argv[i];
+        if(JS_IsString(val)){
+            fprintf(target_fd, "%s", JS_ToCString(ctx, val));
+        }else{
+            JSValue visited[64];
+            print_jsvalue(ctx, val, 0, visited, target_fd);
+            if(JS_IsObject(val)) fprintf(target_fd, "\n");
+        }
+        fprintf(target_fd, " ");
+    }
+    fprintf(target_fd, "\n");
+}
+
+void LJS_print_value(JSContext *ctx, JSValueConst val, FILE* target_fd){
+    JSValue visited[64];
+    print_jsvalue(ctx, val, 0, visited, target_fd);
+}
+
+
 // console.log 实现
 static JSValue js_console_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    for (int i = 0; i < argc; i++) {
-        LJS_print_value(ctx, argv[i], 0, NULL, stdout);
-        printf(" ");
-    }
-    printf("\n");
+    printval_internal(ctx, argc, argv, stdout);
     return JS_UNDEFINED;
 }
 
 // console.error 实现
 static JSValue js_console_error(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     fprintf(stderr, ANSI_RED " error " ANSI_RESET);
-    for (int i = 0; i < argc; i++) {
-        LJS_print_value(ctx, argv[i], 0, NULL, stderr);
-        fprintf(stderr, " ");
-    }
-    fprintf(stderr, "\n");
+    printval_internal(ctx, argc, argv, stderr);
     return JS_UNDEFINED;
 }
 
 // console.info 实现
 static JSValue js_console_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     printf(ANSI_BLUE " info " ANSI_RESET);
-    js_console_log(ctx, this_val, argc, argv);
+    printval_internal(ctx, argc, argv, stdout);
     return JS_UNDEFINED;
 }
 
@@ -411,23 +465,21 @@ static JSValue js_console_debug(JSContext *ctx, JSValueConst this_val, int argc,
     }
     
     printf(ANSI_WHITE " debug " ANSI_RESET);
-    js_console_log(ctx, this_val, argc, argv);
+    printval_internal(ctx, argc, argv, stdout);
     return JS_UNDEFINED;
 }
 
 // console.assert 实现
 static JSValue js_console_assert(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    if (!JS_ToBool(ctx, argv[0])) {
-        const char *msg = JS_ToCString(ctx, argv[1]);
-        
-        printf(ANSI_RED " assert " ANSI_RESET);
-        for (int i = 0; i < argc; i++) {
-            LJS_print_value(ctx, argv[i], 0, NULL, stdout);
-            printf(" ");
-        }
-        printf("\n");
+    if(argc < 2){
+        return LJS_Throw(ctx, "Assertion failed: at least 2 arguments required, but only %d present", 
+                "console.assert(condition: any, ...)"
+            , argc);
+    }
 
-        JS_FreeCString(ctx, msg);
+    if (!JS_ToBool(ctx, argv[0])) {
+        printf(ANSI_RED " assert " ANSI_RESET);
+        printval_internal(ctx, argc - 1, argv + 1, stdout);
     }
     return JS_UNDEFINED;
 }
@@ -435,7 +487,7 @@ static JSValue js_console_assert(JSContext *ctx, JSValueConst this_val, int argc
 // console.warn 实现
 static JSValue js_console_warn(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     printf(ANSI_YELLOW " warn " ANSI_RESET);
-    js_console_log(ctx, this_val, argc, argv);
+    printval_internal(ctx, argc, argv, stdout);
     return JS_UNDEFINED;
 }
 
@@ -556,7 +608,7 @@ static JSValue js_console_timeLog(JSContext *ctx, JSValueConst this_val, int arg
     // 输出额外的参数
     for (int i = 1; i < argc; i++) {
         printf(" ");
-        LJS_print_value(ctx, argv[i], 0, NULL, stdout);
+        LJS_print_value(ctx, argv[i], stdout);
     }
     printf("\n");
 
@@ -590,7 +642,6 @@ bool LJS_init_console(JSContext *ctx) {
 }
 
 // ------------ for C --------------
-#define GET_STRING(ctx, val) JS_IsUndefined(val)? (const char*)0 : JS_ToCString(ctx, val)
 void LJS_dump_error(JSContext *ctx, JSValueConst exception) {
     if(JS_IsError(ctx, exception)){
         JSValue stack = JS_GetPropertyStr(ctx, exception, "stack");
@@ -599,11 +650,14 @@ void LJS_dump_error(JSContext *ctx, JSValueConst exception) {
         JSValue help = JS_GetPropertyStr(ctx, exception, "help");
         const char *error_name = JS_ToCString(ctx, name);
         const char *error_message = JS_ToCString(ctx, message);
-        const char *error_stack = GET_STRING(ctx, stack);
-        const char *error_help = GET_STRING(ctx, help);
+        const char *error_stack = LJS_ToCString(ctx, stack, NULL);
+        const char *error_help = LJS_ToCString(ctx, help, NULL);
         if(error_name == NULL) error_name = "Error";
         if(error_message == NULL) error_message = "";
-        fprintf(stderr, ANSI_RED "%s" ANSI_RESET ": %s\n", error_name, error_message);
+        if(LJS_IsMainContext(ctx))
+            fprintf(stderr, ANSI_RED "%s" ANSI_RESET ": %s\n", error_name, error_message);
+        else
+            fprintf(stderr, ANSI_RED "%s" ANSI_RESET " (in worker): %s\n", error_name, error_message);
         if(error_help) fprintf(stderr, ANSI_GREEN "help" ANSI_RESET ": %s\n", error_help);
         if(error_stack) fprintf(stderr, "%s\n", error_stack);
         JS_FreeCString(ctx, error_name);
@@ -611,7 +665,8 @@ void LJS_dump_error(JSContext *ctx, JSValueConst exception) {
         if(error_stack) JS_FreeCString(ctx, error_stack);
         if(error_help) JS_FreeCString(ctx, error_help);
     } else {
-        LJS_print_value(ctx, exception, 0, NULL, stderr);
+        LJS_print_value(ctx, exception, stderr);
         fprintf(stderr, "\n");
     }
+    fflush(stderr);
 }

@@ -79,9 +79,8 @@
 
 #ifndef NDEBUG
 #define ENABLE_DUMPS
+#define FORCE_GC_AT_MALLOC  /* test the GC by forcing it before each object allocation */
 #endif
-
-//#define FORCE_GC_AT_MALLOC  /* test the GC by forcing it before each object allocation */
 
 #define check_dump_flag(rt, flag)  ((rt->dump_flags & (flag +0)) == (flag +0))
 

@@ -524,7 +524,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
         if (strcmp(bind_addr.protocol, "unix") != 0){
             if(JS_IsBool(val = JS_GetPropertyStr(ctx, argv[2], "reuseaddr"))){
                 bool reuseaddr = JS_ToBool(ctx, val);
-                setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(val));
+                setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
             }
             if(JS_IsBool(val = JS_GetPropertyStr(ctx, argv[2], "nodelay"))){
                 bool nodelay = JS_ToBool(ctx, val);
@@ -568,7 +568,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
         goto fail3;
     }
 
-    JSValue func = JS_NewCFunctionData(ctx, js_server_close, 0, 0, 1, (JSValueConst[]){ JS_MKPTR(JS_TAG_OBJECT, evfd) });
+    JSValue func = JS_NewCFunctionData(ctx, js_server_close, 0, 0, 1, (JSValueConst[]){ JS_MKPTR(JS_TAG_INT, evfd) });
     return func;
 
 fail3:

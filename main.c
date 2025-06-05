@@ -168,18 +168,23 @@ int main(int argc, char **argv) {
 
     // rt init
     LJS_init_runtime(runtime);
+// #ifdef LJS_DEBUG
+//     JS_SetDumpFlags(runtime, JS_DUMP_GC | JS_DUMP_LEAKS | JS_DUMP_PROMISE | JS_DUMP_OBJECTS);
+// #endif
 
     // app init
     app = LJS_create_app(runtime, 
         argc == optind ? 0 : argc - optind -1, argc == optind ? NULL : argv + optind +1, 
-        false, true, strdup(optind == argc ? get_current_dir_name() : argv[optind]), NULL
+        false, true, optind == argc 
+           ? strdup(get_current_dir_name()) 
+           : LJS_resolve_module(NULL ,argv[optind])
+        , NULL
     );
     if(!app){
-        printf("Failed to create app. Make sure you have enough memory.\n");
-        printf("You can use --memory-limit options to increase the stack and memory limits.\n");
-        LJS_panic("Failed to create app"); 
+        printf("Failed to resolve module: %s\n", argv[optind]);
+        return 1;
     }
-    LJS_init_context(app, NULL);
+    LJS_init_context(app);
     LJS_evcore_init();  // epoll init
 
     if(argc - optind == 0 || repl){
@@ -229,10 +234,6 @@ int main(int argc, char **argv) {
         exit(0);
     }
 
-#ifdef LJS_DEBUG
-    // JS_SetDumpFlags(runtime, JS_DUMP_FREE | JS_DUMP_GC | JS_DUMP_GC_FREE | JS_DUMP_LEAKS | JS_DUMP_PROMISE);
-#endif
-
     LJS_evcore_set_memory(js_malloc_proxy, runtime);
 
     // eval
@@ -247,5 +248,9 @@ int main(int argc, char **argv) {
 run_evloop:
     LJS_evcore_run(check_promise_resolved, &ret_val);
     // LJS_destroy_app(app); // destroy app will cause SEGFAULT as <argv> is not able to free.
+
+    // dispatch exit event
+    LJS_dispatch_ev(app -> ctx, "exit", JS_UNDEFINED);
+    run_jobs();
     return 0;
 }

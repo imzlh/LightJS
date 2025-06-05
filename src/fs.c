@@ -223,6 +223,142 @@ static const JSCFunctionListEntry js_syncpipe_flags[] = {
     JS_PROP_INT32_DEF("FL_PUNCH_HOLE", FALLOC_FL_PUNCH_HOLE, JS_PROP_CONFIGURABLE)
 };
 
+// class Inotify
+static thread_local JSClassID js_inotify_class_id;
+
+#define TELL_ERROR return LJS_Throw(ctx, "invaild INotify instance", "did you called Inotify.close() before?");
+
+static JSValue js_inotify_watch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    EvFD* fd = JS_GetOpaque(this_val, js_inotify_class_id);
+    if(!fd) TELL_ERROR;
+
+    uint32_t flags;
+    if(argc < 2 || !JS_IsString(argv[0]) || -1 == JS_ToUint32(ctx, &flags, argv[1]))
+        return LJS_Throw(ctx, "invalid arguments", "Inotify.watch(path: string, flag: number): INWD");
+
+    const char* path = JS_ToCString(ctx, argv[0]);
+    int wd;
+    if(!LJS_evcore_inotify_watch(fd, path, flags, &wd)){
+        return LJS_Throw(ctx, "failed to add watch: %s", NULL, strerror(errno));
+    }
+
+    return JS_NewInt32(ctx, wd);
+}
+
+static JSValue js_inotify_unwatch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    EvFD* fd = JS_GetOpaque(this_val, js_inotify_class_id);
+    if(!fd) TELL_ERROR;
+
+    int wd;
+    if(argc < 1 || -1 == JS_ToInt32(ctx, &wd, argv[0]))
+        return LJS_Throw(ctx, "invalid arguments", "Inotify.unwatch(wd: INWD (aka number) ): void");
+
+    if(!LJS_evcore_inotify_unwatch(fd, wd)){
+        return LJS_Throw(ctx, "failed to remove watch: %s", NULL, strerror(errno));
+    }
+
+    return JS_UNDEFINED;
+}
+
+static JSValue js_inotify_find(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    EvFD* fd = JS_GetOpaque(this_val, js_inotify_class_id);
+    if(!fd) TELL_ERROR;
+
+    if(argc < 1 || !JS_IsString(argv[0]))
+        return LJS_Throw(ctx, "invalid arguments", "Inotify.find(path: string): INWD | null");
+
+    const char* path = JS_ToCString(ctx, argv[0]);
+    int wd = LJS_evcore_inotify_find(fd, path);
+
+    return wd == -1 ? JS_NULL : JS_NewInt32(ctx, wd);
+}
+
+static JSValue js_inotify_close(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    EvFD* fd = JS_GetOpaque(this_val, js_inotify_class_id);
+    if(!fd) TELL_ERROR;
+
+    struct JSValueProxy* proxy = LJS_evfd_get_opaque(fd);
+    LJS_FreeJSValueProxy(proxy);
+
+    LJS_evcore_stop_inotify(fd);
+    JS_SetOpaque(this_val, NULL);
+    return JS_UNDEFINED;
+}
+
+#undef TELL_ERROR
+
+void in_callback(EvFD* fd, const char* path, uint32_t evtype, const char* move_to, void* cb_ptr){
+    struct JSValueProxy* proxy = (struct JSValueProxy*)cb_ptr;
+    JS_Call(proxy -> ctx, proxy -> val, JS_NULL, evtype == IN_MOVE ? 3 : 2, (JSValueConst[]){
+        JS_NewUint32(proxy -> ctx, evtype),
+        JS_NewString(proxy -> ctx, path),
+        evtype == IN_MOVE ? JS_NewString(proxy -> ctx, move_to) : JS_UNDEFINED
+    });
+}
+
+static JSValue js_inotify_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv){
+    if(argc == 0 || !JS_IsFunction(ctx, argv[0])){
+        return LJS_Throw(ctx, "missing argument", "new Inotify(callback: (type: number, path: string, move_to?: string) => void): Inotify");
+    }
+
+    struct JSValueProxy* proxy = LJS_NewJSValueProxy(ctx, argv[0]);
+    EvFD* fd = LJS_evcore_inotify(in_callback, proxy);
+    if(!fd) return LJS_Throw(ctx, "failed to create inotify instance: %s", NULL, strerror(errno));
+    LJS_evfd_set_opaque(fd, proxy);
+
+    JSValue class = JS_NewObjectClass(ctx, js_inotify_class_id);
+    JS_SetOpaque(class, fd);
+    return class;
+}
+
+static void js_inotify_finalizer(JSRuntime *rt, JSValue val){
+    EvFD* fd = JS_GetOpaque(val, js_inotify_class_id);
+    if(!fd) return;
+
+    LJS_FreeJSValueProxy(LJS_evfd_get_opaque(fd));
+    LJS_evcore_stop_inotify(fd);
+}
+
+static JSClassDef js_inotify_class = {
+    "Inotify",
+    .finalizer = js_inotify_finalizer
+};
+
+static const JSCFunctionListEntry js_inotify_funcs[] = {
+    JS_CFUNC_DEF("watch", 2, js_inotify_watch),
+    JS_CFUNC_DEF("unwatch", 1, js_inotify_unwatch),
+    JS_CFUNC_DEF("find", 1, js_inotify_find),
+    JS_CFUNC_DEF("close", 0, js_inotify_close),
+    JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Inotify", JS_PROP_CONFIGURABLE),
+};
+
+static const JSCFunctionListEntry js_inotify_flags[] = {
+    // event mask
+    C_CONST(IN_ACCESS),
+    C_CONST(IN_MODIFY),
+    C_CONST(IN_ATTRIB),
+    C_CONST(IN_CLOSE_WRITE),
+    C_CONST(IN_CLOSE_NOWRITE),
+    C_CONST(IN_OPEN),
+    C_CONST(IN_CREATE),
+    C_CONST(IN_DELETE),
+    C_CONST(IN_DELETE_SELF),
+    C_CONST(IN_MOVE_SELF),
+    C_CONST(IN_UNMOUNT),
+    // message flags
+    C_CONST(IN_Q_OVERFLOW),
+    C_CONST(IN_IGNORED),
+    C_CONST(IN_ONLYDIR),
+    C_CONST(IN_DONT_FOLLOW),
+    C_CONST(IN_MASK_ADD),
+    C_CONST(IN_ISDIR),
+    // watch flags
+    C_CONST(IN_ONESHOT),
+    C_CONST(IN_ALL_EVENTS),
+};
+
+// --------------- stdio ---------------
+
 static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     const char *filename;
     size_t filename_len;
@@ -842,8 +978,19 @@ static int js_mod_stdio_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetModuleExport(ctx, m, "SyncPipe", constructor);
 
     // proto
-    JSValue proto_ctor = JS_GetPrototype(ctx, constructor);
-    JS_SetPropertyFunctionList(ctx, proto_ctor, js_syncpipe_flags, countof(js_syncpipe_flags));
+    JS_SetPropertyFunctionList(ctx, constructor, js_syncpipe_flags, countof(js_syncpipe_flags));
+
+    // inotify
+    JS_NewClassID(JS_GetRuntime(ctx), &js_inotify_class_id);
+    if(-1 == JS_NewClass(JS_GetRuntime(ctx), js_inotify_class_id, &js_inotify_class)) 
+        return false;
+    JSValue inotify_proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, inotify_proto, js_inotify_funcs, countof(js_inotify_funcs));
+    JS_SetClassProto(ctx, js_inotify_class_id, inotify_proto);
+    JSValue inotify_constructor = JS_NewCFunction2(ctx, js_inotify_ctor, "Inotify", 1, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, inotify_constructor, inotify_proto);
+    JS_SetPropertyFunctionList(ctx, inotify_constructor, js_inotify_flags, countof(js_inotify_flags));
+    JS_SetModuleExport(ctx, m, "Inotify", inotify_constructor);
 
     return 0;
 }
@@ -853,6 +1000,7 @@ bool LJS_init_stdio(JSContext *ctx){
     if (!m) return false;
     JS_AddModuleExportList(ctx, m, js_stdio_funcs, countof(js_stdio_funcs));
     JS_AddModuleExport(ctx, m, "SyncPipe");
+    JS_AddModuleExport(ctx, m, "Inotify");
 
     return true;
 }

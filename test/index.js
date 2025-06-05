@@ -88,6 +88,8 @@ globalThis.isEqual = function(value, other) {
 }
 
 if(!import.meta.path || self.entry == import.meta.path){
+    console.log(self);
+
     const file = self.argv[0];
     if(!file){
         throw new Error('Expect an arg to run test');

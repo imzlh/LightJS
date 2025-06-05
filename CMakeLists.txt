@@ -93,6 +93,8 @@ if(CMAKE_BUILD_TYPE MATCHES "Debug")
     xcheck_add_c_compiler_flag(-ggdb3)
     xcheck_add_c_compiler_flag(-fno-omit-frame-pointer)
     add_compile_definitions(LJS_DEBUG)
+else()
+    add_compile_definitions(NDEBUG)
 endif()
 
 macro(xoption OPTION_NAME OPTION_TEXT OPTION_DEFAULT)

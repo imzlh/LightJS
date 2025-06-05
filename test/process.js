@@ -13,15 +13,18 @@ await test("std", async () => {
 });
 
 await test("subproc", async () => {
-    const proc = new Process(['bash'], {
+    const proc = new Process(['bash', '-c', 'echo "Hello, world!"'], {
         inheritPipe: false
     });
     console.log(proc.alive, proc.pid);
     assert(proc.pipe);
-    await proc.pipe.write(encodeStr("echo 'Hello, world!'\n"));
+    // await proc.pipe.write(encodeStr("echo 'Hello, world!'\n"));
     assert(proc.alive);
     assert(proc.pid > 0);
-    await proc.pipe.pipeTo(stdout);
+    const res = await proc.pipe.readline();
+    assert(res);
+    if(!res) return;    // for ts checking
+    assert(decodeStr(res) == "Hello, world!");
     await proc.onclose;
     assert(!proc.alive);
 });

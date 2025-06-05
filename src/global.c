@@ -546,7 +546,7 @@ static JSValue sandbox_func_proxy(JSContext* _ctx, JSValueConst this_val, int ar
 static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
     JSValue obj = JS_NewObjectClass(ctx, js_sandbox_class_id);
 
-    App* app = LJS_create_app(JS_GetRuntime(ctx), 0, NULL, false, true, NULL, NULL);
+    App* app = LJS_create_app(JS_GetRuntime(ctx), 0, NULL, false, true, "<inmemory>", NULL);
     char* init_apps[32];
     uint8_t init_apps_len = 0;
     if(argc >= 1 && JS_IsObject(argv[0])){
@@ -581,7 +581,7 @@ static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, i
         }
     }
     
-    LJS_init_context(app, init_apps_len == 0 ? NULL : init_apps);
+    LJS_init_context(app);
     JS_SetOpaque(obj, app);
     return obj;
 }

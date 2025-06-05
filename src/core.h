@@ -57,10 +57,10 @@ typedef JSValue (*PipeCallback)(JSContext* ctx, void* ptr, JSValueConst data);
 /* forward */ typedef struct EvFD EvFD;
 /* forward */ typedef enum EvPipeToNotifyType EvPipeToNotifyType;
 typedef int (*EvReadCallback)(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data);
-typedef void (*EvWriteCallback)(EvFD* evfd, void* opaque);
+typedef void (*EvWriteCallback)(EvFD* evfd, bool success, void* opaque);
 typedef void (*EvCloseCallback)(EvFD* fd, void* opaque);
-typedef void (*EvINotifyCallback)(struct inotify_event* event, void* user_data);
-typedef void (*EvSyncCallback)(EvFD* evfd, void* user_data);
+typedef void (*EvINotifyCallback)(EvFD* fd, const char* path, uint32_t evtype, const char* move_to, void* user_data);
+typedef void (*EvSyncCallback)(EvFD* evfd, bool success, void* user_data);
 typedef void (*EvFinalizerCallback)(EvFD* evfd, struct Buffer* buffer, void* user_data);
 typedef void (*EvTimerCallback)(uint64_t count, void* user_data);
 typedef void (*EvSSLHandshakeCallback)(EvFD* evfd, void* user_data);
@@ -93,8 +93,18 @@ typedef enum{
     HTTP_DONE,
     HTTP_ERROR
 } HTTP_rw_state;
-/* forward */ typedef struct HTTP_data HTTP_data;
-struct HTTP_data {
+
+typedef struct {
+    char* key;
+    size_t keylen;
+    char* value;
+    size_t vallen;
+
+    struct list_head link;
+} LHttpHeader;
+
+/* forward */ typedef struct LHTTPData LHTTPData;
+struct LHTTPData {
     EvFD* fd;
     bool is_client; // read data from client or server
     HTTP_rw_state state;
@@ -106,17 +116,41 @@ struct HTTP_data {
     float version;
     char* path;
 
-    char** headers[MAX_HEADER_COUNT];
-    uint32_t header_count;
-    uint32_t header_writed;
+    struct list_head headers;
 
     bool chunked;
-    uint32_t content_length;
-    uint32_t content_read;
+    ssize_t content_length;
+    size_t content_read;
 
-    void (*cb)(HTTP_data* data, uint8_t* buffer, uint32_t size, void* userdata);
+    void (*cb)(LHTTPData* data, uint8_t* buffer, uint32_t size, void* userdata);
     void* userdata;
+
+    bool __header_owned; // internal use only
 };
+
+#define PUT_HEADER(hdstruct, _key, _value) { \
+    LHttpHeader* h = malloc(sizeof(LHttpHeader)); \
+    h -> key = _key; h -> keylen = strlen(_key); \
+    h -> value = _value; h -> vallen = strlen(_value); \
+    list_add_tail(&h -> link, &(hdstruct) -> headers); \
+}
+
+#define PUT_HEADER_DUP(hdstruct, _key, _value) \
+    PUT_HEADER((hdstruct), strdup( _key), strdup(_value));
+
+#define FIND_HEADERS(hdstruct, _key, varname, callback){ \
+    struct list_head *__cur, *__tmp; \
+    list_for_each_safe(__cur, __tmp, &(hdstruct) -> headers) { \
+        LHttpHeader* varname = list_entry(__cur, LHttpHeader, link); \
+        if(NULL == _key || memcmp(varname -> key, _key, varname -> keylen) == 0) callback \
+    } \
+}
+
+#define DEL_HEADER(header) \
+    list_del(&header -> link); \
+    free(header -> key); \
+    free(header -> value); \
+    free(header);
 
 typedef enum{
     EV_REMOVE_READ  = 0b001,
@@ -206,8 +240,8 @@ typedef struct {
     } data;
 } dns_record;
 
-typedef void (*HTTP_Callback)(HTTP_data* data, uint8_t* buffer, uint32_t size, void* userdata);
-typedef void (*HTTP_ParseCallback)(HTTP_data *data, uint8_t *buffer, uint32_t len, void* ptr);
+typedef void (*HTTP_Callback)(LHTTPData* data, uint8_t* buffer, uint32_t size, void* userdata);
+typedef void (*HTTP_ParseCallback)(LHTTPData *data, uint8_t *buffer, uint32_t len, void* ptr);
 typedef void (*DnsResponseCallback)(int total_records, dns_record** records, void* user_data);
 typedef void (*DnsErrorCallback)(const char* error_msg, void* user_data);
 
@@ -216,7 +250,7 @@ void LJS_dispatch_ev(JSContext *ctx, const char * name, JSValue data);
 JSValue js_extends_evtarget(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 
 // console
-void LJS_print_value(JSContext *ctx, JSValueConst val, int depth, JSValue* visited[], FILE* target_fd);
+void LJS_print_value(JSContext *ctx, JSValueConst val, FILE* target_fd);
 void js_handle_promise_reject(
     JSContext *ctx, JSValue promise,
     JSValue reason,
@@ -234,7 +268,7 @@ bool LJS_init_http(JSContext *ctx);
 bool LJS_init_module(JSContext *ctx);
 void LJS_init_runtime(JSRuntime* rt);
 bool LJS_init_stdio(JSContext *ctx);
-bool LJS_init_process(JSContext* ctx, char* _entry, uint32_t _argc, char** _argv);
+bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv);
 bool LJS_init_socket(JSContext* ctx);
 
 // Core I/O Pipe
@@ -247,7 +281,6 @@ EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj);
 bool LJS_evcore_init();
 bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
 EvFD* LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
-bool LJS_evcore_detach(int fd, uint8_t type);
 void LJS_evcore_set_memory(void* (*allocator)(size_t, void*), void* opaque);
 EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
 void LJS_evfd_setup_udp(EvFD* evfd);
@@ -258,9 +291,10 @@ bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size, EvWriteCallb
 bool LJS_evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size, const struct sockaddr *addr, socklen_t addr_len, EvWriteCallback callback, void* user_data);
 bool LJS_evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvPipeToNotify notify, void* nopaque);
 bool LJS_evfd_close(EvFD* evfd);
+bool LJS_evfd_close2(EvFD* evfd);
 bool LJS_evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
 bool LJS_evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque);
-bool LJS_evfd_close2(EvFD* evfd, EvSyncCallback cb, void* opaque);
+bool LJS_evfd_wait2(EvFD* evfd, EvSyncCallback cb, void* opaque);
 bool LJS_evfd_shutdown(EvFD* evfd); // note: read all and then close
 bool LJS_evfd_closed(EvFD* evfd);
 bool LJS_evfd_clearbuf(EvFD* evfd);
@@ -270,6 +304,8 @@ int LJS_evfd_getfd(EvFD* evfd, int* timer_fd);
 bool LJS_evfd_yield(EvFD* evfd, bool yield_read, bool yield_write);
 bool LJS_evfd_consume(EvFD* evfd, bool consume_read, bool consume_write);
 bool LJS_evfd_isAIO(EvFD* evfd);
+void* LJS_evfd_get_opaque(EvFD* evfd);
+void LJS_evfd_set_opaque(EvFD* evfd, void* opaque);
 #ifdef LJS_MBEDTLS
 bool LJS_evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, bool is_client, int preset, EvSSLHandshakeCallback handshake_cb, void* user_data);
 void LJS_evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
@@ -279,10 +315,12 @@ bool LJS_evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config);
 EvFD* LJS_evcore_setTimeout(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
 EvFD* LJS_evcore_interval(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
 bool LJS_evcore_clearTimer(int timer_fd);
+bool LJS_evcore_clearTimer2(EvFD* evfd);
 EvFD* LJS_evcore_inotify(EvINotifyCallback callback, void* user_data);
 bool LJS_evcore_stop_inotify(EvFD* evfd);
-int LJS_evcore_inotify_watch(EvFD* evfd, const char* path, uint32_t mask);
+bool LJS_evcore_inotify_watch(EvFD* evfd, const char* path, uint32_t mask, int* wd);
 bool LJS_evcore_inotify_unwatch(EvFD* evfd, int wd);
+int LJS_evcore_inotify_find(EvFD* evfd, const char* path);
 
 int js_run_promise_jobs(); // internal use
 bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback callback, void* opaque);
@@ -303,8 +341,8 @@ char* LJS_resolve_path(const char* path, const char* base);
 bool LJS_parse_url(const char *url, URL_data *url_struct, URL_data *base);
 void LJS_free_url(URL_data *url_struct);
 char* LJS_format_url(URL_data *url_struct);
-JSValue LJS_NewResponse(JSContext *ctx, HTTP_data *data);
-void LJS_parse_from_fd(EvFD* fd, HTTP_data *data, bool is_client, HTTP_ParseCallback callback, void *userdata);
+JSValue LJS_NewResponse(JSContext *ctx, LHTTPData *data, bool readonly);
+void LJS_parse_from_fd(EvFD* fd, LHTTPData *data, bool is_client, HTTP_ParseCallback callback, void *userdata);
 JSValue LJS_NewWebSocket(JSContext *ctx, EvFD* fd, bool enable_mask);
 JSValue LJS_NewWebSocket(JSContext *ctx, EvFD* fd, bool enable_mask);
 
@@ -319,9 +357,10 @@ App* LJS_create_app(
     bool worker, bool module, char* script_path,
     App* parent
 );
-void LJS_init_context(App* app, char** init_list);
-App* LJS_NewWorker(App* parent);
+void LJS_init_context(App* app);
+App* LJS_NewWorker(App* parent, char* script_path);
 bool LJS_init_thread(JSContext* ctx);
+char* LJS_resolve_module(JSContext* ctx, const char* module_name);
 
 // ffi
 bool LJS_init_ffi(JSContext *ctx);
@@ -453,6 +492,15 @@ static inline void LJS_Promise_Reject(struct promise* proxy, const char* msg){
     LJS_FreePromise(proxy);
 }
 
+static inline JSValue LJS_NewResolvedPromise(JSContext* ctx, JSValue value){
+    JSValue cb[2];
+    JSValue ret = JS_NewPromiseCapability(ctx, cb);
+    JS_Call(ctx, cb[0], JS_UNDEFINED, 1, (JSValueConst[]){value});
+    JS_FreeValue(ctx, cb[0]);
+    JS_FreeValue(ctx, cb[1]);
+    return ret;
+}
+
 static inline bool JS_CopyObject(JSContext *ctx, JSValueConst from, JSValue to, uint32_t max_items){
     JSValue val;
 
@@ -476,7 +524,7 @@ struct JSValueProxy {
 static inline struct JSValueProxy* LJS_NewJSValueProxy(JSContext *ctx, JSValue val){
     struct JSValueProxy* proxy = js_malloc(ctx, sizeof(struct JSValueProxy));
     if(!proxy) return NULL;
-    proxy -> val = val;
+    proxy -> val = JS_DupValue(ctx, val);
     proxy -> ctx = ctx;
     return proxy;
 }

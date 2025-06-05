@@ -400,7 +400,7 @@ error:
         case FFI_TYPE_LONGDOUBLE: ret_val = JS_NewFloat64(ctx, *(long double*)ret_value); break;
         default: if(ret_type_num & FFI_TYPE_POINTER){
             ret_val = JS_NewCFunctionData(ctx, js_ffi_get_buffer_from_ptr, 1, ret_type_num, 1, (JSValueConst[]){
-                JS_MKPTR(JS_TAG_OBJECT, ret_value)
+                JS_MKPTR(JS_TAG_INT, ret_value)
             });
         }else abort();  // unreachable
     }
@@ -443,7 +443,7 @@ static JSValue js_dlopen(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     }
 
     JSValue ret = JS_NewCFunctionData(ctx, js_ffi_handle, 0, 0, 1, (JSValueConst[]){
-        JS_MKPTR(JS_TAG_OBJECT, handle)
+        JS_MKPTR(JS_TAG_INT, handle)
     });
     return ret;
 }
@@ -453,32 +453,26 @@ const JSCFunctionListEntry js_ffi_funcs[] = {
     JS_OBJECT_DEF("types", js_ffi_types, countof(js_ffi_types), JS_PROP_CONFIGURABLE)
 };
 
+__attribute((constructor)) void ffi_init(void) {
+    pthread_mutex_init(&ffi_mutex, NULL);
+    struct sigaction sa = {
+        .sa_flags = SA_SIGINFO,
+        .sa_sigaction = sig_handler,
+        .sa_restorer = NULL
+    };
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGTRAP, &sa, NULL);
+}
+
 #else
 const JSCFunctionListEntry js_ffi_funcs[] = {};
 #endif
 
-bool __ffi_mutex_init = false;
 int init_ffi(JSContext *ctx, JSModuleDef *m) {
-    // signal
-    signal(SIGUSR2, inthread_sighandler);
-
-    // mutex
-    if(!__ffi_mutex_init){
-        pthread_mutex_init(&ffi_mutex, NULL);
-        struct sigaction sa = {
-            .sa_flags = SA_SIGINFO,
-            .sa_sigaction = sig_handler,
-            .sa_restorer = NULL
-        };
-        sigaction(SIGSEGV, &sa, NULL);
-        sigaction(SIGBUS, &sa, NULL);
-        sigaction(SIGILL, &sa, NULL);
-        sigaction(SIGABRT, &sa, NULL);
-        sigaction(SIGFPE, &sa, NULL);
-        sigaction(SIGTRAP, &sa, NULL);
-        __ffi_mutex_init = true;
-    }
-
     return JS_SetModuleExportList(ctx, m, js_ffi_funcs, countof(js_ffi_funcs));
 }
 

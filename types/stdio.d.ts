@@ -36,6 +36,9 @@ declare module "fs" {
         tell(): number;
         prealloc(size: number, mode: number): boolean;
 
+        get eof(): boolean;
+        get size(): number;
+
         // for seek()
         static SEEK_CUR: number;
         static SEEK_END: number;
@@ -47,6 +50,15 @@ declare module "fs" {
 
         block: boolean; // setter and getter for blocking mode
         readonly fd: number;
+    }
+
+    type InWD = number;
+    class Inotify {
+        constructor(cb: (type: number, path: string, move_to?: string) => void);
+        watch(path: string, mask: number): InWD;
+        unwatch(wd: InWD): void;
+        find(path: string): InWD;
+        close(): void;
     }
 
     export function write(filename: string, data: string | Uint8Array): void;
@@ -70,7 +82,9 @@ declare module "fs" {
 
     export function stat(path: string): Stat;
 
-    export function open(path: string, flags: OpenFlag, mode?: number): U8Pipe;
+    export function open(path: string, flags: OpenFlag, mode?: number, sync?: false): U8Pipe;
+    // @ts-ignore
+    export function open(path: string, flags: string, mode?: number, sync: true): SyncPipe;
 
     export function copy(src: string, dest: string): void;
 }

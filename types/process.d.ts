@@ -5,7 +5,7 @@ declare module 'process'{
      * Note: 通过pipe.tty*操作进程pty，如大小、标题
      */
     class Process<P extends boolean | undefined>{
-        constructor(args: string[], options: {
+        constructor(args: string[], options?: {
             inheritPipe?: P,
             env?: Record<string, string>,
             cwd?: string
