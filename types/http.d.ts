@@ -10,6 +10,7 @@ declare function fetch(url: string, options?: {
     referer?: string;
     host?: string;  // 当URL为unix或ip地址时，需要用于指定请求的Host头
     body?: Uint8Array | U8Pipe | string;
+    compress?: boolean; // deflate压缩
 }): Promise<import('http').WebSocket | import('http').Response>;
 
 interface FormData {
@@ -71,6 +72,7 @@ declare module 'http' {
         get ok(): boolean;
 
         readonly headers: Headers;
+        readonly path: string;  // only for Handler.request
     }
 
     export class Handler {
@@ -131,7 +133,7 @@ declare module 'http' {
         header(key: string, value: string): this;
 
         end: Promise<void>;
-        request: Response & { path: string };
+        request: Response;
 
         headers: Headers;
     }

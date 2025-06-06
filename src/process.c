@@ -133,7 +133,7 @@ static int js_re_set_prop(JSContext *ctx, JSValue obj, JSAtom atom, JSValue valu
     return true;
 }
 
-__attribute((constructor)) void init_env_class(void) {
+__attribute__((constructor)) void init_env_class(void) {
     pthread_rwlock_init(&env_lock, NULL);
     pthread_rwlock_wrlock(&env_lock);
     env = malloc(sizeof(struct ReactiveEnviron));
@@ -162,7 +162,7 @@ __attribute((constructor)) void init_env_class(void) {
     pthread_rwlock_unlock(&env_lock);
 }
 
-__attribute((destructor)) void free_env_class(void) {
+__attribute__((destructor)) void free_env_class(void) {
     free(env -> env_names);
     free(env -> env_values);
     free(env);
@@ -190,14 +190,11 @@ JSValue js_exit(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* a
         }
     }
 
-    // 调用事件
-    LJS_dispatch_ev(ctx, "exit", JS_NewInt32(ctx, exit_code));
-
 #ifdef LJS_DEBUG
     printf("jsvm: exit with code %d\n", exit_code);
 #endif
 
-    exit(exit_code);
+    LJS_exit(exit_code);
     return JS_UNDEFINED;
 }
 
@@ -205,8 +202,11 @@ typedef struct {
     JSValue handler;
     JSContext* ctx;
     int sig;
+    pthread_t thread_id;
     struct list_head list;
 } signal_data;
+
+
 static struct list_head signal_list;
 static pthread_rwlock_t signal_lock;
 
@@ -216,12 +216,9 @@ static void js_signal_handler(int sig){
     list_for_each_safe(el, el1, &signal_list){
         signal_data* data = list_entry(el, signal_data, list);
         if(data -> sig == sig){
-            JSValue handler = data -> handler;
-            JSValue ret = JS_Call(data -> ctx, handler, JS_UNDEFINED, 0, NULL);
-            if(JS_IsException(ret)){
-                fprintf(stderr, "Uncaught exception: %s\n", JS_ToCString(data -> ctx, ret));
-            }
-            JS_FreeValue(data -> ctx, ret);
+            // Directly execute callback in target thread's context
+            pthread_kill(data->thread_id, SIGUSR1);
+            JS_Call(data->ctx, data->handler, JS_UNDEFINED, 0, NULL);
             break;
         }
     }
@@ -234,17 +231,28 @@ static JSValue js_set_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
     }
     uint32_t sig;
     if(-1 == JS_ToUint32(ctx, &sig, argv[0])) return JS_EXCEPTION;
-    if( signal(sig, js_signal_handler) ){
+    
+    App* app = JS_GetContextOpaque(ctx);
+    // 加入signal表
+    signal_data* data = js_malloc(ctx, sizeof(signal_data));
+    data->handler = JS_DupValue(ctx, argv[1]);
+    data->ctx = ctx;
+    data->sig = sig;
+    data->thread_id = pthread_self();
+
+    init_list_head(&app->signal_queue);
+    pthread_mutex_init(&app->signal_lock, NULL);
+
+    struct sigaction act = {
+        .sa_flags = 0,
+        .sa_handler = js_signal_handler
+    };
+    if(sigaction(sig, &act, NULL)) {
         return JS_ThrowTypeError(ctx, "Set signal handler failed");
     }
 
-    // 加入signal表
-    signal_data* data = js_malloc(ctx, sizeof(signal_data));
-    data -> handler = JS_DupValue(ctx, argv[1]);
-    data -> ctx = ctx;
-    data -> sig = sig;
     pthread_rwlock_wrlock(&signal_lock);
-    list_add_tail(&data -> list, &signal_list);
+    list_add_tail(&data->list, &signal_list);
     pthread_rwlock_unlock(&signal_lock);
 
     return JS_UNDEFINED;
@@ -556,6 +564,17 @@ fail:
     return JS_EXCEPTION;
 }
 
+static JSValue js_process_static_kill(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    int pid, signal = SIGILL;
+    if(argc == 0) return LJS_Throw(ctx, "Invalid arguments", "Process.kill(pid: number, signal?: number): void");
+    if(argc >= 2) JS_ToInt32(ctx, &signal, argv[1]);
+    if(-1 == JS_ToInt32(ctx, &pid, argv[0])) return JS_EXCEPTION;
+    if(kill(pid, signal) == -1){
+        return LJS_Throw(ctx, "Failed to kill process: %s", NULL, strerror(errno));
+    }
+    return JS_UNDEFINED;
+}
+
 // capture signal
 void sigchild_handle(int sig){
     pthread_rwlock_rdlock(&process_lock);
@@ -594,11 +613,18 @@ __attribute__((destructor)) void subproc_destructor(void){
     }
 }
 
-__attribute__((constructor)) void subproc_constructor(void){
+__attribute__((constructor)) static void init_signal_system(void) {
     init_list_head(&signal_list);
     init_list_head(&process_list);
     pthread_rwlock_init(&process_lock, NULL);
+    pthread_rwlock_init(&signal_lock, NULL);
     signal(SIGCHLD, sigchild_handle);
+    
+    struct sigaction sa;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGUSR1, &sa, NULL);
 }
 
 static const JSCFunctionListEntry js_process_proto_funcs[] = {
@@ -614,8 +640,6 @@ static const JSCFunctionListEntry js_process_signals[] = {
     C_CONST(SIGKILL),
     C_CONST(SIGQUIT),
     C_CONST(SIGHUP),
-    C_CONST(SIGUSR1),
-    C_CONST(SIGUSR2),
     C_CONST(SIGPIPE),
     C_CONST(SIGALRM),
     C_CONST(SIGCHLD),
@@ -695,10 +719,11 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
 
     // class Process
     JSValue process = JS_NewCFunction2(ctx, js_process_constructor, "Process", 1, JS_CFUNC_constructor, 0);
-    JSValue proc_proto = JS_GetPrototype(ctx, process);
-    JS_SetPropertyFunctionList(ctx, proc_proto, js_process_proto_funcs, countof(js_process_proto_funcs));
-    JS_SetClassProto(ctx, js_process_class_id, proc_proto);
     JS_SetConstructor(ctx, process, JS_GetClassProto(ctx, js_process_class_id));
+    JS_DefinePropertyValueStr(ctx, process, "kill",
+        JS_NewCFunction(ctx, js_process_static_kill, "Process.kill", 1),
+        JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE
+    );
 
     JS_SetModuleExport(ctx, m, "Process", process);
 

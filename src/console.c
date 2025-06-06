@@ -92,7 +92,7 @@ void print_jsvalue(JSContext *ctx, JSValueConst val, int depth, JSValue visited[
         fprintf(target_fd, ANSI_BOLD "%s" ANSI_RESET, JS_ToBool(ctx, val) ? "true" : "false");
     } else if (JS_IsNumber(val)) {
         double num;
-        if(0 != JS_ToFloat64(ctx, &num, val))
+        if(-1 == JS_ToFloat64(ctx, &num, val))
             fprintf(target_fd, ANSI_CYAN "NaN" ANSI_RESET);
         else
             fprintf(target_fd, ANSI_CYAN "%g" ANSI_RESET, num);
@@ -638,6 +638,7 @@ bool LJS_init_console(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
     JS_SetPropertyFunctionList(ctx, console, console_funcs, countof(console_funcs));
     JS_DefinePropertyValueStr(ctx, global, "console", console, JS_PROP_C_W_E);
+    JS_FreeValue(ctx, global);
     return true;
 }
 

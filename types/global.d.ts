@@ -5,17 +5,6 @@ type IModule = 'pipe' | 'socket' | 'process' | 'fs' | 'console' | 'event' | 'mod
     /* ES6 features */ 'base' | 'date' | 'eval' | 'regexp' | 'json' | 'proxy' | 'mapset' | 'typedarray' | 'promise' | 'bigint' | 'weakmap' | 'performance';
 type TypedArray = Int8Array | Uint8Array | Uint8ClampedArray | Int16Array | Uint16Array | Int32Array | Uint32Array | Float32Array | Float64Array;
 
-declare class Event {
-    type: string;
-    preventDefault: () => void;
-}
-
-declare class EvTarget {
-    on: (type: string, listener: (event: Event) => void) => void;
-    off: (type: string, listener: (event: Event) => void) => void;
-    fire: (event: Event) => void;
-}
-
 declare const console: {
     log: (...args: any[]) => void;
     error: (...args: any[]) => void;
@@ -167,8 +156,8 @@ declare class U8Pipe {
 
     // features for tty
     ttyRaw(raw: boolean): boolean;
-    set ttySize(size: { rows: number, cols: number });
-    get ttySize(): { rows: number, cols: number };
+    set ttySize(size: [number, number]);
+    get ttySize(): [number, number];
     get isTTY(): boolean;
     get ttyTitle(): string;
     set ttyTitle(title: string);
@@ -187,3 +176,9 @@ interface ImportMeta {
     filename: string;
     dirname: string;
 }
+
+// performance
+declare const performance: {
+    now(): number;
+    readonly timeOrigin: number;
+};

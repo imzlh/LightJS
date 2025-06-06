@@ -39,13 +39,14 @@ test("console.time", () => {
 test("console.assert", () => console.assert(true, "Assertion passed"));
 // test("console.clear", () => console.clear());
 
+
 test('input', async () => {
     stdin.ttyRaw(true);
     await stdout.write(encodeStr("Enter 'hello' and press enter:"))
     const input = await stdin.readline();
     assert(isEqual(input, encodeStr("hello")), input ? decodeStr(input) : undefined);
     await stderr.write(encodeStr("\nPress any key to exit..."));
-    await stdin.read(1);
+    console.log(await stdin.read());
     console.log("exit with code 0");
     exit(0);
 })

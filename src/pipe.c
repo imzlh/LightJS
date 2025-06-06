@@ -1110,7 +1110,7 @@ bool LJS_init_pipe(JSContext *ctx) {
 
     JSValue u8pipe_constructor = JS_NewCFunction2(ctx, js_U8Pipe_constructor, "U8Pipe", 2, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, u8pipe_constructor, u8pipe_proto);
-    JS_SetPropertyStr(ctx, global_obj, "U8Pipe", JS_DupValue(ctx, u8pipe_constructor));
+    JS_SetPropertyStr(ctx, global_obj, "U8Pipe", u8pipe_constructor);
 
     // Pipe
     JS_NewClassID(rt, &Pipe_class_id);
@@ -1121,7 +1121,9 @@ bool LJS_init_pipe(JSContext *ctx) {
 
     JSValue pipe_constructor = JS_NewCFunction2(ctx, js_pipe_constructor, "Pipe", 0, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, pipe_constructor, pipe_proto);
-    JS_SetPropertyStr(ctx, global_obj, "Pipe", JS_DupValue(ctx, pipe_constructor));
+    JS_SetPropertyStr(ctx, global_obj, "Pipe", pipe_constructor);
+
+    JS_FreeValue(ctx, global_obj);
 
     return true;
 }

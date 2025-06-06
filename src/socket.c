@@ -42,7 +42,7 @@ int server_handle_accept(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* 
     struct JS_Server_Data* data = (struct JS_Server_Data*)user_data;
 
     // accept
-    struct sockaddr_storage client_addr;
+    struct sockaddr_storage client_addr = { 0 };
     socklen_t client_addr_len = sizeof(client_addr);
     int client_fd = accept(LJS_evfd_getfd(evfd, NULL), (struct sockaddr*)&client_addr, &client_addr_len);
 

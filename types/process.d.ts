@@ -5,6 +5,8 @@ declare module 'process'{
      * Note: 通过pipe.tty*操作进程pty，如大小、标题
      */
     class Process<P extends boolean | undefined>{
+        static kill(pid: number, signal?: number): void;
+
         constructor(args: string[], options?: {
             inheritPipe?: P,
             env?: Record<string, string>,
@@ -44,9 +46,7 @@ declare module 'process'{
         readonly SIGABRT: number,
         readonly SIGBUS: number,
         readonly SIGFPE: number,
-        readonly SIGUSR1: number,
         readonly SIGSEGV: number,
-        readonly SIGUSR2: number,
         readonly SIGPIPE: number,
         readonly SIGALRM: number,
         readonly SIGTERM: number,

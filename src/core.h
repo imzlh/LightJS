@@ -120,7 +120,8 @@ struct LHTTPData {
 
     bool chunked;
     ssize_t content_length;
-    size_t content_read;
+    size_t content_resolved;
+    bool deflate;
 
     void (*cb)(LHTTPData* data, uint8_t* buffer, uint32_t size, void* userdata);
     void* userdata;
@@ -194,7 +195,18 @@ typedef struct {
     // module
     JSValue module_loader;
     JSValue module_format;
+
+    // signal handling
+    int event_fd;               /* for thread wakeup */
+    struct list_head signal_queue; /* pending signal events */
+    pthread_mutex_t signal_lock; /* protects signal_queue */
 } App;
+
+typedef struct SignalEvent {
+    int sig;                    /* signal number */
+    JSValue handler;            /* JS callback function */
+    struct list_head link;      /* list linkage */
+} SignalEvent;
 
 typedef enum {
     DNS_A = 1,
@@ -247,7 +259,7 @@ typedef void (*DnsErrorCallback)(const char* error_msg, void* user_data);
 
 // Core events
 void LJS_dispatch_ev(JSContext *ctx, const char * name, JSValue data);
-JSValue js_extends_evtarget(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+_Noreturn void LJS_exit(int ret_code);
 
 // console
 void LJS_print_value(JSContext *ctx, JSValueConst val, FILE* target_fd);
@@ -270,6 +282,7 @@ void LJS_init_runtime(JSRuntime* rt);
 bool LJS_init_stdio(JSContext *ctx);
 bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv);
 bool LJS_init_socket(JSContext* ctx);
+void LJS_init_timer(JSContext* ctx);
 
 // Core I/O Pipe
 JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, EvFD** ref);
@@ -280,6 +293,7 @@ EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj);
 // Core event loop
 bool LJS_evcore_init();
 bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
+void LJS_evcore_destroy();
 EvFD* LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
 void LJS_evcore_set_memory(void* (*allocator)(size_t, void*), void* opaque);
 EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
@@ -312,8 +326,8 @@ void LJS_evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, m
 bool LJS_evfd_remove_sni(const char* name);
 bool LJS_evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config);
 #endif
-EvFD* LJS_evcore_setTimeout(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
-EvFD* LJS_evcore_interval(unsigned long milliseconds, EvTimerCallback callback, void* user_data);
+EvFD* LJS_evcore_setTimeout(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
+EvFD* LJS_evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
 bool LJS_evcore_clearTimer(int timer_fd);
 bool LJS_evcore_clearTimer2(EvFD* evfd);
 EvFD* LJS_evcore_inotify(EvINotifyCallback callback, void* user_data);
@@ -438,7 +452,7 @@ static inline JSValue LJS_ThrowWithError(JSContext *ctx, const char *msg, const 
 
 static inline void LJS_panic(const char *msg){
     printf("LightJS fatal error: %s\n", msg);
-    exit(1);
+    LJS_exit(1);
 }
 
 struct promise{

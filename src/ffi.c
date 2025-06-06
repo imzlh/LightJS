@@ -55,12 +55,19 @@ enum ARG_GCFLAG {
 };
 
 // for safety , capture SIGSEGV and SIGBUS to prevent crash
+#ifdef LJS_DEBUG
 pthread_mutex_t ffi_mutex;
 pthread_t running_thread;
 char* info;
 static thread_local jmp_buf jump_buf;
 
 static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
+    if(!running_thread){
+        // Not in FFI thread
+        raise(SIGTRAP);
+        exit(1);
+    }
+
     // generate error message
     info = malloc(
 #ifdef LJS_DEBUG
@@ -75,7 +82,6 @@ static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
         case SIGBUS: snprintf(info, 128, "Bus error at %p", fault_addr); break;
         case SIGFPE: snprintf(info, 128, "Floating point exception at %p", fault_addr); break;
         case SIGILL: snprintf(info, 128, "Illegal instruction at %p", fault_addr); break;
-        case SIGTRAP: snprintf(info, 128, "Trace/breakpoint trap at %p", fault_addr); break;
         case SIGABRT: snprintf(info, 128, "Aborted at %p", fault_addr); break;
         default: snprintf(info, 128, "Unknown signal %d", sig); break;
     }
@@ -95,11 +101,13 @@ static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
 
     pthread_mutex_unlock(&ffi_mutex);
     pthread_kill(running_thread, SIGUSR2);
+    running_thread = NULL;
 }
 
-static void inthread_sighandler(int sig){
+static void inthread_sighandler(int sig, siginfo_t *_info, void *ucontext){
     longjmp(jump_buf, 1);    // jump to handle ffi error
 }
+#endif
 
 static inline int32_t guess_type(JSContext *ctx, JSValueConst val){
     if(JS_IsUndefined(val) || JS_IsNull(val)){
@@ -372,6 +380,7 @@ error:
     }
 
     // jump 
+#ifdef LJS_DEBUG
     if(setjmp(jump_buf)){
         ret_val = LJS_Throw(ctx, "FFI Error: %s", NULL, info);
         free(info);
@@ -380,8 +389,11 @@ error:
         // dangerous! start ffi call
         pthread_mutex_lock(&ffi_mutex);
         running_thread = pthread_self();
+#endif
         ffi_call(&cif, func, ret_value, (void**)args);
+#ifdef LJS_DEBUG
     }
+#endif
 
     // return value
     switch(ret_type_num){
@@ -453,7 +465,8 @@ const JSCFunctionListEntry js_ffi_funcs[] = {
     JS_OBJECT_DEF("types", js_ffi_types, countof(js_ffi_types), JS_PROP_CONFIGURABLE)
 };
 
-__attribute((constructor)) void ffi_init(void) {
+#ifdef LJS_DEBUG
+__attribute__((constructor)) void ffi_init(void) {
     pthread_mutex_init(&ffi_mutex, NULL);
     struct sigaction sa = {
         .sa_flags = SA_SIGINFO,
@@ -465,14 +478,23 @@ __attribute((constructor)) void ffi_init(void) {
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGABRT, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
-    sigaction(SIGTRAP, &sa, NULL);
 }
+#endif
 
 #else
 const JSCFunctionListEntry js_ffi_funcs[] = {};
 #endif
 
 int init_ffi(JSContext *ctx, JSModuleDef *m) {
+#ifdef LJS_DEBUG
+    // signal(SIGUSR1, inthread_sighandler);
+    struct sigaction sa = {
+        .sa_flags = SA_SIGINFO,
+        .sa_sigaction = inthread_sighandler,
+        .sa_restorer = NULL
+    };
+    sigaction(SIGUSR2, &sa, NULL);
+#endif
     return JS_SetModuleExportList(ctx, m, js_ffi_funcs, countof(js_ffi_funcs));
 }
 

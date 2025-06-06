@@ -94,9 +94,9 @@ static inline uint32_t buffer_used(struct Buffer* buffer) {
 static inline bool buffer_seek(struct Buffer* buffer, uint32_t pos) {
     if (buffer -> size == 0 && pos != 0) return false;
     
-    uint32_t used = buffer_used(buffer);
+    // uint32_t used = buffer_used(buffer);
     buffer -> start = pos % buffer -> size;
-    buffer -> end = (buffer -> start + used) % buffer -> size;
+    // buffer -> end = (buffer -> start + used) % buffer -> size;
     
     return true;
 }

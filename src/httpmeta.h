@@ -80,7 +80,7 @@ const struct __http_status http_status_codes[] = {
 
 // 二分法查找
 static inline const char* http_get_reason_by_code(uint16_t status) {
-    int left = 0, right = sizeof(http_status_codes) / sizeof(http_status_codes[0]) - 1;
+    int left = 0, right = countof(http_status_codes) - 1;
     while (left <= right) {
         int mid = (left + right) / 2;
         if (http_status_codes[mid].status == status) {

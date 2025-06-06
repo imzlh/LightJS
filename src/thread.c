@@ -342,12 +342,14 @@ bool LJS_init_module(JSContext *ctx){
     JS_DefinePropertyValueStr(ctx, func_require, "setHandler", proto_sethandler, JS_PROP_C_W_E);
     // globalThis.require = require;
     JS_SetPropertyStr(ctx, global_obj, "require", func_require);
+    
+    JS_FreeValue(ctx, global_obj);
 
     return true;
 }
 
 // predef
-static void LJS_init_timer(JSContext* ctx);
+static inline void worker_free_app(App* app);
 
 struct WorkerMessage {
     struct list_head list;
@@ -385,7 +387,7 @@ static inline void worker_exit(App* app, int code, const char* message){
     error -> code = code;
 
     JSRuntime* rt = JS_GetRuntime(app -> ctx);
-    LJS_destroy_app(app);
+    worker_free_app(app);
     JS_FreeRuntime(rt);
 
     // exit thread
@@ -528,7 +530,7 @@ void LJS_destroy_app(App* app) {
         list_for_each_safe(pos, tmp, &app -> workers){
             App* child = list_entry(pos, App, link);
             JSRuntime* rt = JS_GetRuntime(child -> ctx);
-            LJS_destroy_app(child);
+            worker_free_app(child);
             JS_FreeRuntime(rt);
         }
     }
@@ -539,6 +541,11 @@ void LJS_destroy_app(App* app) {
     if (!JS_IsUndefined(app -> module_format)) {
         JS_FreeValue(app -> ctx, app -> module_format);
     }
+
+    if (LJS_IsMainContext(app -> ctx)){
+        LJS_evcore_destroy();
+    }
+
     if (app -> ctx) {
         JS_FreeContext(app -> ctx);
     }
@@ -556,6 +563,17 @@ void LJS_destroy_app(App* app) {
     free(app);
 }
 
+static inline void worker_free_app(App* app){
+    LJS_destroy_app(app);
+
+    free(app -> script_path);
+    if (app -> argv) {
+        for (uint32_t i = 0; i < app -> argc; i++) {
+            free(app -> argv[i]);
+        }
+        free(app -> argv);
+    }
+}
 
 // for worker thread
 static int worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* user_data){
@@ -1007,6 +1025,8 @@ bool LJS_init_thread(JSContext* ctx){
         JS_SetPropertyFunctionList(ctx, worker_ctor, js_worker_static_funcs, countof(js_worker_static_funcs));
     }
 
+    JS_FreeValue(ctx, global_obj);
+
     return true;
 }
 
@@ -1106,7 +1126,8 @@ const JSCFunctionListEntry js_timer_funcs[] = {
     JS_CFUNC_DEF("clearTimer", 1, js_timer_clear),
 };
 
-static void LJS_init_timer(JSContext* ctx){
+void LJS_init_timer(JSContext* ctx){
     JSValue global_obj = JS_GetGlobalObject(ctx);
     JS_SetPropertyFunctionList(ctx, global_obj, js_timer_funcs, countof(js_timer_funcs));
+    JS_FreeValue(ctx, global_obj);
 }

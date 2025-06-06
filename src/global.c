@@ -13,183 +13,26 @@
 #include <assert.h>
 #include <sys/stat.h>
 
-typedef struct {
-    char *type;
-    JSValue callback;
-} Listener;
+// ------- event --------------
+static thread_local JSValue event_notifier = JS_UNDEFINED;
 
-typedef struct {
-    Listener *listeners;
-    int listener_count;
-    int listener_capacity;
-    JSContext *ctx;
-} EvTarget;
-
-typedef struct {
-    char *type;
-    JSValue data;
-    int default_prevented;
-} Event;
-
-static thread_local JSClassID evtarget_class_id;
-
-// 初始化 EvTarget
-static EvTarget *evtarget_new(JSContext* ctx){
-    EvTarget *et = js_malloc(ctx, sizeof(EvTarget));
-    et -> listeners = NULL;
-    et -> listener_count = 0;
-    et -> listener_capacity = 0;
-    return et;
-}
-
-// 释放 EvTarget
-static void evtarget_free(EvTarget *et) {
-    for (int i = 0; i < et -> listener_count; i++) {
-        JS_FreeValue(et -> ctx, et -> listeners[i].callback);
-        js_free(et -> ctx ,et -> listeners[i].type);
+static JSValue js_set_event_notifier(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if(argc == 0 || !JS_IsFunction(ctx, argv[0])){
+        return LJS_Throw(ctx, "setEventNotifier() requires a function argument",
+            "setEventNotifier(fn: (evname: string, data: any) => void):void"
+        );
     }
-    js_free(et -> ctx, et -> listeners);
-    js_free(et -> ctx, et);
-}
 
-// 添加事件监听器
-static void evtarget_on(EvTarget *et, const char *type, JSValue callback) {
-    if (et -> listener_count >= et -> listener_capacity) {
-        et -> listener_capacity = et -> listener_capacity ? et -> listener_capacity * 2 : 8;
-        et -> listeners = js_realloc(et -> ctx, et -> listeners, et -> listener_capacity * sizeof(Listener));
-    }
-    et -> listeners[et -> listener_count].type = strdup(type);
-    et -> listeners[et -> listener_count].callback = JS_DupValue(et -> ctx, callback);
-    et -> listener_count++;
-}
+    if(JS_GetContextOpaque(ctx) != JS_GetRuntimeOpaque(JS_GetRuntime(ctx)))
+        return JS_ThrowInternalError(ctx, "setEventNotifier() cannot be used in a SandBox");
 
-// 移除事件监听器
-static void evtarget_off(EvTarget *et, const char *type, JSValue callback) {
-    for (int i = 0; i < et -> listener_count; i++) {
-        if (strcmp(et -> listeners[i].type, type) == 0 && JS_VALUE_GET_PTR(et -> listeners[i].callback) == JS_VALUE_GET_PTR(callback)) {
-            JS_FreeValue(et -> ctx, et -> listeners[i].callback);
-            js_free(et -> ctx, et -> listeners[i].type);
-            memmove(&et -> listeners[i], &et -> listeners[i + 1], (et -> listener_count - i - 1) * sizeof(Listener));
-            et -> listener_count--;
-            break;
-        }
-    }
-}
-
-// 阻止默认行为
-static void event_prevent_default(Event *event) {
-    event -> default_prevented = 1;
-}
-
-static JSValue js_ev_prevent_default(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    event_prevent_default(JS_GetOpaque(this_val, 0));
+    if(!JS_IsUndefined(event_notifier))
+        JS_FreeValue(ctx, event_notifier);
+    event_notifier = JS_DupValue(ctx, argv[0]);
     return JS_UNDEFINED;
 }
 
-// 触发事件
-static void evtarget_fire(EvTarget *et, Event *event) {
-    for (int i = 0; i < et -> listener_count; i++) {
-        if (strcmp(et -> listeners[i].type, event -> type) == 0) {
-            JSContext *ctx = et ->ctx;
-            JSValue argv[1];
-            argv[0] = JS_NewObject(ctx);
-            JS_SetPropertyStr(ctx, argv[0], "type", JS_NewString(ctx, event -> type));
-            JS_SetPropertyStr(ctx, argv[0], "preventDefault", JS_NewCFunction(ctx, js_ev_prevent_default, "preventDefault", 0));
-            JS_Call(ctx, et -> listeners[i].callback, JS_UNDEFINED, 1, argv);
-            JS_FreeValue(ctx, argv[0]);
-        }
-    }
-}
-
-// 创建 Event 对象
-static Event *event_new(JSContext *ctx, const char *type, JSValue data) {
-    Event *event = js_malloc(ctx, sizeof(Event));
-    event -> type = strdup(type);
-    event -> default_prevented = 0;
-    event -> data = data;
-    return event;
-}
-
-// 释放 Event 对象
-static void event_free(JSContext* ctx, Event *event) {
-    JS_FreeValue(ctx, event -> data);
-    js_free(ctx, event -> type);
-    js_free(ctx, event);
-}
-
-// QuickJS 绑定部分
-static JSValue js_evtarget_on(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    EvTarget *et = JS_GetOpaque(this_val, 0);
-    if (!et || argc < 2)
-        return JS_EXCEPTION;
-
-    const char *type = JS_ToCString(ctx, argv[0]);
-    JSValue callback = argv[1];
-    evtarget_on(et, type, JS_DupValue(ctx, callback));
-    JS_FreeCString(ctx, type);
-    return JS_UNDEFINED;
-}
-
-static JSValue js_evtarget_off(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    EvTarget *et = JS_GetOpaque(this_val, 0);
-    if (!et || argc < 2)
-        return JS_EXCEPTION;
-
-    const char *type = JS_ToCString(ctx, argv[0]);
-    JSValue callback = argv[1];
-    evtarget_off(et, type, callback);
-    JS_FreeCString(ctx, type);
-    return JS_UNDEFINED;
-}
-
-static JSValue js_evtarget_fire(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    EvTarget *et = JS_GetOpaque(this_val, 0);
-    if (!et || argc < 1)
-        return JS_EXCEPTION;
-
-    JSValue data = JS_UNDEFINED;
-    
-    if(argc == 2){
-        data = argv[1];
-    }
-
-    const char *type = JS_ToCString(ctx, argv[0]);
-    Event *event = event_new(ctx, type, data);
-    evtarget_fire(et, event);
-    event_free(ctx, event);
-    JS_FreeCString(ctx, type);
-    return JS_UNDEFINED;
-}
-
-static void js_evtarget_finalizer(JSRuntime *rt, JSValue val) {
-    EvTarget *et = JS_GetOpaque(val, 0);
-    if (et)
-        evtarget_free(et);
-}
-
-static JSClassDef evtarget_class = {
-    "EvTarget",
-    .finalizer = js_evtarget_finalizer,
-};
-
-static JSValue js_evtarget_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
-    EvTarget *et = evtarget_new(ctx);
-    et -> ctx = ctx;
-    JSValue obj = JS_NewObjectClass(ctx, 0);
-    JS_SetOpaque(obj, et);
-    return obj;
-}
-
-static const JSCFunctionListEntry evtarget_proto_funcs[] = {
-    JS_CFUNC_DEF("on", 2, js_evtarget_on),
-    JS_CFUNC_DEF("off", 2, js_evtarget_off),
-    JS_CFUNC_DEF("fire", 1, js_evtarget_fire),
-};
-
-static thread_local JSValue global_ev;
-static thread_local JSContext* global_ctx;
-
-// ------- base64 ----
+// ------- base64 --------
 
 static const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -280,7 +123,7 @@ static JSValue js_str_to_u8array(JSContext *ctx, JSValueConst this_val, int argc
     return buf;
 }
 
-static bool is_utf16(const uint8_t* data, size_t len) {
+__maybe_unused static bool is_utf16(const uint8_t* data, size_t len) {
     if (len < 2 || (len % 2 != 0)) return false;
 
     // BOM
@@ -300,8 +143,7 @@ static bool is_utf16(const uint8_t* data, size_t len) {
     return ret;
 }
 
-char* u16_to_u8(const uint16_t* utf16, size_t len) {
-    char* utf8 = malloc(len * 4 + 1);
+__maybe_unused static void u16_to_u8(char* utf8, const uint16_t* utf16, size_t len) {
     char* p = utf8;
     for (size_t i = 0; i < len; i++) {
         uint32_t code = utf16[i];
@@ -334,60 +176,39 @@ char* u16_to_u8(const uint16_t* utf16, size_t len) {
     }
 
     *p = '\0';
-    return utf8;
 }
 
 static JSValue js_u8array_to_str(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(argc != 1 || JS_GetTypedArrayType(argv[0]) == -1){
         return LJS_Throw(ctx, "decodeUint8Array() requires a TypedArray argument",
-            "decodeStr(arr: TypedArray):string"
+            "decodeStr(arr: Uint8Array):string"
         );
     }
 
     size_t len = 0;
     uint8_t *data = JS_GetUint8Array(ctx, &len, argv[0]);
     if(!data) return JS_EXCEPTION;
-    if(len == 0) return JS_NewStringLen(ctx, "", 0);
 
+    // trim()
     while(*data == 0 && len != 0)
         data++, len--;
-
-    if(data[len-1] == 0) len--; // 去掉结尾的\0
     if(len == 0) return JS_NewStringLen(ctx, "", 0);
 
+    return JS_NewStringLen(ctx, (char*)data, len);
+
     // U16判断
-    if(is_utf16(data, len)){
-        char* u8 = u16_to_u8((const uint16_t*)data, len/2);
-        JSValue ret = JS_NewString(ctx, u8);
-        free(u8);
-        return ret;
-    }
-    
-    JSValue ret = JS_NewStringLen(ctx, (char*)data, len);
-    return ret;
+    // if(len > 2 && is_utf16(data, len)){
+    //     char* buf = malloc(len * 4 + 1);
+    //     u16_to_u8(buf, (const uint16_t*)data, len/2);
+    //     return JS_NewString(ctx, buf);
+    // }else{
+    //     return JS_NewStringLen(ctx, (char*)data, len);
+    // }
 }
 
 bool LJS_init_global_helper(JSContext *ctx) {
-    JSRuntime *rt = JS_GetRuntime(ctx);
+    // JSRuntime *rt = JS_GetRuntime(ctx);
     JSValue global_obj = JS_GetGlobalObject(ctx);
-
-    // 添加全局EvTarget类
-    JS_NewClassID(rt, &evtarget_class_id);
-    if(0 != JS_NewClass(rt, evtarget_class_id, &evtarget_class)) return false;
-
-    JSValue proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, proto, evtarget_proto_funcs, countof(evtarget_proto_funcs));
-    JS_SetClassProto(ctx, evtarget_class_id, proto);
-
-    JSValue constructor = JS_NewCFunction2(ctx, js_evtarget_constructor, "EvTarget", 0, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, constructor, proto);
-
-    JS_SetPropertyStr(ctx, global_obj, "EvTarget", constructor);
-
-    // 为全局添加event对象实现C到JS的事件
-    global_ev = JS_NewObjectClass(ctx, evtarget_class_id);
-    global_ctx = ctx;
-    JS_SetOpaque(global_ev, evtarget_new(ctx));
 
     // 添加全局atob和btoa函数
     JS_SetPropertyStr(ctx, global_obj, "atob", JS_NewCFunction(ctx, js_atob, "atob", 1));
@@ -397,21 +218,15 @@ bool LJS_init_global_helper(JSContext *ctx) {
     JS_SetPropertyStr(ctx, global_obj, "encodeStr", JS_NewCFunction(ctx, js_str_to_u8array, "encodeStr", 1));
     JS_SetPropertyStr(ctx, global_obj, "decodeStr", JS_NewCFunction(ctx, js_u8array_to_str, "decodeStr", 1));
 
-    JS_SetPropertyStr(ctx, global_obj, "event", global_ev);
+    JS_FreeValue(ctx, global_obj);
     return true;
 }
 
 void LJS_dispatch_ev(JSContext *ctx, const char * name, JSValue data){
-    // new Event()
-    Event *event = event_new(ctx, name, data);
-    evtarget_fire(JS_GetOpaque(global_ev, evtarget_class_id), event);
-}
-
-JSValue js_extends_evtarget(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    JSValue obj = JS_NewObjectClass(ctx, evtarget_class_id);
-    JS_SetOpaque(obj, evtarget_new(ctx));
-
-    return obj;
+    JS_Call(ctx, event_notifier, JS_UNDEFINED, 2, (JSValueConst[]){
+        JS_NewString(ctx, name),
+        data
+    });
 }
 
 //  ---------- VM features ----------
@@ -526,7 +341,6 @@ static JSValue js_sandbox_eval(JSContext* ctx, JSValueConst this_val, int argc, 
     if(JS_IsException(func)){
         return JS_EXCEPTION;
     }
-    JS_UpdateStackTop(JS_GetRuntime(ctx));
     JSValue ret = JS_EvalFunction(ctx, func);
     return ret;
 }
@@ -608,6 +422,10 @@ static int vm_init(JSContext *ctx, JSModuleDef *m) {
     JSValue sandbox_ctor = JS_NewCFunction2(ctx, js_sandbox_constructor, "Sandbox", 1, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, sandbox_ctor, JS_GetClassProto(ctx, js_sandbox_class_id));
     JS_SetModuleExport(ctx, m, "Sandbox", sandbox_ctor);
+
+    JSValue set_event_notifier = JS_NewCFunction(ctx, js_set_event_notifier, "setEventNotifier", 1);
+    JS_SetModuleExport(ctx, m, "setEventNotifier", set_event_notifier);
+
     return 0;
 }
 
@@ -621,6 +439,7 @@ bool LJS_init_vm(JSContext *ctx) {
     JS_SetPropertyFunctionList(ctx, sandbox_proto, js_sandbox_funcs, countof(js_sandbox_funcs));
     JS_SetClassProto(ctx, js_sandbox_class_id, sandbox_proto);
     JS_AddModuleExport(ctx, m, "Sandbox");
+    JS_AddModuleExport(ctx, m, "setEventNotifier");
 
     return JS_AddModuleExportList(ctx, m, js_vm_funcs, countof(js_vm_funcs));
 }
@@ -712,6 +531,7 @@ void js_handle_promise_reject(
         // list_add_tail(&data -> list, &promise_jobs);
         fprintf(stderr, "Uncaught (in promise) ");
         LJS_dump_error(ctx, reason);
+        JS_FreeValue(ctx, reason);
     }
 }
 

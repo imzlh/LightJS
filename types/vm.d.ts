@@ -14,9 +14,11 @@ declare module 'vm' {
             init: Array<IModule>;
         })
     
-        eval(code: string, import_meta: Record<string, any>): Promise<any>;
         eval(code: string): any;
+        eval(code: string, import_meta: Record<string, any>): Promise<any>;    
     
         get context(): typeof globalThis;
     }
+
+    export function setEventNotifier(callback: (event: string, data: any) => void): void;
 }

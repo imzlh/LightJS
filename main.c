@@ -6,7 +6,13 @@
 #include "engine/quickjs.h"
 #include "lib/lrepl.h"
 
+#include <stdio.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
+#include <setjmp.h>
+#include <threads.h>
 
 static JSRuntime *runtime;
 static App* app;
@@ -80,6 +86,12 @@ static size_t parse_limit(const char *arg) {
     return (size_t)(d * unit);
 }
 
+static thread_local sigjmp_buf exit_buf;
+
+_Noreturn void LJS_exit(int ret_code){
+    longjmp(exit_buf, ret_code);
+}
+
 int main(int argc, char **argv) {
 
     int optind = 1;
@@ -133,10 +145,10 @@ int main(int argc, char **argv) {
                     "\n",
                     LJS_VERSION
                 );
-                exit(0);
+                return 0;
             }else if(strcmp(longopt, "version") == 0 || opt == 'v'){
                 printf("LightJS %s with QuickJS-ng %s\n", LJS_VERSION, JS_GetVersion());
-                exit(0);
+                return 0;
             }else if(strcmp(longopt, "eval") == 0 || opt == 'e'){
                 eval_code = true;
             }else if(strcmp(longopt, "check") == 0 || opt == 'c'){
@@ -150,38 +162,42 @@ int main(int argc, char **argv) {
                     JS_SetMaxStackSize(runtime, atoi(opt_arg));
                 }else{
                     printf("Error: Missing argument for --stack-size\n");
-                    exit(1);
+                    return 1;
                 }
             }else if(strcmp(longopt, "memory-limit") == 0){
                 if(opt_arg){
                     JS_SetMemoryLimit(runtime, parse_limit(opt_arg));
                 }else{
                     printf("Error: Missing argument for --memory-limit\n");
-                    exit(1);
+                    return 1;
                 }
             }else{
                 printf("Error: Unknown option: %s(%s)\n", opt ? &opt : "-", longopt ? longopt : "[unknown]");
-                exit(1);
+                return 1;
             }
         }
     }
 
     // rt init
     LJS_init_runtime(runtime);
-// #ifdef LJS_DEBUG
-//     JS_SetDumpFlags(runtime, JS_DUMP_GC | JS_DUMP_LEAKS | JS_DUMP_PROMISE | JS_DUMP_OBJECTS);
-// #endif
+#ifdef LJS_DEBUG
+    JS_SetDumpFlags(runtime, JS_DUMP_LEAKS | JS_DUMP_PROMISE | JS_DUMP_OBJECTS | JS_DUMP_SHAPES);
+#endif
 
     // app init
+    char* script_path = optind == argc 
+           ? strdup(get_current_dir_name()) 
+           : LJS_resolve_module(NULL ,argv[optind]);
+    if(!script_path){
+        printf("Failed to resolve module: %s\n", argv[optind]);
+        return 1;
+    }
     app = LJS_create_app(runtime, 
         argc == optind ? 0 : argc - optind -1, argc == optind ? NULL : argv + optind +1, 
-        false, true, optind == argc 
-           ? strdup(get_current_dir_name()) 
-           : LJS_resolve_module(NULL ,argv[optind])
-        , NULL
+        false, true, script_path, NULL
     );
     if(!app){
-        printf("Failed to resolve module: %s\n", argv[optind]);
+        printf("Failed to create app.\nMake sure you have enough memory.\n");
         return 1;
     }
     LJS_init_context(app);
@@ -191,7 +207,7 @@ int main(int argc, char **argv) {
         if(check || compile){
             printf("Could not use --check or --compile when running in REPL mode.\n");
             printf("If you want to check syntax or compile, please provide script name\n");
-            exit(1);
+            return 1;
         }
         printf("LightJS %s with QuickJS-NG %s\n", LJS_VERSION, JS_GetVersion());
         printf("Type \".help\" for usage. for more information, please access github wiki.\n");
@@ -221,20 +237,24 @@ int main(int argc, char **argv) {
         if(JS_IsException(ret_val)){
             LJS_dump_error(app -> ctx, JS_GetException(app -> ctx));
             printf("The script has syntax errors.\n");
-            exit(1);
+            return 1;
         }else{
             printf("The script has no syntax errors.\n");
-            exit(0);
+            return 0;
         }
     }
     
     if(compile){
         // -- to impl
         printf("Sorry, --compile option is not implemented yet.\n");
-        exit(0);
+        return 0;
     }
 
     LJS_evcore_set_memory(js_malloc_proxy, runtime);
+    
+    // for exit()
+    int ret_code = setjmp(exit_buf);
+    if(ret_code != 0) goto finalize;
 
     // eval
     JSValue ret_val = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE);
@@ -250,7 +270,12 @@ run_evloop:
     // LJS_destroy_app(app); // destroy app will cause SEGFAULT as <argv> is not able to free.
 
     // dispatch exit event
+finalize:
     LJS_dispatch_ev(app -> ctx, "exit", JS_UNDEFINED);
     run_jobs();
-    return 0;
+    LJS_destroy_app(app);
+    JS_FreeRuntime(runtime);
+    free(script_path);
+    if(ret_code < 0) ret_code = 0;
+    return ret_code;
 }
