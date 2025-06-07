@@ -1,4 +1,5 @@
 #include "core.h"
+#include "polyfill.h"
 #include "../engine/quickjs.h"
 #include "../engine/cutils.h"
 #include "../engine/quickjs-atom.h"
@@ -96,7 +97,7 @@ void print_jsvalue(JSContext *ctx, JSValueConst val, int depth, JSValue visited[
             fprintf(target_fd, ANSI_CYAN "NaN" ANSI_RESET);
         else
             fprintf(target_fd, ANSI_CYAN "%g" ANSI_RESET, num);
-    } else if (JS_IsBigInt(ctx, val)) {
+    } else if (JS_IsBigInt(val)) {
         const char *str = JS_ToCString(ctx, val);
         fprintf(target_fd, ANSI_CYAN "%s" ANSI_RESET ANSI_GREEN "n" ANSI_RESET, str);
         JS_FreeCString(ctx, str);

@@ -1,6 +1,7 @@
 #include "../engine/quickjs.h"
 #include "core.h"
 #include "utils.h"
+#include "polyfill.h"
 
 #include <stdbool.h>
 #include <stdint.h>

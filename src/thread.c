@@ -1,4 +1,5 @@
 #include "core.h"
+#include "polyfill.h"
 #include "../engine/quickjs.h"
 
 #include <pthread.h>

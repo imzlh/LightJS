@@ -25,6 +25,7 @@
 #include "../engine/quickjs.h"
 #include "../engine/cutils.h"
 #include "../engine/list.h"
+#include "polyfill.h"
 #include "core.h"
 #include "httpmeta.h"
 

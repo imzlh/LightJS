@@ -1995,7 +1995,6 @@ static inline EvFD* timer_new(uint64_t milliseconds, EvTimerCallback callback, v
     // 创建定时器对象
     tfd = malloc(sizeof(struct TimerFD));
     struct EvFD* evfd = (void*)tfd;
-    if(evfd == NULL) LJS_panic("malloc failed");
     INIT_EVFD(evfd);
     evfd -> task_based = true;
     tfd -> time = milliseconds;

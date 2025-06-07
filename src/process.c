@@ -1,7 +1,8 @@
 #include "../engine/quickjs.h"
 #include "../engine/cutils.h"
 #include "../engine/list.h"
-#include "./core.h"
+#include "polyfill.h"
+#include "core.h"
 
 #include <stdlib.h>
 #include <string.h>

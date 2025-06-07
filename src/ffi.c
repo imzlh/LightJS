@@ -8,6 +8,7 @@
 #include "../engine/quickjs.h"
 #include "utils.h"
 #include "core.h"
+#include "polyfill.h"
 
 #include <ffi.h>
 #include <pthread.h>
@@ -113,7 +114,7 @@ static inline int32_t guess_type(JSContext *ctx, JSValueConst val){
     if(JS_IsUndefined(val) || JS_IsNull(val)){
         return FFI_TYPE_VOID;
     }else if(JS_IsNumber(val)){
-        if(JS_IsBigInt(ctx, val)){
+        if(JS_IsBigInt(val)){
             return FFI_TYPE_SINT64;
         }
         double num;
