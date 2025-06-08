@@ -191,11 +191,6 @@ typedef struct {
     // module
     JSValue module_loader;
     JSValue module_format;
-
-    // signal handling
-    int event_fd;               /* for thread wakeup */
-    struct list_head signal_queue; /* pending signal events */
-    pthread_mutex_t signal_lock; /* protects signal_queue */
 } App;
 
 typedef struct SignalEvent {
@@ -254,17 +249,16 @@ typedef void (*DnsResponseCallback)(int total_records, dns_record** records, voi
 typedef void (*DnsErrorCallback)(const char* error_msg, void* user_data);
 
 // Core events
-void LJS_dispatch_ev(JSContext *ctx, const char * name, JSValue data);
-_Noreturn void LJS_exit(int ret_code);
+void js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data);
+_Noreturn void js_exit(int ret_code);
 
 // console
-void LJS_print_value(JSContext *ctx, JSValueConst val, FILE* target_fd);
+void js_dump(JSContext *ctx, JSValueConst val, FILE* target_fd);
 void js_handle_promise_reject(
     JSContext *ctx, JSValue promise,
     JSValue reason,
     bool is_handled, void *opaque
 );
-void LJS_dump_error(JSContext *ctx, JSValueConst exception);
 
 // exports
 extern EvFD *pstdin, *pstdout, *pstderr;
@@ -287,50 +281,50 @@ JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCal
 EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj);
 
 // Core event loop
-bool LJS_evcore_init();
-bool LJS_evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
-void LJS_evcore_destroy();
-EvFD* LJS_evcore_attach(int fd, bool use_aio, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
-void LJS_evcore_set_memory(void* (*allocator)(size_t, void*), void* opaque);
-EvFD* LJS_evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
-void LJS_evfd_setup_udp(EvFD* evfd);
-bool LJS_evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
-bool LJS_evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
-bool LJS_evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
-bool LJS_evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size, EvWriteCallback callback, void* user_data);
-bool LJS_evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size, const struct sockaddr *addr, socklen_t addr_len, EvWriteCallback callback, void* user_data);
-bool LJS_evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvPipeToNotify notify, void* nopaque);
-bool LJS_evfd_close(EvFD* evfd);
-bool LJS_evfd_close2(EvFD* evfd);
-bool LJS_evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
-bool LJS_evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque);
-bool LJS_evfd_wait2(EvFD* evfd, EvSyncCallback cb, void* opaque);
-bool LJS_evfd_shutdown(EvFD* evfd); // note: read all and then close
-bool LJS_evfd_closed(EvFD* evfd);
-bool LJS_evfd_clearbuf(EvFD* evfd);
-bool LJS_evfd_onclose(EvFD* fd, EvCloseCallback callback, void* user_data);
-bool LJS_evfd_finalizer(EvFD* evfd, EvFinalizerCallback callback, void* user_data);
-int LJS_evfd_getfd(EvFD* evfd, int* timer_fd);
-bool LJS_evfd_yield(EvFD* evfd, bool yield_read, bool yield_write);
-bool LJS_evfd_consume(EvFD* evfd, bool consume_read, bool consume_write);
-bool LJS_evfd_isAIO(EvFD* evfd);
-void* LJS_evfd_get_opaque(EvFD* evfd);
-void LJS_evfd_set_opaque(EvFD* evfd, void* opaque);
+bool evcore_init();
+bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
+void evcore_destroy();
+EvFD* evcore_attach(int fd, bool use_aio, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
+void evcore_set_memory(void* (*allocator)(size_t, void*), void* opaque);
+EvFD* evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
+void evfd_setup_udp(EvFD* evfd);
+bool evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
+bool evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
+bool evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
+bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size, EvWriteCallback callback, void* user_data);
+bool evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size, const struct sockaddr *addr, socklen_t addr_len, EvWriteCallback callback, void* user_data);
+bool evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvPipeToNotify notify, void* nopaque);
+bool evfd_close(EvFD* evfd);
+bool evfd_close2(EvFD* evfd);
+bool evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
+bool evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque);
+bool evfd_wait2(EvFD* evfd, EvSyncCallback cb, void* opaque);
+bool evfd_shutdown(EvFD* evfd); // note: read all and then close
+bool evfd_closed(EvFD* evfd);
+bool evfd_clearbuf(EvFD* evfd);
+bool evfd_onclose(EvFD* fd, EvCloseCallback callback, void* user_data);
+bool evfd_finalizer(EvFD* evfd, EvFinalizerCallback callback, void* user_data);
+int evfd_getfd(EvFD* evfd, int* timer_fd);
+bool evfd_yield(EvFD* evfd, bool yield_read, bool yield_write);
+bool evfd_consume(EvFD* evfd, bool consume_read, bool consume_write);
+bool evfd_isAIO(EvFD* evfd);
+void* evfd_get_opaque(EvFD* evfd);
+void evfd_set_opaque(EvFD* evfd, void* opaque);
 #ifdef LJS_MBEDTLS
-bool LJS_evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, bool is_client, int preset, EvSSLHandshakeCallback handshake_cb, void* user_data);
-void LJS_evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
-bool LJS_evfd_remove_sni(const char* name);
-bool LJS_evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config);
+bool evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, bool is_client, int preset, EvSSLHandshakeCallback handshake_cb, void* user_data);
+void evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
+bool evfd_remove_sni(const char* name);
+bool evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config);
 #endif
-EvFD* LJS_evcore_setTimeout(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
-EvFD* LJS_evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
-bool LJS_evcore_clearTimer(int timer_fd);
-bool LJS_evcore_clearTimer2(EvFD* evfd);
-EvFD* LJS_evcore_inotify(EvINotifyCallback callback, void* user_data);
-bool LJS_evcore_stop_inotify(EvFD* evfd);
-bool LJS_evcore_inotify_watch(EvFD* evfd, const char* path, uint32_t mask, int* wd);
-bool LJS_evcore_inotify_unwatch(EvFD* evfd, int wd);
-int LJS_evcore_inotify_find(EvFD* evfd, const char* path);
+EvFD* evcore_setTimeout(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
+EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
+bool evcore_clearTimer(int timer_fd);
+bool evcore_clearTimer2(EvFD* evfd);
+EvFD* evcore_inotify(EvINotifyCallback callback, void* user_data);
+bool evcore_stop_inotify(EvFD* evfd);
+bool evcore_inotify_watch(EvFD* evfd, const char* path, uint32_t mask, int* wd);
+bool evcore_inotify_unwatch(EvFD* evfd, int wd);
+int evcore_inotify_find(EvFD* evfd, const char* path);
 
 int js_run_promise_jobs(); // internal use
 bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback callback, void* opaque);
@@ -370,7 +364,8 @@ App* LJS_create_app(
 void LJS_init_context(App* app);
 App* LJS_NewWorker(App* parent, char* script_path);
 bool LJS_init_thread(JSContext* ctx);
-char* LJS_resolve_module(JSContext* ctx, const char* module_name);
+char* js_resolve_module(JSContext* ctx, const char* module_name);
+void js_set_import_meta(JSContext* ctx, JSValue func, const char* modname, bool main);
 
 // ffi
 bool LJS_init_ffi(JSContext *ctx);

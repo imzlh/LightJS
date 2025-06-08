@@ -101,7 +101,7 @@ main:
         if(S_ISDIR(st.st_mode)){
             // add /index.js
             char* index_fname = malloc(strlen(filename) + 10);
-            if (!index_fname) goto finalize;
+            if (!index_fname) goto memerror;
             strcpy(index_fname, filename);
             strcat(index_fname, "/index.js");
             free(filename);
@@ -111,18 +111,22 @@ main:
             *_filename = filename;
             return true;
         }else{ 
+            errno = EPROTONOSUPPORT;
             goto finalize;
         }
     }else{
         // add .js extension
         char* str_addjs = malloc(strlen(filename) + 4);
-        if (!str_addjs) goto finalize;
+        if (!str_addjs) goto memerror;
         strcpy(str_addjs, filename);
         strcat(str_addjs, ".js");
         free(filename);
         filename = str_addjs;
         goto main;
     }
+    
+memerror:
+    errno = ENOMEM;
 finalize:
     *_filename = NULL;
     return false;
@@ -183,6 +187,7 @@ static char* js_module_format(JSContext *ctx,
     }else if(module_name[0] == '.'){
         char* module_name_path = LJS_resolve_path(module_name, module_base_name);
         if(!resolve_module_path(&module_name_path)){
+            LJS_Throw(ctx, "Read file failed: %s", NULL, strerror(errno));
             free(module_name_path);
             return NULL;
         }
@@ -259,7 +264,7 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
             JS_PROP_C_W_E);
         if(!use_loader){
             char* real_path = realpath(module_name, NULL);
-            JS_DefinePropertyValueStr(ctx, meta_obj, "path",
+            JS_DefinePropertyValueStr(ctx, meta_obj, "url",
                 JS_NewString(ctx, real_path),
                 JS_PROP_C_W_E);
             JS_DefinePropertyValueStr(ctx, meta_obj, "filename",
@@ -268,15 +273,20 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
             JS_DefinePropertyValueStr(ctx, meta_obj, "dirname",
                 JS_NewString(ctx, dirname(real_path)),
                 JS_PROP_C_W_E);
+
+            JS_DefinePropertyValueStr(ctx, meta_obj, "main",
+                JS_FALSE,
+                JS_PROP_C_W_E);
             free(real_path);
         }
+        JS_FreeValue(ctx, meta_obj);
     }
 
     if(free_url) LJS_free_url(&url);
     return m;
 }
 
-char* LJS_resolve_module(JSContext* ctx, const char* module_name){
+char* js_resolve_module(JSContext* ctx, const char* module_name){
     if(ctx){
         return js_module_format(ctx, NULL, module_name, NULL);
     }else{
@@ -389,6 +399,7 @@ static inline void worker_exit(App* app, int code, const char* message){
 
     JSRuntime* rt = JS_GetRuntime(app -> ctx);
     worker_free_app(app);
+    evcore_destroy();
     JS_FreeRuntime(rt);
 
     // exit thread
@@ -398,12 +409,12 @@ static inline void worker_exit(App* app, int code, const char* message){
 static inline void push_message(App* from, App* to, struct list_head* list, JSValue arg){
     // clone arg
     size_t size;
-    void* data = JS_WriteObject(from->ctx, &size, arg, 
+    void* data = JS_WriteObject(from -> ctx, &size, arg, 
         JS_WRITE_OBJ_BYTECODE | JS_WRITE_OBJ_REFERENCE | JS_WRITE_OBJ_SAB
     );
     if (!data) return;
 
-    JSValue obj = JS_ReadObject(to->ctx, data, size, 
+    JSValue obj = JS_ReadObject(to -> ctx, data, size, 
         JS_READ_OBJ_BYTECODE | JS_READ_OBJ_REFERENCE | JS_READ_OBJ_SAB
     );
     free(data);
@@ -413,12 +424,12 @@ static inline void push_message(App* from, App* to, struct list_head* list, JSVa
     }
 
     struct WorkerMessage* msg = malloc(sizeof(struct WorkerMessage));
-    msg->arg = obj;
+    msg -> arg = obj;
     
-    pthread_mutex_lock(&to->worker->lock);
-    init_list_head(&msg->list);
-    list_add_tail(list, &msg->list);
-    pthread_mutex_unlock(&to->worker->lock);
+    pthread_mutex_lock(&to -> worker -> lock);
+    init_list_head(&msg -> list);
+    list_add_tail(list, &msg -> list);
+    pthread_mutex_unlock(&to -> worker -> lock);
 }
 
 
@@ -497,8 +508,8 @@ void LJS_destroy_app(App* app) {
     if (app -> worker) {
         struct Worker_Props* wel = app -> worker;
         // 关闭eventfd文件描述符
-        LJS_evfd_close2(wel -> efd_worker2main.worker);
-        LJS_evfd_close(wel -> efd_main2worker.worker);
+        evfd_close2(wel -> efd_worker2main.worker);
+        evfd_close(wel -> efd_main2worker.worker);
         
         // remove lock
         pthread_mutex_destroy(&wel -> lock);
@@ -541,10 +552,6 @@ void LJS_destroy_app(App* app) {
     }
     if (!JS_IsUndefined(app -> module_format)) {
         JS_FreeValue(app -> ctx, app -> module_format);
-    }
-
-    if (LJS_IsMainContext(app -> ctx)){
-        LJS_evcore_destroy();
     }
 
     if (app -> ctx) {
@@ -605,8 +612,8 @@ static int worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size
 // for worker thread
 static void worker_close_callback(EvFD* fd, void* user_data){
     struct Worker_Props* wel = ((App*)user_data) -> worker;
-    LJS_evfd_close(wel -> efd_worker2main.worker);
-    LJS_evfd_close2(wel -> efd_main2worker.worker);
+    evfd_close(wel -> efd_worker2main.worker);
+    evfd_close2(wel -> efd_main2worker.worker);
     worker_exit((App*)user_data, 0, "worker closed");
 }
 
@@ -685,25 +692,25 @@ static void main_close_callback(EvFD* fd, void* user_data){
     }
 
     // close fd
-    LJS_evfd_close2(app -> worker -> efd_worker2main.main);
-    LJS_evfd_close(app -> worker -> efd_main2worker.main);
+    evfd_close2(app -> worker -> efd_worker2main.main);
+    evfd_close(app -> worker -> efd_main2worker.main);
 }
 
 static void worker_main_loop(App* app, JSValue func){
     JSContext* ctx = app -> ctx;
 
     // 初始化epoll
-    LJS_evcore_init();
+    evcore_init();
 
     // 监听pipe
     app -> worker -> efd_main2worker.worker = 
-        LJS_evcore_attach(app -> worker -> efd_main2worker.fd, false, 
+        evcore_attach(app -> worker -> efd_main2worker.fd, false, 
             worker_message_callback, app,
             NULL, NULL,
             worker_close_callback, app
         );
     app -> worker -> efd_worker2main.worker = 
-        LJS_evcore_attach(app -> worker -> efd_worker2main.fd, false, 
+        evcore_attach(app -> worker -> efd_worker2main.fd, false, 
             NULL, NULL,
             worker_writeable_callback, app,
             NULL, NULL
@@ -717,7 +724,7 @@ static void worker_main_loop(App* app, JSValue func){
     JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
     if(JS_IsException(ret)){
         JSValue error = JS_GetException(ctx);
-        LJS_dump_error(ctx, error);
+        js_dump(ctx, error, stderr);
 
         const char* message = JS_ToCString(ctx, error);
         char* space = malloc(strlen(message) + 39);
@@ -727,7 +734,7 @@ static void worker_main_loop(App* app, JSValue func){
     }
 
     // 启动事件循环
-    LJS_evcore_run(NULL, NULL);
+    evcore_run(NULL, NULL);
 }
 
 void LJS_init_runtime(JSRuntime* rt){
@@ -785,11 +792,29 @@ void LJS_init_context(App* app){
     }
 }
 
+void js_set_import_meta(JSContext* ctx, JSValue func, const char* modname, bool main){
+    App* app = JS_GetContextOpaque(ctx);
+    char* path = js_strdup(ctx, app -> script_path);
+    JSValue meta = JS_GetImportMeta(app -> ctx, (JSModuleDef*)JS_VALUE_GET_PTR(func));
+    JS_SetPropertyStr(app -> ctx, meta, "name", JS_NewString(app -> ctx, modname));
+    JS_SetPropertyStr(app -> ctx, meta, "url", JS_NewString(app -> ctx, app -> script_path));
+    JS_SetPropertyStr(app -> ctx, meta, "main", JS_NewBool(app -> ctx, main));
+    JS_SetPropertyStr(app -> ctx, meta, "dirname", JS_NewString(app -> ctx, dirname(path))); // dirname will change source string
+    JS_SetPropertyStr(app -> ctx, meta, "filename", JS_NewString(app -> ctx, basename(app -> script_path)));
+    js_free(ctx, path);
+    JS_FreeValue(app -> ctx, meta);
+}
+
 static void* worker_entry(void* arg){
     App* app = (App*)arg;
 
-    // 加载入口
+    // init
+    evcore_init();
+
+    // eval script
     uint32_t buf_len;
+    char* raw_name = js_strdup(app -> ctx, app -> script_path);
+    // Note: LJS_tryGetJSFile will change app -> script_path
     uint8_t* buf = LJS_tryGetJSFile(&buf_len, &app -> script_path);
     if(!buf){
         worker_exit(app, 1, "load script failed");
@@ -802,10 +827,9 @@ static void* worker_entry(void* arg){
 
     // import.meta
     if(app -> module){
-        JSValue meta = JS_GetImportMeta(app -> ctx, (JSModuleDef*)JS_VALUE_GET_PTR(func));
-        JS_SetPropertyStr(app -> ctx, meta, "url", JS_NewString(app -> ctx, app -> script_path));
-        JS_SetPropertyStr(app -> ctx, meta, "main", JS_TRUE);
+        js_set_import_meta(app -> ctx, func, raw_name, true);
     }
+    js_free(app -> ctx, raw_name);
 
     worker_main_loop(app, func);
     JS_FreeValue(app -> ctx, func);
@@ -855,8 +879,8 @@ static JSValue js_worker_close(JSContext* ctx, JSValueConst this_val, int argc, 
     if(!app) return JS_UNDEFINED;
 
     // Note: close main-thread to worker pipe, but remain another to main-thread.
-    LJS_evfd_close(app -> worker -> efd_main2worker.main);
-    LJS_evfd_close2(app -> worker -> efd_worker2main.main);
+    evfd_close(app -> worker -> efd_main2worker.main);
+    evfd_close2(app -> worker -> efd_worker2main.main);
 
     JS_SetOpaque(this_val, NULL);
     return JS_UNDEFINED;
@@ -936,13 +960,13 @@ static JSValue js_worker_ctor(JSContext* ctx, JSValueConst new_target, int argc,
 
     // evloop
     app -> worker -> efd_worker2main.main =
-        LJS_evcore_attach(app -> worker -> efd_worker2main.fd, false, 
+        evcore_attach(app -> worker -> efd_worker2main.fd, false, 
             main_message_callback, app,
             NULL, NULL,
             main_close_callback, app
         );
     app -> worker -> efd_main2worker.main =
-        LJS_evcore_attach(app -> worker -> efd_main2worker.fd, false,
+        evcore_attach(app -> worker -> efd_main2worker.fd, false,
             NULL, NULL,
             main_writeable_callback, app,
             NULL, NULL
@@ -1063,7 +1087,7 @@ static JSValue js_timer_delay(JSContext* ctx, JSValueConst this_val, int argc, J
         return LJS_Throw(ctx, "Timer.delay takes a non-zero delay_time", NULL);
     }
 
-    LJS_evcore_setTimeout(delay_time, timer_callback, timer);
+    evcore_setTimeout(delay_time, timer_callback, timer);
 
     return promise -> promise;
 }
@@ -1084,9 +1108,9 @@ static JSValue js_timer_timeout(JSContext* ctx, JSValueConst this_val, int argc,
     timer -> resolve = callback;
     timer -> once = true;
 
-    EvFD* fd = LJS_evcore_setTimeout(delay_time, timer_callback, timer);
+    EvFD* fd = evcore_setTimeout(delay_time, timer_callback, timer);
 
-    return JS_NewUint32(ctx, LJS_evfd_getfd(fd, NULL));
+    return JS_NewUint32(ctx, evfd_getfd(fd, NULL));
 }
 
 static JSValue js_timer_interval(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
@@ -1105,9 +1129,9 @@ static JSValue js_timer_interval(JSContext* ctx, JSValueConst this_val, int argc
     timer -> resolve = callback;
     timer -> once = false;
 
-    EvFD* fd = LJS_evcore_interval(interval_time, timer_callback, timer);
+    EvFD* fd = evcore_interval(interval_time, timer_callback, timer);
 
-    return JS_NewUint32(ctx, LJS_evfd_getfd(fd, NULL));
+    return JS_NewUint32(ctx, evfd_getfd(fd, NULL));
 }
 
 static JSValue js_timer_clear(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
@@ -1117,7 +1141,7 @@ static JSValue js_timer_clear(JSContext* ctx, JSValueConst this_val, int argc, J
     
     int id;
     if(-1 == JS_ToInt32(ctx, &id, argv[0])) return JS_EXCEPTION;
-    return JS_NewBool(ctx, LJS_evcore_clearTimer(id));
+    return JS_NewBool(ctx, evcore_clearTimer(id));
 }
 
 const JSCFunctionListEntry js_timer_funcs[] = {

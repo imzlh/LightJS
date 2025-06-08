@@ -26,6 +26,7 @@
 #define DEF(name, flag) JS_PROP_INT32_DEF(#name, flag, JS_PROP_CONFIGURABLE)
 #define RB_MALLOC 1 << 9
 #define RB_FROM_ARG 2 << 9
+static JSValue js_ffi_type_helper_ptr(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 const JSCFunctionListEntry js_ffi_types[] = {
     DEF(AUTO, -1),
     DEF(VOID, FFI_TYPE_VOID),
@@ -47,6 +48,8 @@ const JSCFunctionListEntry js_ffi_types[] = {
     DEF(R_STRING, 1 << 8),  // \0 terminated string
     DEF(R_BUFFER_MALLOC, RB_MALLOC),     // malloced buffer
     DEF(R_BUFFER_FROM_ARG, RB_FROM_ARG), // from JSValue TypedArray
+
+    JS_CFUNC_DEF("PTR", 1, js_ffi_type_helper_ptr)
 };
 
 enum ARG_GCFLAG {
@@ -61,14 +64,7 @@ pthread_mutex_t ffi_mutex;
 pthread_t running_thread;
 char* info;
 static thread_local jmp_buf jump_buf;
-
 static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
-    if(!running_thread){
-        // Not in FFI thread
-        raise(SIGTRAP);
-        exit(1);
-    }
-
     // generate error message
     info = malloc(
 #ifdef LJS_DEBUG
@@ -100,9 +96,17 @@ static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
     free(bt_str);
 #endif
 
-    pthread_mutex_unlock(&ffi_mutex);
-    pthread_kill(running_thread, SIGUSR2);
-    running_thread = NULL;
+    if(running_thread){
+        pthread_mutex_unlock(&ffi_mutex);
+        pthread_kill(running_thread, SIGUSR2);
+        running_thread = NULL;
+    }else{
+        // Not in FFI thread
+        printf("program received unhandled %s\n", info);
+        free(info);
+        raise(SIGTRAP);
+        exit(1);
+    }
 }
 
 static void inthread_sighandler(int sig, siginfo_t *_info, void *ucontext){
@@ -126,7 +130,7 @@ static inline int32_t guess_type(JSContext *ctx, JSValueConst val){
         }else{
             return FFI_TYPE_DOUBLE;
         }
-    }else if(JS_IsString(val) || JS_GetTypedArrayType(val) != -1){
+    }else if(JS_IsString(val) || JS_IsTypedArray(ctx, val)){
         return FFI_TYPE_POINTER;
     }else if(JS_IsBool(val)){
         return FFI_TYPE_UINT8;
@@ -140,8 +144,8 @@ static inline int32_t guess_type(JSContext *ctx, JSValueConst val){
 static JSValue js_ffi_get_buffer_from_ptr(JSContext *ctx, JSValue this_val, int argc, JSValueConst *argv, int magic, JSValue *func_data){
     uint8_t* ptr = JS_VALUE_GET_PTR(func_data[0]);
 
-    uint64_t len;
-    if(argc == 0 || -1 == JS_ToBigUint64(ctx, &len, argv[0])){
+    int64_t len;
+    if(argc == 0 || -1 == JS_ToInt64Ext(ctx, &len, argv[0])){
         return LJS_Throw(ctx, "The buffer size is required", "dlopen(...).call(...)(size: number, share?: boolean)");
     }
     
@@ -155,9 +159,20 @@ static JSValue js_ffi_get_buffer_from_ptr(JSContext *ctx, JSValue this_val, int 
     return JS_NewArrayBuffer(ctx, ptr, len, free_func, NULL, share);
 }
 
+static JSValue js_ffi_type_helper_ptr(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    if(argc == 0) return JS_NewInt32(ctx, FFI_TYPE_POINTER);
+    const char* name = LJS_ToCString(ctx, argv[0], NULL);
+    int ret;
+    if(!name) ret = FFI_TYPE_POINTER;
+    else if(strcmp(name, "free") == 0) ret = FFI_TYPE_POINTER | RB_MALLOC;
+    else if(strcmp(name, "jsfree") == 0) ret = FFI_TYPE_POINTER | RB_FROM_ARG;
+    else return LJS_Throw(ctx, "Invalid type name", "types.PTR(type?: 'free' | 'jsfree'): FFIType");
+    return JS_NewInt32(ctx, ret);
+}
+
 // this_val: type, args: to ffi func
 static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic, JSValue *func_data) {
-    if(argc == 1 && JS_IsNull(argv[0])) {
+    if(argc == 0 || JS_IsUndefined(this_val) || (argc == 1 && (JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])))) {
         // close
         if(dlclose(JS_VALUE_GET_PTR(func_data[0])) == 0) 
             return JS_UNDEFINED;
@@ -177,16 +192,21 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
     JSValue ret_type = JS_GetPropertyUint32(ctx, this_val, 0);
     int32_t ret_type_num;
     if(JS_ToInt32(ctx, &ret_type_num, ret_type) == -1){
+        JS_FreeValue(ctx, ret_type);
         return LJS_Throw(ctx, "The return type(this[0]) is invaild. Expect a number(type.XXX)", NULL);
     }
+    JS_FreeValue(ctx, ret_type);
 
     // function name and find the function
     JSValue func_name = JS_GetPropertyUint32(ctx, this_val, 1);
-    const char *func_name_str = JS_ToCString(ctx, func_name);
-    if(!func_name_str)
+    const char *func_name_str = LJS_ToCString(ctx, func_name, NULL);
+    if(!func_name_str){
+        JS_FreeValue(ctx, func_name);
         return LJS_Throw(ctx, "The function name(this[1]) is invaild. Expect a string", NULL);
+    }
     void* func = dlsym(JS_VALUE_GET_PTR(func_data[0]), func_name_str);
     JS_FreeCString(ctx, func_name_str);
+    JS_FreeValue(ctx, func_name);
     if(!func){
         return LJS_Throw(ctx, "Failed to find function: %s", NULL, func_name_str);
     }
@@ -204,8 +224,10 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
         JSValue val = JS_GetPropertyUint32(ctx, this_val, i+2);
         int32_t type;
         if(JS_ToInt32(ctx, &type, val) == -1){
+            JS_FreeValue(ctx, val);
             return LJS_Throw(ctx, "The type of this arg is invaild. Expect a number(type.XXX)", NULL);
         }
+        JS_FreeValue(ctx, val);
 
         // typecheck
         if(argc -1 >= i){

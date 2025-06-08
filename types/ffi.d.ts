@@ -16,6 +16,9 @@ type _UINT64 = 12;
 type _SINT64 = 13;
 type _POINTER = 14;
 type _R_PTR = 15;
+type _RM_STRING = 16;
+type _RM_BUFFER_MALLOC = 17;
+type _RM_BUFFER_FROM_ARG = 18;
 
 interface CTypes {
     AUTO: _AUTO;
@@ -33,7 +36,12 @@ interface CTypes {
     UINT64: _UINT64;
     SINT64: _SINT64;
     POINTER: _R_PTR;
-    R_PTR: (flag?: "free" | "jsfree" | undefined) => _R_PTR;
+
+    // 注意： 如果需要释放C函数内malloc的内存使用R_PTR("free")，传入的ArrayBuffer/TypedArray则需要使用R_PTR("jsfree")
+    R_STRING: _RM_STRING;
+    R_BUFFER_MALLOC: _RM_BUFFER_MALLOC;
+    R_BUFFER_FROM_ARG: _RM_BUFFER_FROM_ARG;
+    PTR: (flag?: "free" | "jsfree" | undefined) => _R_PTR;
 }
 
 type CTypesVal = _AUTO | _VOID | _INT | _FLOAT | _DOUBLE | _LONGDOUBLE | _UINT8 | _SINT8 | _UINT16 | _SINT16 | _UINT32 | _SINT32 | _UINT64 | _SINT64 | _POINTER | _R_PTR;
@@ -61,16 +69,35 @@ type InferTuple<T extends any[]> = {
     [K in keyof T]: InferFrom<T[K]>;
 };
 
-type Handler = <R extends CTypesVal, P extends (CTypesVal)[], T extends [R, string, ...P]>(this: T, ...args: InferTuple<P>) => InferFrom<R>;
+type Handler = <R extends CTypesVal, P extends (CTypesVal)[], T extends [R, string, ...P]>(this: T, ...args: InferTuple<P>) => InferFrom<R>
 
 declare module 'ffi' {
     export interface DLHandler extends Handler {
+        /**
+         * 推荐做法：绑定类型和函数名，方便后续调用。自动类型推导，减少类型定义。
+         */
         bind<R extends CTypesVal, P extends CTypesVal[]>(
             thisArg: [R, string, ...P]
         ): (...args: InferTuple<P>) => InferFrom<R>;
     }
     
+    /**
+     * 打开一个动态库，通常是.so文件
+     * 通过这个函数后，注意需要手动释放资源，否则会造成内存泄漏
+     * @example - 打开一个动态库
+     * ```typescript
+     * const lib = ffi.dlopen("./libtest.so");  // 返回一个JS函数
+     * // 绑定thisArg，第一个参数是返回值类型，第二个参数是函数名，后面是参数类型
+     * const add = lib.bind([types.INT, "test_add", types.INT, types.INT]);
+     * add(1, 2);  // 调用动态库的test_add函数，传入参数1和2，返回3
+     * // 同样的，使用指针则需要额外处理，防止资源泄漏(小心！)
+     * const malloc = lib.bind([types.PTR("free"), "test_malloc", types.INT]);
+     * malloc(10); // 调用动态库的test_malloc函数，传入参数10，返回一个ArrayBuffer
+     * // @ts-ignore 忽略类型推导
+     * lib();      // 不传参数或NULL，或者this是undefined(没传)，释放动态库资源
+     * ```
+     * @param path 动态库的路径
+     */
     export function dlopen(path: string): DLHandler;
     export const types: CTypes;
 }
-

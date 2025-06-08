@@ -1307,11 +1307,11 @@ static void add_gc_object(JSRuntime *rt, JSGCObjectHeader *h,
                           JSGCObjectTypeEnum type);
 static void remove_gc_object(JSGCObjectHeader *h);
 static void js_async_function_free0(JSRuntime *rt, JSAsyncFunctionData *s);
-// static JSValue js_instantiate_prototype(JSContext *ctx, JSObject *p, JSAtom atom, void *opaque);
-// static JSValue js_module_ns_autoinit(JSContext *ctx, JSObject *p, JSAtom atom,
-//                                  void *opaque);
-// static JSValue JS_InstantiateFunctionListItem2(JSContext *ctx, JSObject *p,
-//                                                JSAtom atom, void *opaque);
+static JSValue js_instantiate_prototype(JSContext *ctx, JSObject *p, JSAtom atom, void *opaque);
+static JSValue js_module_ns_autoinit(JSContext *ctx, JSObject *p, JSAtom atom,
+                                 void *opaque);
+static JSValue JS_InstantiateFunctionListItem2(JSContext *ctx, JSObject *p,
+                                               JSAtom atom, void *opaque);
 
 static void js_set_uncatchable_error(JSContext *ctx, JSValueConst val,
                                      bool flag);
@@ -5390,26 +5390,26 @@ JSValue JS_NewCFunctionData(JSContext *ctx, JSCFunctionData *func,
     return func_obj;
 }
 
-// static JSContext *js_autoinit_get_realm(JSProperty *pr)
-// {
-//     return (JSContext *)(pr->u.init.realm_and_id & ~3);
-// }
+static JSContext *js_autoinit_get_realm(JSProperty *pr)
+{
+    return (JSContext *)(pr->u.init.realm_and_id & ~3);
+}
 
-// static JSAutoInitIDEnum js_autoinit_get_id(JSProperty *pr)
-// {
-//     return pr->u.init.realm_and_id & 3;
-// }
+static JSAutoInitIDEnum js_autoinit_get_id(JSProperty *pr)
+{
+    return pr->u.init.realm_and_id & 3;
+}
 
-// static void js_autoinit_free(JSRuntime *rt, JSProperty *pr)
-// {
-//     JS_FreeContext(js_autoinit_get_realm(pr));
-// }
+static void js_autoinit_free(JSRuntime *rt, JSProperty *pr)
+{
+    JS_FreeContext(js_autoinit_get_realm(pr));
+}
 
-// static void js_autoinit_mark(JSRuntime *rt, JSProperty *pr,
-//                              JS_MarkFunc *mark_func)
-// {
-//     mark_func(rt, &js_autoinit_get_realm(pr)->header);
-// }
+static void js_autoinit_mark(JSRuntime *rt, JSProperty *pr,
+                             JS_MarkFunc *mark_func)
+{
+    mark_func(rt, &js_autoinit_get_realm(pr)->header);
+}
 
 static void free_property(JSRuntime *rt, JSProperty *pr, int prop_flags)
 {
@@ -5421,8 +5421,8 @@ static void free_property(JSRuntime *rt, JSProperty *pr, int prop_flags)
                 JS_FreeValueRT(rt, JS_MKPTR(JS_TAG_OBJECT, pr->u.getset.setter));
         } else if ((prop_flags & JS_PROP_TMASK) == JS_PROP_VARREF) {
             free_var_ref(rt, pr->u.var_ref);
-        // } else if ((prop_flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-        //     js_autoinit_free(rt, pr);
+        } else if ((prop_flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
+            js_autoinit_free(rt, pr);
         }
     } else {
         JS_FreeValueRT(rt, pr->u.value);
@@ -5871,8 +5871,8 @@ static void mark_children(JSRuntime *rt, JSGCObjectHeader *gp,
                                    provided it is a GC object */
                                 mark_func(rt, &pr->u.var_ref->header);
                             }
-                        // } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-                        //     js_autoinit_mark(rt, pr, mark_func);
+                        } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
+                            js_autoinit_mark(rt, pr, mark_func);
                         }
                     } else {
                         JS_MarkValue(rt, pr->u.value, mark_func);
@@ -7466,85 +7466,85 @@ int JS_IsInstanceOf(JSContext *ctx, JSValueConst val, JSValueConst obj)
     return JS_OrdinaryIsInstanceOf(ctx, val, obj);
 }
 
-// #include "builtin-array-fromasync.h"
+#include "builtin-array-fromasync.h"
 
-// static JSValue js_bytecode_autoinit(JSContext *ctx, JSObject *p, JSAtom atom,
-//                                     void *opaque)
-// {
-//     switch ((uintptr_t)opaque) {
-//     default:
-//         abort();
-//     case JS_BUILTIN_ARRAY_FROMASYNC:
-//         {
-//             JSValue obj = JS_ReadObject(ctx, qjsc_builtin_array_fromasync,
-//                                         sizeof(qjsc_builtin_array_fromasync),
-//                                         JS_READ_OBJ_BYTECODE);
-//             if (JS_IsException(obj))
-//                 return JS_EXCEPTION;
-//             JSValue fun = JS_EvalFunction(ctx, obj);
-//             if (JS_IsException(fun))
-//                 return JS_EXCEPTION;
-//             assert(JS_IsFunction(ctx, fun));
-//             JSValue args[] = {
-//                 JS_NewCFunction(ctx, js_array_constructor, "Array", 0),
-//                 JS_NewCFunctionMagic(ctx, js_error_constructor, "TypeError", 1,
-//                                      JS_CFUNC_constructor_or_func_magic,
-//                                      JS_TYPE_ERROR),
-//                 JS_AtomToValue(ctx, JS_ATOM_Symbol_asyncIterator),
-//                 JS_NewCFunctionMagic(ctx, js_object_defineProperty,
-//                                      "Object.defineProperty", 3,
-//                                      JS_CFUNC_generic_magic, 0),
-//                 JS_AtomToValue(ctx, JS_ATOM_Symbol_iterator),
-//             };
-//             JSValue result = JS_Call(ctx, fun, JS_UNDEFINED,
-//                                      countof(args), vc(args));
-//             for (size_t i = 0; i < countof(args); i++)
-//                 JS_FreeValue(ctx, args[i]);
-//             JS_FreeValue(ctx, fun);
-//             if (JS_SetPrototypeInternal(ctx, result, ctx->function_proto,
-//                                         /*throw_flag*/true) < 0) {
-//                 JS_FreeValue(ctx, result);
-//                 return JS_EXCEPTION;
-//             }
-//             return result;
-//         }
-//     }
-//     return JS_UNDEFINED;
-// }
+static JSValue js_bytecode_autoinit(JSContext *ctx, JSObject *p, JSAtom atom,
+                                    void *opaque)
+{
+    switch ((uintptr_t)opaque) {
+    default:
+        abort();
+    case JS_BUILTIN_ARRAY_FROMASYNC:
+        {
+            JSValue obj = JS_ReadObject(ctx, qjsc_builtin_array_fromasync,
+                                        sizeof(qjsc_builtin_array_fromasync),
+                                        JS_READ_OBJ_BYTECODE);
+            if (JS_IsException(obj))
+                return JS_EXCEPTION;
+            JSValue fun = JS_EvalFunction(ctx, obj);
+            if (JS_IsException(fun))
+                return JS_EXCEPTION;
+            assert(JS_IsFunction(ctx, fun));
+            JSValue args[] = {
+                JS_NewCFunction(ctx, js_array_constructor, "Array", 0),
+                JS_NewCFunctionMagic(ctx, js_error_constructor, "TypeError", 1,
+                                     JS_CFUNC_constructor_or_func_magic,
+                                     JS_TYPE_ERROR),
+                JS_AtomToValue(ctx, JS_ATOM_Symbol_asyncIterator),
+                JS_NewCFunctionMagic(ctx, js_object_defineProperty,
+                                     "Object.defineProperty", 3,
+                                     JS_CFUNC_generic_magic, 0),
+                JS_AtomToValue(ctx, JS_ATOM_Symbol_iterator),
+            };
+            JSValue result = JS_Call(ctx, fun, JS_UNDEFINED,
+                                     countof(args), vc(args));
+            for (size_t i = 0; i < countof(args); i++)
+                JS_FreeValue(ctx, args[i]);
+            JS_FreeValue(ctx, fun);
+            if (JS_SetPrototypeInternal(ctx, result, ctx->function_proto,
+                                        /*throw_flag*/true) < 0) {
+                JS_FreeValue(ctx, result);
+                return JS_EXCEPTION;
+            }
+            return result;
+        }
+    }
+    return JS_UNDEFINED;
+}
 
-// /* return the value associated to the autoinit property or an exception */
-// typedef JSValue JSAutoInitFunc(JSContext *ctx, JSObject *p, JSAtom atom, void *opaque);
+/* return the value associated to the autoinit property or an exception */
+typedef JSValue JSAutoInitFunc(JSContext *ctx, JSObject *p, JSAtom atom, void *opaque);
 
-// static JSAutoInitFunc *const js_autoinit_func_table[] = {
-//     js_instantiate_prototype, /* JS_AUTOINIT_ID_PROTOTYPE */
-//     js_module_ns_autoinit, /* JS_AUTOINIT_ID_MODULE_NS */
-//     JS_InstantiateFunctionListItem2, /* JS_AUTOINIT_ID_PROP */
-//     js_bytecode_autoinit, /* JS_AUTOINIT_ID_BYTECODE */
-// };
+static JSAutoInitFunc *const js_autoinit_func_table[] = {
+    js_instantiate_prototype, /* JS_AUTOINIT_ID_PROTOTYPE */
+    js_module_ns_autoinit, /* JS_AUTOINIT_ID_MODULE_NS */
+    JS_InstantiateFunctionListItem2, /* JS_AUTOINIT_ID_PROP */
+    js_bytecode_autoinit, /* JS_AUTOINIT_ID_BYTECODE */
+};
 
-// /* warning: 'prs' is reallocated after it */
-// static int JS_AutoInitProperty(JSContext *ctx, JSObject *p, JSAtom prop,
-//                                JSProperty *pr, JSShapeProperty *prs)
-// {
-//     JSValue val;
-//     JSContext *realm;
-//     JSAutoInitFunc *func;
+/* warning: 'prs' is reallocated after it */
+static int JS_AutoInitProperty(JSContext *ctx, JSObject *p, JSAtom prop,
+                               JSProperty *pr, JSShapeProperty *prs)
+{
+    JSValue val;
+    JSContext *realm;
+    JSAutoInitFunc *func;
 
-//     if (js_shape_prepare_update(ctx, p, &prs))
-//         return -1;
+    if (js_shape_prepare_update(ctx, p, &prs))
+        return -1;
 
-//     realm = js_autoinit_get_realm(pr);
-//     func = js_autoinit_func_table[js_autoinit_get_id(pr)];
-//     /* 'func' shall not modify the object properties 'pr' */
-//     val = func(realm, p, prop, pr->u.init.opaque);
-//     js_autoinit_free(ctx->rt, pr);
-//     prs->flags &= ~JS_PROP_TMASK;
-//     pr->u.value = JS_UNDEFINED;
-//     if (JS_IsException(val))
-//         return -1;
-//     pr->u.value = val;
-//     return 0;
-// }
+    realm = js_autoinit_get_realm(pr);
+    func = js_autoinit_func_table[js_autoinit_get_id(pr)];
+    /* 'func' shall not modify the object properties 'pr' */
+    val = func(realm, p, prop, pr->u.init.opaque);
+    js_autoinit_free(ctx->rt, pr);
+    prs->flags &= ~JS_PROP_TMASK;
+    pr->u.value = JS_UNDEFINED;
+    if (JS_IsException(val))
+        return -1;
+    pr->u.value = val;
+    return 0;
+}
 
 static JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
                                       JSAtom prop, JSValueConst this_obj,
@@ -7609,13 +7609,12 @@ static JSValue JS_GetPropertyInternal(JSContext *ctx, JSValueConst obj,
                     if (unlikely(JS_IsUninitialized(val)))
                         return JS_ThrowReferenceErrorUninitialized(ctx, prs->atom);
                     return js_dup(val);
+                } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
+                    /* Instantiate property and retry */
+                    if (JS_AutoInitProperty(ctx, p, prop, pr, prs))
+                        return JS_EXCEPTION;
+                    continue;
                 }
-                // } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-                //     /* Instantiate property and retry */
-                //     if (JS_AutoInitProperty(ctx, p, prop, pr, prs))
-                //         return JS_EXCEPTION;
-                //     continue;
-                // }
             } else {
                 return js_dup(pr->u.value);
             }
@@ -8137,7 +8136,7 @@ static int JS_GetOwnPropertyInternal(JSContext *ctx, JSPropertyDescriptor *desc,
     JSShapeProperty *prs;
     JSProperty *pr;
 
-// retry:
+retry:
     prs = find_own_property(&pr, p, prop);
     if (prs) {
         if (desc) {
@@ -8159,13 +8158,12 @@ static int JS_GetOwnPropertyInternal(JSContext *ctx, JSPropertyDescriptor *desc,
                         return -1;
                     }
                     desc->value = js_dup(val);
+                } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
+                    /* Instantiate property and retry */
+                    if (JS_AutoInitProperty(ctx, p, prop, pr, prs))
+                        return -1;
+                    goto retry;
                 }
-                // } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-                //     /* Instantiate property and retry */
-                //     if (JS_AutoInitProperty(ctx, p, prop, pr, prs))
-                //         return -1;
-                //     goto retry;
-                // }
             } else {
                 desc->value = js_dup(pr->u.value);
             }
@@ -8176,7 +8174,7 @@ static int JS_GetOwnPropertyInternal(JSContext *ctx, JSPropertyDescriptor *desc,
                     JS_ThrowReferenceErrorUninitialized(ctx, prs->atom);
                     return -1;
                 }
-            // } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
+            } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
                 /* nothing to do: delay instantiation until actual value and/or attributes are read */
             }
         }
@@ -8875,7 +8873,7 @@ static int JS_SetPropertyInternal2(JSContext *ctx, JSValueConst obj, JSAtom prop
         goto prototype_lookup;
     }
 
-// retry:
+retry:
     prs = find_own_property(&pr, p1, prop);
     if (prs) {
         if (likely((prs->flags & (JS_PROP_TMASK | JS_PROP_WRITABLE |
@@ -8897,11 +8895,11 @@ static int JS_SetPropertyInternal2(JSContext *ctx, JSValueConst obj, JSAtom prop
                 goto read_only_prop;
             set_value(ctx, pr->u.var_ref->pvalue, val);
             return true;
-        // } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-        //     /* Instantiate property and retry (potentially useless) */
-        //     if (JS_AutoInitProperty(ctx, p, prop, pr, prs))
-        //         goto fail;
-        //     goto retry;
+        } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
+            /* Instantiate property and retry (potentially useless) */
+            if (JS_AutoInitProperty(ctx, p, prop, pr, prs))
+                goto fail;
+            goto retry;
         } else {
             goto read_only_prop;
         }
@@ -9002,11 +9000,11 @@ static int JS_SetPropertyInternal2(JSContext *ctx, JSValueConst obj, JSAtom prop
         if (prs) {
             if ((prs->flags & JS_PROP_TMASK) == JS_PROP_GETSET) {
                 return call_setter(ctx, pr->u.getset.setter, this_obj, val, flags);
-            // } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-            //     /* Instantiate property and retry (potentially useless) */
-            //     if (JS_AutoInitProperty(ctx, p1, prop, pr, prs))
-            //         return -1;
-            //     goto retry2;
+            } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
+                /* Instantiate property and retry (potentially useless) */
+                if (JS_AutoInitProperty(ctx, p1, prop, pr, prs))
+                    return -1;
+                goto retry2;
             } else if (!(prs->flags & JS_PROP_WRITABLE)) {
                 goto read_only_prop;
             } else {
@@ -9533,12 +9531,12 @@ int JS_DefineProperty(JSContext *ctx, JSValueConst this_obj,
             return JS_ThrowTypeErrorOrFalse(ctx, flags, "property is not configurable");
         }
 
-        // if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-        //     /* Instantiate property and retry */
-        //     if (JS_AutoInitProperty(ctx, p, prop, pr, prs))
-        //         return -1;
-        //     goto redo_prop_update;
-        // }
+        if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
+            /* Instantiate property and retry */
+            if (JS_AutoInitProperty(ctx, p, prop, pr, prs))
+                return -1;
+            goto redo_prop_update;
+        }
 
         if (flags & (JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE |
                      JS_PROP_HAS_GET | JS_PROP_HAS_SET)) {
@@ -9761,35 +9759,35 @@ int JS_DefineProperty(JSContext *ctx, JSValueConst this_obj,
     return JS_CreateProperty(ctx, p, prop, val, getter, setter, flags);
 }
 
-// static int JS_DefineAutoInitProperty(JSContext *ctx, JSValueConst this_obj,
-//                                      JSAtom prop, JSAutoInitIDEnum id,
-//                                      void *opaque, int flags)
-// {
-//     JSObject *p;
-//     JSProperty *pr;
+static int JS_DefineAutoInitProperty(JSContext *ctx, JSValueConst this_obj,
+                                     JSAtom prop, JSAutoInitIDEnum id,
+                                     void *opaque, int flags)
+{
+    JSObject *p;
+    JSProperty *pr;
 
-//     if (JS_VALUE_GET_TAG(this_obj) != JS_TAG_OBJECT)
-//         return false;
+    if (JS_VALUE_GET_TAG(this_obj) != JS_TAG_OBJECT)
+        return false;
 
-//     p = JS_VALUE_GET_OBJ(this_obj);
+    p = JS_VALUE_GET_OBJ(this_obj);
 
-//     if (find_own_property(&pr, p, prop)) {
-//         /* property already exists */
-//         abort();
-//         return false;
-//     }
+    if (find_own_property(&pr, p, prop)) {
+        /* property already exists */
+        abort();
+        return false;
+    }
 
-//     /* Specialized CreateProperty */
-//     pr = add_property(ctx, p, prop, (flags & JS_PROP_C_W_E) | JS_PROP_AUTOINIT);
-//     if (unlikely(!pr))
-//         return -1;
-//     pr->u.init.realm_and_id = (uintptr_t)JS_DupContext(ctx);
-//     assert((pr->u.init.realm_and_id & 3) == 0);
-//     assert(id <= 3);
-//     pr->u.init.realm_and_id |= id;
-//     pr->u.init.opaque = opaque;
-//     return true;
-// }
+    /* Specialized CreateProperty */
+    pr = add_property(ctx, p, prop, (flags & JS_PROP_C_W_E) | JS_PROP_AUTOINIT);
+    if (unlikely(!pr))
+        return -1;
+    pr->u.init.realm_and_id = (uintptr_t)JS_DupContext(ctx);
+    assert((pr->u.init.realm_and_id & 3) == 0);
+    assert(id <= 3);
+    pr->u.init.realm_and_id |= id;
+    pr->u.init.opaque = opaque;
+    return true;
+}
 
 /* shortcut to add or redefine a new property value */
 int JS_DefinePropertyValue(JSContext *ctx, JSValueConst this_obj,
@@ -13482,11 +13480,11 @@ static __maybe_unused void JS_DumpObject(JSRuntime *rt, JSObject *p)
                            (void *)pr->u.getset.setter);
                 } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_VARREF) {
                     printf("[varref %p]", (void *)pr->u.var_ref);
-                // } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-                //     printf("[autoinit %p %d %p]",
-                //            (void *)js_autoinit_get_realm(pr),
-                //            js_autoinit_get_id(pr),
-                //            (void *)pr->u.init.opaque);
+                } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
+                    printf("[autoinit %p %d %p]",
+                           (void *)js_autoinit_get_realm(pr),
+                           js_autoinit_get_id(pr),
+                           (void *)pr->u.init.opaque);
                 } else {
                     JS_DumpValue(rt, pr->u.value);
                 }
@@ -16063,24 +16061,24 @@ static JSValue js_closure2(JSContext *ctx, JSValue func_obj,
     return JS_EXCEPTION;
 }
 
-// static JSValue js_instantiate_prototype(JSContext *ctx, JSObject *p, JSAtom atom, void *opaque)
-// {
-//     JSValue obj, this_val;
-//     int ret;
+static JSValue js_instantiate_prototype(JSContext *ctx, JSObject *p, JSAtom atom, void *opaque)
+{
+    JSValue obj, this_val;
+    int ret;
 
-//     this_val = JS_MKPTR(JS_TAG_OBJECT, p);
-//     obj = JS_NewObject(ctx);
-//     if (JS_IsException(obj))
-//         return JS_EXCEPTION;
-//     ret = JS_DefinePropertyValue(ctx, obj, JS_ATOM_constructor,
-//                                  js_dup(this_val),
-//                                  JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
-//     if (ret < 0) {
-//         JS_FreeValue(ctx, obj);
-//         return JS_EXCEPTION;
-//     }
-//     return obj;
-// }
+    this_val = JS_MKPTR(JS_TAG_OBJECT, p);
+    obj = JS_NewObject(ctx);
+    if (JS_IsException(obj))
+        return JS_EXCEPTION;
+    ret = JS_DefinePropertyValue(ctx, obj, JS_ATOM_constructor,
+                                 js_dup(this_val),
+                                 JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    if (ret < 0) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
+    return obj;
+}
 
 static const uint16_t func_kind_to_class_id[] = {
     [JS_FUNC_NORMAL] = JS_CLASS_BYTECODE_FUNCTION,
@@ -16133,9 +16131,9 @@ static JSValue js_closure(JSContext *ctx, JSValue bfunc,
            creating cycles for every javascript function. The prototype
            object is created on the fly when first accessed */
         JS_SetConstructorBit(ctx, func_obj, true);
-    //     JS_DefineAutoInitProperty(ctx, func_obj, JS_ATOM_prototype,
-    //                               JS_AUTOINIT_ID_PROTOTYPE, NULL,
-    //                               JS_PROP_WRITABLE);
+        JS_DefineAutoInitProperty(ctx, func_obj, JS_ATOM_prototype,
+                                  JS_AUTOINIT_ID_PROTOTYPE, NULL,
+                                  JS_PROP_WRITABLE);
     }
     return func_obj;
  fail:
@@ -28461,12 +28459,12 @@ static int exported_names_cmp(const void *p1, const void *p2, void *opaque)
     return ret;
 }
 
-// static JSValue js_module_ns_autoinit(JSContext *ctx, JSObject *p, JSAtom atom,
-//                                      void *opaque)
-// {
-//     JSModuleDef *m = opaque;
-//     return JS_GetModuleNamespace(ctx, m);
-// }
+static JSValue js_module_ns_autoinit(JSContext *ctx, JSObject *p, JSAtom atom,
+                                     void *opaque)
+{
+    JSModuleDef *m = opaque;
+    return JS_GetModuleNamespace(ctx, m);
+}
 
 static JSValue js_build_module_ns(JSContext *ctx, JSModuleDef *m)
 {
@@ -28549,14 +28547,14 @@ static JSValue js_build_module_ns(JSContext *ctx, JSModuleDef *m)
                 pr->u.var_ref = var_ref;
             }
             break;
-        // case EXPORTED_NAME_NS:
-        //     /* the exported namespace must be created on demand */
-        //     if (JS_DefineAutoInitProperty(ctx, obj,
-        //                                   en->export_name,
-        //                                   JS_AUTOINIT_ID_MODULE_NS,
-        //                                   en->u.module, JS_PROP_ENUMERABLE | JS_PROP_WRITABLE) < 0)
-        //         goto fail;
-        //     break;
+        case EXPORTED_NAME_NS:
+            /* the exported namespace must be created on demand */
+            if (JS_DefineAutoInitProperty(ctx, obj,
+                                          en->export_name,
+                                          JS_AUTOINIT_ID_MODULE_NS,
+                                          en->u.module, JS_PROP_ENUMERABLE | JS_PROP_WRITABLE) < 0)
+                goto fail;
+            break;
         default:
             break;
         }
@@ -37551,29 +37549,29 @@ static JSAtom find_atom(JSContext *ctx, const char *name)
     return atom;
 }
 
-// static JSValue JS_InstantiateFunctionListItem2(JSContext *ctx, JSObject *p,
-//                                                JSAtom atom, void *opaque)
-// {
-//     const JSCFunctionListEntry *e = opaque;
-//     JSValue val;
+static JSValue JS_InstantiateFunctionListItem2(JSContext *ctx, JSObject *p,
+                                               JSAtom atom, void *opaque)
+{
+    const JSCFunctionListEntry *e = opaque;
+    JSValue val;
 
-//     switch(e->def_type) {
-//     case JS_DEF_CFUNC:
-//         val = JS_NewCFunction2(ctx, e->u.func.cfunc.generic,
-//                                e->name, e->u.func.length, e->u.func.cproto, e->magic);
-//         break;
-//     case JS_DEF_PROP_STRING:
-//         val = JS_NewAtomString(ctx, e->u.str);
-//         break;
-//     case JS_DEF_OBJECT:
-//         val = JS_NewObject(ctx);
-//         JS_SetPropertyFunctionList(ctx, val, e->u.prop_list.tab, e->u.prop_list.len);
-//         break;
-//     default:
-//         abort();
-//     }
-//     return val;
-// }
+    switch(e->def_type) {
+    case JS_DEF_CFUNC:
+        val = JS_NewCFunction2(ctx, e->u.func.cfunc.generic,
+                               e->name, e->u.func.length, e->u.func.cproto, e->magic);
+        break;
+    case JS_DEF_PROP_STRING:
+        val = JS_NewAtomString(ctx, e->u.str);
+        break;
+    case JS_DEF_OBJECT:
+        val = JS_NewObject(ctx);
+        JS_SetPropertyFunctionList(ctx, val, e->u.prop_list.tab, e->u.prop_list.len);
+        break;
+    default:
+        abort();
+    }
+    return val;
+}
 
 static int JS_InstantiateFunctionListItem(JSContext *ctx, JSValueConst obj,
                                           JSAtom atom,
@@ -37617,8 +37615,8 @@ static int JS_InstantiateFunctionListItem(JSContext *ctx, JSValueConst obj,
             /* Function.prototype[Symbol.hasInstance] is not writable nor configurable */
             prop_flags = 0;
         }
-        // JS_DefineAutoInitProperty(ctx, obj, atom, JS_AUTOINIT_ID_PROP,
-        //                           (void *)e, prop_flags);
+        JS_DefineAutoInitProperty(ctx, obj, atom, JS_AUTOINIT_ID_PROP,
+                                  (void *)e, prop_flags);
         return 0;
     case JS_DEF_CGETSET: /* XXX: use autoinit again ? */
     case JS_DEF_CGETSET_MAGIC:
@@ -37657,10 +37655,10 @@ static int JS_InstantiateFunctionListItem(JSContext *ctx, JSValueConst obj,
         val = JS_UNDEFINED;
         break;
     case JS_DEF_PROP_STRING:
-    // case JS_DEF_OBJECT:
-    //     JS_DefineAutoInitProperty(ctx, obj, atom, JS_AUTOINIT_ID_PROP,
-    //                               (void *)e, prop_flags);
-    //     return 0;
+    case JS_DEF_OBJECT:
+        JS_DefineAutoInitProperty(ctx, obj, atom, JS_AUTOINIT_ID_PROP,
+                                  (void *)e, prop_flags);
+        return 0;
     default:
         abort();
     }
@@ -53468,10 +53466,10 @@ void JS_AddIntrinsicBaseObjects(JSContext *ctx)
     ctx->array_ctor = js_dup(obj);
     JS_SetPropertyFunctionList(ctx, obj, js_array_funcs,
                                countof(js_array_funcs));
-    // JS_DefineAutoInitProperty(ctx, obj, JS_ATOM_fromAsync,
-    //                           JS_AUTOINIT_ID_BYTECODE,
-    //                           (void *)(uintptr_t)JS_BUILTIN_ARRAY_FROMASYNC,
-    //                           JS_PROP_WRITABLE|JS_PROP_CONFIGURABLE);
+    JS_DefineAutoInitProperty(ctx, obj, JS_ATOM_fromAsync,
+                              JS_AUTOINIT_ID_BYTECODE,
+                              (void *)(uintptr_t)JS_BUILTIN_ARRAY_FROMASYNC,
+                              JS_PROP_WRITABLE|JS_PROP_CONFIGURABLE);
 
     /* XXX: create auto_initializer */
     {
@@ -57319,6 +57317,13 @@ static JSValue js_weakref_deref(JSContext *ctx, JSValueConst this_val, int argc,
     if (!wrd)
         return JS_EXCEPTION;
     if (wrd == &js_weakref_sentinel)
+        return JS_UNDEFINED;
+    return js_dup(wrd->target);
+}
+
+JSValue JS_GetWeakRef(JSContext* ctx, JSValueConst this_val){
+    JSWeakRefData *wrd = JS_GetOpaque2(ctx, this_val, JS_CLASS_WEAK_REF);
+    if (!wrd || wrd == &js_weakref_sentinel)
         return JS_UNDEFINED;
     return js_dup(wrd->target);
 }

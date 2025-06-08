@@ -60,12 +60,15 @@ static inline JSValue LJS_ThrowWithError(JSContext *ctx, const char *msg, const 
     snprintf(error_str, 1024, "%s: %s", type_str, message_str);
     JS_Throw(ctx, LJS_Throw(ctx, error_str, help));
     js_free(ctx, error_str);
+    JS_FreeValue(ctx, error);
+    JS_FreeValue(ctx, message);
+    JS_FreeValue(ctx, type);
     return JS_EXCEPTION;
 }
 
 static inline void LJS_panic(const char *msg){
     printf("LightJS fatal error: %s\n", msg);
-    LJS_exit(1);
+    js_exit(1);
 }
 
 struct promise{
@@ -135,10 +138,8 @@ static inline bool JS_CopyObject(JSContext *ctx, JSValueConst from, JSValue to, 
     int proplen = JS_GetOwnPropertyNames(ctx, props, &max_items, from, JS_GPN_ENUM_ONLY);
     if(proplen < 0) return false;
     for(int i = 0; i < proplen; i++){
-        val = JS_GetProperty(ctx, from, props[i]->atom);
-        if(!JS_IsException(val)){
-            JS_SetProperty(ctx, to, props[i]->atom, val);
-        }
+        val = JS_GetProperty(ctx, from, props[i] -> atom);
+        JS_SetProperty(ctx, to, props[i] -> atom, val);
     }
     return true;
 }
@@ -170,4 +171,35 @@ static inline bool LJS_IsMainContext(JSContext* ctx){
     App* app = JS_GetContextOpaque(ctx);
     if(!app -> worker) return true;
     return false;
+}
+
+static inline bool JS_IsTypedArray(JSContext* ctx, JSValueConst val){
+    // order QuickJS
+    // size_t psize;
+    // return NULL == JS_GetArrayBuffer(ctx, &psize, val);
+    return JS_GetTypedArrayType(val) != -1;
+}
+
+// Note: should free after use
+static inline JSValue JS_GetWeakRefValue(JSContext* ctx, JSValueConst ref){
+    return JS_GetWeakRef(ctx, ref);
+}
+
+static inline int JS_GetEnumerableLength(JSContext* ctx, JSValueConst obj, int64_t* plen){
+    JSValue jsobj;
+    int ret = -1;
+    if(JS_IsNumber(jsobj = JS_GetProperty(ctx, obj, JS_ATOM_length))){
+        ret = JS_ToInt64(ctx, plen, jsobj);
+        goto end;
+    }
+    JS_FreeValue(ctx, jsobj);
+    
+    if(JS_IsNumber(jsobj = JS_GetProperty(ctx, obj, JS_ATOM_size))){
+        ret = JS_ToInt64(ctx, plen, jsobj);
+        goto end;
+    }
+
+end:
+    JS_FreeValue(ctx, jsobj);
+    return ret;
 }

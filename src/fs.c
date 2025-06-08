@@ -239,7 +239,7 @@ static JSValue js_inotify_watch(JSContext *ctx, JSValueConst this_val, int argc,
 
     const char* path = JS_ToCString(ctx, argv[0]);
     int wd;
-    if(!LJS_evcore_inotify_watch(fd, path, flags, &wd)){
+    if(!evcore_inotify_watch(fd, path, flags, &wd)){
         return LJS_Throw(ctx, "failed to add watch: %s", NULL, strerror(errno));
     }
 
@@ -254,7 +254,7 @@ static JSValue js_inotify_unwatch(JSContext *ctx, JSValueConst this_val, int arg
     if(argc < 1 || -1 == JS_ToInt32(ctx, &wd, argv[0]))
         return LJS_Throw(ctx, "invalid arguments", "Inotify.unwatch(wd: INWD (aka number) ): void");
 
-    if(!LJS_evcore_inotify_unwatch(fd, wd)){
+    if(!evcore_inotify_unwatch(fd, wd)){
         return LJS_Throw(ctx, "failed to remove watch: %s", NULL, strerror(errno));
     }
 
@@ -269,7 +269,7 @@ static JSValue js_inotify_find(JSContext *ctx, JSValueConst this_val, int argc, 
         return LJS_Throw(ctx, "invalid arguments", "Inotify.find(path: string): INWD | null");
 
     const char* path = JS_ToCString(ctx, argv[0]);
-    int wd = LJS_evcore_inotify_find(fd, path);
+    int wd = evcore_inotify_find(fd, path);
 
     return wd == -1 ? JS_NULL : JS_NewInt32(ctx, wd);
 }
@@ -278,10 +278,10 @@ static JSValue js_inotify_close(JSContext *ctx, JSValueConst this_val, int argc,
     EvFD* fd = JS_GetOpaque(this_val, js_inotify_class_id);
     if(!fd) TELL_ERROR;
 
-    struct JSValueProxy* proxy = LJS_evfd_get_opaque(fd);
+    struct JSValueProxy* proxy = evfd_get_opaque(fd);
     LJS_FreeJSValueProxy(proxy);
 
-    LJS_evcore_stop_inotify(fd);
+    evcore_stop_inotify(fd);
     JS_SetOpaque(this_val, NULL);
     return JS_UNDEFINED;
 }
@@ -303,9 +303,9 @@ static JSValue js_inotify_ctor(JSContext *ctx, JSValueConst new_target, int argc
     }
 
     struct JSValueProxy* proxy = LJS_NewJSValueProxy(ctx, argv[0]);
-    EvFD* fd = LJS_evcore_inotify(in_callback, proxy);
+    EvFD* fd = evcore_inotify(in_callback, proxy);
     if(!fd) return LJS_Throw(ctx, "failed to create inotify instance: %s", NULL, strerror(errno));
-    LJS_evfd_set_opaque(fd, proxy);
+    evfd_set_opaque(fd, proxy);
 
     JSValue class = JS_NewObjectClass(ctx, js_inotify_class_id);
     JS_SetOpaque(class, fd);
@@ -316,8 +316,8 @@ static void js_inotify_finalizer(JSRuntime *rt, JSValue val){
     EvFD* fd = JS_GetOpaque(val, js_inotify_class_id);
     if(!fd) return;
 
-    LJS_FreeJSValueProxy(LJS_evfd_get_opaque(fd));
-    LJS_evcore_stop_inotify(fd);
+    LJS_FreeJSValueProxy(evfd_get_opaque(fd));
+    evcore_stop_inotify(fd);
 }
 
 static JSClassDef js_inotify_class = {
@@ -785,6 +785,7 @@ static JSValue js_stdio_scandir(JSContext *ctx, JSValueConst self, int argc, JSV
         return JS_EXCEPTION;
 
     DIR* dir = opendir(path);
+    JS_FreeCString(ctx, path);
     if (!dir) {
         LJS_Throw(ctx, "failed to open directory: %s", NULL, strerror(errno));
         return JS_EXCEPTION;

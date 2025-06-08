@@ -87,19 +87,20 @@ globalThis.isEqual = function(value, other) {
     return true;
 }
 
-if(!import.meta.path || self.entry == import.meta.path){
+if(import.meta.main && !Worker.onmessage){
     const file = self.argv[0];
     if(!file){
+        console.log(self, import.meta);
         throw new Error('Expect an arg to run test');
     }
     /** @type {string[]} */ let paths;
 
     if(file == 'all'){
-        paths = scandir(import.meta.dirname || self.dirname)
+        paths = scandir(import.meta.dirname)
             .filter(item => item.type == 'file' && item.name.endsWith('.js') && (!item.name.startsWith('_') && !item.name.startsWith('index.js')))
             .map(item => item.name.slice(0, -3));
     }else{
-        paths = [(import.meta.dirname || self.dirname) + '/' + file + '.js'];
+        paths = [import.meta.dirname + '/' + file + '.js'];
     }
 
     for(const path of paths) try{

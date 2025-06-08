@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <threads.h>
 
 static JSRuntime *runtime;
@@ -29,9 +30,12 @@ static inline void run_jobs(){
         while(res){
             res = JS_ExecutePendingJob(rt, &ectx);
             if(res < 0){    // error
-                LJS_dump_error(ectx, JS_GetException(ectx));
+                JSValue exception = JS_GetException(ectx);
+                js_dump(ectx, exception, stderr);
+                JS_FreeValue(ectx, exception);
+            }else if(res > 0){
+                jobs++;
             }
-            if(res > 0) jobs++;
         }
 #ifdef LJS_DEBUG
         printf("run jobs: %d\n", jobs);
@@ -48,7 +52,9 @@ static bool check_promise_resolved(void* opaque){
         if(!JS_IsJobPending(JS_GetRuntime(app -> ctx)))
             return true;
     }else if(state == JS_PROMISE_REJECTED){
-        LJS_dump_error(app -> ctx, JS_PromiseResult(app -> ctx, *prom));
+        JSValue result = JS_PromiseResult(app -> ctx, *prom);
+        js_dump(app -> ctx, result, stderr);
+        JS_FreeValue(app -> ctx, result);
         return true;
     }else{  // TIMING
         run_jobs();
@@ -88,7 +94,26 @@ static size_t parse_limit(const char *arg) {
 
 static thread_local sigjmp_buf exit_buf;
 
-_Noreturn void LJS_exit(int ret_code){
+// signal listener
+static void exit_signal_handler(int sig) {
+#ifdef LJS_DEBUG
+    printf("Received signal %d, exiting...\n", sig);
+#endif
+    siglongjmp(exit_buf, 1);
+}
+
+__attribute__((constructor)) void init_signal_handler() {
+    struct sigaction sa = {
+        .sa_handler = exit_signal_handler,
+        .sa_flags = SA_RESETHAND
+    };
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGQUIT, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+}
+
+_Noreturn void js_exit(int ret_code){
     longjmp(exit_buf, ret_code);
 }
 
@@ -178,20 +203,35 @@ int main(int argc, char **argv) {
         }
     }
 
+    if(eval_code && optind == argc){
+        printf("Error: Missing argument for -e/--eval\n");
+        return 1;
+    }
+
     // rt init
     LJS_init_runtime(runtime);
 #ifdef LJS_DEBUG
     JS_SetDumpFlags(runtime, JS_DUMP_LEAKS | JS_DUMP_PROMISE | JS_DUMP_OBJECTS | JS_DUMP_SHAPES);
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
 #endif
 
     // app init
-    char* script_path = optind == argc 
-           ? strdup(get_current_dir_name()) 
-           : LJS_resolve_module(NULL ,argv[optind]);
-    if(!script_path){
-        printf("Failed to resolve module: %s\n", argv[optind]);
-        return 1;
+    char* script_path;
+    const char* raw_name;
+    if(eval_code){
+        raw_name = script_path = "<eval>";
+    }else if(optind < argc){
+        script_path = js_resolve_module(NULL, raw_name = argv[optind]);
+        if(!script_path){
+            printf("Failed to resolve module: %s\n", argv[optind]);
+            return 1;
+        }
+    }else {
+        script_path = strdup(raw_name = get_current_dir_name());
+        repl = true;
     }
+    
     app = LJS_create_app(runtime, 
         argc == optind ? 0 : argc - optind -1, argc == optind ? NULL : argv + optind +1, 
         false, true, script_path, NULL
@@ -201,7 +241,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     LJS_init_context(app);
-    LJS_evcore_init();  // epoll init
+    evcore_init();  // epoll init
 
     if(argc - optind == 0 || repl){
         if(check || compile){
@@ -214,7 +254,7 @@ int main(int argc, char **argv) {
 
         JSValue buf = JS_ReadObject(app -> ctx, code_lrepl, sizeof(code_lrepl), JS_READ_OBJ_BYTECODE);
         JSValue val = JS_EvalFunction(app -> ctx, buf);
-        if(JS_IsException(val)) LJS_dump_error(app -> ctx, JS_GetException(app -> ctx));
+        if(JS_IsException(val)) js_dump(app -> ctx, JS_GetException(app -> ctx), stderr);
 
         goto run_evloop;
     }
@@ -222,8 +262,25 @@ int main(int argc, char **argv) {
     uint32_t buf_len;
     uint8_t* buf;
     if(eval_code){
-        buf = (uint8_t*)app -> script_path;
-        buf_len = strlen(app -> script_path);
+        // measure eval code size
+        buf_len = 0;
+        for(int i = optind; i < argc; i++){
+            if(argv[i]) buf_len += strlen(argv[i]) +1;
+        }
+        buf = malloc(buf_len +1);
+        if(!buf){
+            printf("Failed to allocate memory for eval code.\n");
+            return 1;
+        }
+        uint32_t wsize = 0;
+        for(int i = optind; i < argc; i++){
+            size_t len = strlen(argv[i]);
+            memcpy(buf + wsize, argv[i], len);
+            buf[wsize + len] = ' ';
+            wsize += len + 1;
+        }
+        buf[wsize - 1] = '\n';
+        buf[wsize] = '\0';
     }else{
         buf = LJS_tryGetJSFile(&buf_len, &app -> script_path);
         if(!buf){
@@ -235,7 +292,7 @@ int main(int argc, char **argv) {
     if(check){
         JSValue ret_val = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
         if(JS_IsException(ret_val)){
-            LJS_dump_error(app -> ctx, JS_GetException(app -> ctx));
+            js_dump(app -> ctx, JS_GetException(app -> ctx), stderr);
             printf("The script has syntax errors.\n");
             return 1;
         }else{
@@ -250,32 +307,46 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    LJS_evcore_set_memory(js_malloc_proxy, runtime);
+    evcore_set_memory(js_malloc_proxy, runtime);
     
     // for exit()
     int ret_code = setjmp(exit_buf);
     if(ret_code != 0) goto finalize;
 
+    // parse
+    JSValue code = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    JSValue ret_val = JS_UNDEFINED;
+    if(JS_IsException(code)){
+print_error:
+        JSValue exception = JS_GetException(app -> ctx);
+        js_dump(app -> ctx, exception, stderr);
+        JS_FreeValue(app -> ctx, exception);
+        ret_code = 1;
+        goto finalize;
+    }
+    js_set_import_meta(app -> ctx, code, raw_name, true);
+
     // eval
-    JSValue ret_val = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE);
+    ret_val = JS_EvalFunction(app -> ctx, code);
     if(JS_IsException(ret_val)){
-        LJS_dump_error(app -> ctx, JS_GetException(app -> ctx));
-        return 1;
+        goto print_error;
     }
 
     // start!
-    JS_DupValue(app -> ctx, ret_val);
 run_evloop:
-    LJS_evcore_run(check_promise_resolved, &ret_val);
+    evcore_run(check_promise_resolved, &ret_val);
     // LJS_destroy_app(app); // destroy app will cause SEGFAULT as <argv> is not able to free.
 
     // dispatch exit event
 finalize:
-    LJS_dispatch_ev(app -> ctx, "exit", JS_UNDEFINED);
+    js_dispatch_global_event(app -> ctx, "exit", JS_UNDEFINED);
+    evcore_destroy();
     run_jobs();
+    JS_FreeValue(app -> ctx, ret_val);
+    
     LJS_destroy_app(app);
     JS_FreeRuntime(runtime);
-    free(script_path);
+    if(!eval_code) free(script_path);
     if(ret_code < 0) ret_code = 0;
     return ret_code;
 }

@@ -34,9 +34,9 @@ struct JSXMLParserCtx {
     struct list_head stack;
 };
 
-#define FETCH(stack) list_entry((stack)->next, struct XMLElement, link)
+#define FETCH(stack) list_entry((stack) -> next, struct XMLElement, link)
 #define POP(stack) list_del((stack) -> next);
-#define PUSH(stack, el) list_add(&(el)->link, stack);
+#define PUSH(stack, el) list_add(&(el) -> link, stack);
 
 static struct JSXMLParserCtx* new_jsxmlctx(JSContext* ctx) {
     struct JSXMLParserCtx* jsxmlctx = js_malloc(ctx, sizeof(struct JSXMLParserCtx));
@@ -164,7 +164,7 @@ param_error:
         }
     }
 
-    JSValue root_obj = FETCH(&jsxmlctx -> stack)->obj;
+    JSValue root_obj = FETCH(&jsxmlctx -> stack) -> obj;
     xml_end(parser, jsxmlctx);
     JS_FreeCString(ctx, xmlstr);
     return root_obj;

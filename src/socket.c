@@ -35,7 +35,7 @@ struct JS_Server_Data{
 
 JSValue js_server_close(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic, JSValueConst* func_data){
     EvFD* fd = (void*)JS_VALUE_GET_PTR(func_data[0]);
-    if(fd) LJS_evfd_close(fd);
+    if(fd) evfd_close(fd);
     return JS_UNDEFINED;
 }
 
@@ -45,7 +45,7 @@ int server_handle_accept(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* 
     // accept
     struct sockaddr_storage client_addr = { 0 };
     socklen_t client_addr_len = sizeof(client_addr);
-    int client_fd = accept(LJS_evfd_getfd(evfd, NULL), (struct sockaddr*)&client_addr, &client_addr_len);
+    int client_fd = accept(evfd_getfd(evfd, NULL), (struct sockaddr*)&client_addr, &client_addr_len);
 
     // 转换为Object
     JSValue addr_info = JS_NewObject(data -> ctx);
@@ -69,7 +69,7 @@ int server_handle_accept(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* 
         )));
     } else if (client_addr.ss_family == AF_UNIX) {
         // Unix domain socket
-        JS_SetPropertyStr(data -> ctx, addr_info, "path", JS_NewString(data -> ctx, 
+        JS_SetPropertyStr(data -> ctx, addr_info, "url", JS_NewString(data -> ctx, 
             ((struct sockaddr_un*)&client_addr) -> sun_path
         ));
         JS_SetPropertyStr(data -> ctx, addr_info, "type", JS_NewString(data -> ctx, "unix"));
@@ -419,7 +419,7 @@ int dns_response_handler(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* 
 
 cleanup:
     // 清理资源
-    LJS_evfd_close(evfd);
+    evfd_close(evfd);
     free(ctx);
     return EVCB_RET_DONE;
 }
@@ -432,8 +432,8 @@ static inline bool async_dns_resolve(const char* dns_server, const char* domain,
     if(sockfd < 0) return false;
 
     // 创建evfd
-    EvFD* evfd = LJS_evfd_new(sockfd, false, true, false, 512, NULL, NULL);
-    LJS_evfd_setup_udp(evfd);
+    EvFD* evfd = evfd_new(sockfd, false, true, false, 512, NULL, NULL);
+    evfd_setup_udp(evfd);
     
     // 准备DNS服务器地址
     struct sockaddr_in server_addr = {
@@ -455,10 +455,10 @@ static inline bool async_dns_resolve(const char* dns_server, const char* domain,
     ctx -> user_data = user_data;
 
     // 注册读取回调
-    LJS_evfd_read(evfd, 512, NULL, dns_response_handler, ctx);
+    evfd_read(evfd, 512, NULL, dns_response_handler, ctx);
 
     // 发送DNS查询
-    if(!LJS_evfd_write_dgram(evfd, (uint8_t*)query, query_len,
+    if(!evfd_write_dgram(evfd, (uint8_t*)query, query_len,
                             (struct sockaddr*)&server_addr, sizeof(server_addr),
                             NULL, NULL)) {
         close(sockfd);
@@ -502,46 +502,54 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
             goto fail2;
         }
 
-        JSValue val;
-        if(JS_IsNumber(val = JS_GetPropertyStr(ctx, argv[2], "bufferSize"))){
+        JSValue jsobj;
+        if(JS_IsNumber(jsobj = JS_GetPropertyStr(ctx, argv[2], "bufferSize"))){
             int bufferSize;
-            if(JS_ToInt32(ctx, &bufferSize, val) != -1){
+            if(JS_ToInt32(ctx, &bufferSize, jsobj) != -1){
                 setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufferSize, sizeof(bufferSize));
                 setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &bufferSize, sizeof(bufferSize));
             }
             bufsize = bufferSize;
         }
-        if(JS_IsNumber(val = JS_GetPropertyStr(ctx, argv[2], "timeout"))){
+        JS_FreeValue(ctx, jsobj);
+        if(JS_IsNumber(jsobj = JS_GetPropertyStr(ctx, argv[2], "timeout"))){
             int timeout;
-            if(JS_ToInt32(ctx, &timeout, val) != -1){
+            if(JS_ToInt32(ctx, &timeout, jsobj) != -1){
                 setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
                 setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
             }
         }
-        if(JS_IsFunction(ctx, val = JS_GetPropertyStr(ctx, argv[2], "onclose"))){
-            onclose = JS_DupValue(ctx, val);
+        JS_FreeValue(ctx, jsobj);
+        if(JS_IsFunction(ctx, jsobj = JS_GetPropertyStr(ctx, argv[2], "onclose"))){
+            onclose = jsobj;
+        }else{
+            JS_FreeValue(ctx, jsobj);
         }
         // TCP设置
         if (strcmp(bind_addr.protocol, "unix") != 0){
-            if(JS_IsBool(val = JS_GetPropertyStr(ctx, argv[2], "reuseaddr"))){
-                bool reuseaddr = JS_ToBool(ctx, val);
+            if(JS_IsBool(jsobj = JS_GetPropertyStr(ctx, argv[2], "reuseaddr"))){
+                bool reuseaddr = JS_ToBool(ctx, jsobj);
                 setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(reuseaddr));
             }
-            if(JS_IsBool(val = JS_GetPropertyStr(ctx, argv[2], "nodelay"))){
-                bool nodelay = JS_ToBool(ctx, val);
+            JS_FreeValue(ctx, jsobj);
+            if(JS_IsBool(jsobj = JS_GetPropertyStr(ctx, argv[2], "nodelay"))){
+                bool nodelay = JS_ToBool(ctx, jsobj);
                 setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
             }
-            if(JS_IsBool(val = JS_GetPropertyStr(ctx, argv[2], "keepalive"))){
-                bool keepalive = JS_ToBool(ctx, val);
+            JS_FreeValue(ctx, jsobj);
+            if(JS_IsBool(jsobj = JS_GetPropertyStr(ctx, argv[2], "keepalive"))){
+                bool keepalive = JS_ToBool(ctx, jsobj);
                 setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, (const char *)&keepalive, sizeof(keepalive));
             }
-            if(JS_IsString(val = JS_GetPropertyStr(ctx, argv[2], "bindto"))){
-                const char* bindto = JS_ToCString(ctx, val);
+            JS_FreeValue(ctx, jsobj);
+            if(JS_IsString(jsobj = JS_GetPropertyStr(ctx, argv[2], "bindto"))){
+                const char* bindto = JS_ToCString(ctx, jsobj);
                 if(bindto != NULL) {
                     setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, bindto, strlen(bindto));
                     JS_FreeCString(ctx, bindto);
                 }
             }
+            JS_FreeValue(ctx, jsobj);
         }
     }
 
@@ -558,7 +566,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     data -> ctx = ctx;
     data -> bufsize = bufsize;
     data -> on_close = onclose;
-    EvFD* evfd = LJS_evcore_attach(sockfd, false, 
+    EvFD* evfd = evcore_attach(sockfd, false, 
         server_handle_accept, data,    // read callback
         NULL, NULL,                     // write callback
         server_handle_close, data       // close callback
@@ -608,16 +616,19 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
 
     // TCP设置
     JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
-    if(-1 != JS_ToUint32(ctx, &buffer_size, JS_GetPropertyStr(ctx, obj, "bufferSize"))){
+    JSValue jsobj;
+    if(-1 != JS_ToUint32(ctx, &buffer_size, jsobj = JS_GetPropertyStr(ctx, obj, "bufferSize"))){
         if(buffer_size <= 0) buffer_size = BUFFER_SIZE;
         setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
         setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
     }
+    JS_FreeValue(ctx, jsobj);
     uint32_t timeout = 0;
-    if(JS_ToUint32(ctx, &timeout, JS_GetPropertyStr(ctx, obj, "timeout")) != -1){
+    if(JS_ToUint32(ctx, &timeout, jsobj = JS_GetPropertyStr(ctx, obj, "timeout")) != -1){
         setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     }
+    JS_FreeValue(ctx, jsobj);
     JS_FreeValue(ctx, obj);
 
     JSValue pipe = LJS_NewFDPipe(ctx, sockfd, PIPE_READ | PIPE_WRITE | PIPE_SOCKET, buffer_size, NULL);
@@ -652,6 +663,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
         if(JS_IsBool(val = JS_GetPropertyStr(ctx, obj, "server"))){
             is_client = !JS_ToBool(ctx, val);
         }
+        JS_FreeValue(ctx, val);
         if(JS_IsArray(val = JS_GetPropertyStr(ctx, obj, "ciphers"))) {
             int64_t count;
             if(JS_GetLength(ctx, val, &count) > 0){
@@ -662,21 +674,24 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
                     if(JS_ToInt32(ctx, &cipher, item)){
                         ciphers[cipher_count++] = cipher;
                     }
+                    JS_FreeValue(ctx, item);
                 }
                 ciphers[cipher_count] = 0;
             }
         }
+        JS_FreeValue(ctx, val);
         if(JS_IsBool(val = JS_GetPropertyStr(ctx, obj, "suiteb"))){
             bool suiteb = JS_ToBool(ctx, val);
             if(suiteb){
                 preset = MBEDTLS_SSL_PRESET_SUITEB;
             }
         }
+        JS_FreeValue(ctx, val);
     }
 
     struct promise* promise = LJS_NewPromise(ctx);
     mbedtls_ssl_config* config = NULL;
-    LJS_evfd_initssl(fd, &config, is_client, preset, ssl_handshake_callback, promise);
+    evfd_initssl(fd, &config, is_client, preset, ssl_handshake_callback, promise);
 
     // chipers
     if(ciphers){
@@ -812,7 +827,7 @@ static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     }
 
     // add to global
-    LJS_evfd_set_sni(strdup(name_str), NULL, crt, pk);
+    evfd_set_sni(strdup(name_str), NULL, crt, pk);
     JS_FreeCString(ctx, name_str);
     
     return JS_UNDEFINED;
@@ -834,7 +849,7 @@ static JSValue js_cert_remove(JSContext *ctx, JSValueConst this_val, int argc, J
     const char* name_str = JS_ToCString(ctx, argv[0]);
     if(name_str == NULL) return JS_EXCEPTION;
 
-    bool ret = LJS_evfd_remove_sni(name_str);
+    bool ret = evfd_remove_sni(name_str);
     JS_FreeCString(ctx, name_str);
     return JS_NewBool(ctx, ret);
 #else
@@ -892,11 +907,11 @@ EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int 
 
         switch(res -> ai_family){
             case AF_INET:
-                hostname = inet_ntoa(((struct sockaddr_in*)res -> ai_addr)->sin_addr);
+                hostname = inet_ntoa(((struct sockaddr_in*)res -> ai_addr) -> sin_addr);
                 protocol = "tcp";
                 break;
             case AF_INET6:
-                hostname = inet_ntop(AF_INET6, &((struct sockaddr_in6*)res -> ai_addr)->sin6_addr, NULL, 0);
+                hostname = inet_ntop(AF_INET6, &((struct sockaddr_in6*)res -> ai_addr) -> sin6_addr, NULL, 0);
                 protocol = "tcp6";
                 break;
             default:
@@ -908,13 +923,13 @@ EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int 
     int fd = socket_create(protocol);
     if(fd < 0) return NULL;
     socket_connect(fd, protocol, hostname, port, hostname);
-    EvFD* evfd = LJS_evfd_new(fd, false, true, true, bufsize, NULL, NULL);
+    EvFD* evfd = evfd_new(fd, false, true, true, bufsize, NULL, NULL);
     if(ssl){
 #ifdef LJS_MBEDTLS
         mbedtls_ssl_config* config = NULL;
-        LJS_evfd_initssl(evfd, &config, true, MBEDTLS_SSL_PRESET_DEFAULT, NULL, NULL);
+        evfd_initssl(evfd, &config, true, MBEDTLS_SSL_PRESET_DEFAULT, NULL, NULL);
 #else
-        LJS_evfd_close(evfd);
+        evfd_close(evfd);
         return NULL;
 #endif
     }

@@ -46,7 +46,7 @@ static inline void buffer_init(struct Buffer** buf, uint8_t* data, uint32_t size
     buffer -> start = 0;
     buffer -> end = 0;
     buffer -> size = size;
-    buffer->__aligned_ptr = NULL;
+    buffer -> __aligned_ptr = NULL;
 }
 
 /**
@@ -63,7 +63,7 @@ static inline void buffer_init2(struct Buffer* buffer, uint8_t* data, uint32_t s
     buffer -> start = 0;
     buffer -> end = 0;
     buffer -> size = size;
-    buffer->__aligned_ptr = NULL;
+    buffer -> __aligned_ptr = NULL;
 }
 
 /**
@@ -71,7 +71,7 @@ static inline void buffer_init2(struct Buffer* buffer, uint8_t* data, uint32_t s
  * @param buffer 缓冲区指针
  */
 static inline void buffer_free(struct Buffer* buffer) {
-    if(buffer->__aligned_ptr) free(buffer->__aligned_ptr);
+    if(buffer -> __aligned_ptr) free(buffer -> __aligned_ptr);
     if(buffer -> is_dynamic) free(buffer -> buffer);
 }
 
@@ -493,7 +493,7 @@ static inline void buffer_aligned(struct Buffer* buffer, size_t blk_size) {
         buffer -> is_dynamic = true;
         buffer -> size = alloc_size;
         if(!buffer -> is_dynamic) free(raw_ptr);
-        else buffer->__aligned_ptr = raw_ptr;
+        else buffer -> __aligned_ptr = raw_ptr;
 
 #ifdef LJS_DEBUG
         printf("buffer_aligned: %p, %d, %d, %d\n", buffer -> buffer, buffer -> size -1, buffer -> start, buffer -> end);
@@ -501,28 +501,84 @@ static inline void buffer_aligned(struct Buffer* buffer, size_t blk_size) {
     }
 }
 
-static inline bool buffer_merge(struct Buffer* buffer, struct Buffer* other) {
-    if (!buffer || !other) return false;
+static inline bool buffer_merge(struct Buffer* dest, struct Buffer* src) {
+    if (!dest || !src || dest == src) return false;
 
-    buffer_flat(buffer);
-    buffer_flat(other);
+    // 计算实际需要写入的数据量
+    const uint32_t src_used = buffer_used(src);
+    const uint32_t dest_used = buffer_used(dest);
+    const uint32_t required = dest_used + src_used;
 
-    const uint32_t self_used = buffer_used(buffer);
-    const uint32_t other_used = buffer_used(other);
-    const uint32_t need_capacity = self_used + other_used + 1;
-
-    if (buffer -> size < need_capacity) {
-        if (!buffer -> is_dynamic) return false;
-        if (!buffer_realloc(buffer, need_capacity, true)) return false;
+    // 动态扩容检查
+    if (dest -> size < required) {
+        if (!dest -> is_dynamic) return false;
+        if (!buffer_realloc(dest, required, false)) return false; // 保持环形结构
     }
 
-    memcpy(buffer -> buffer + self_used, other -> buffer, other_used);
-    buffer -> end = (self_used + other_used) % buffer -> size; // 环形索引
-    buffer -> start = 0;
+    // 分两段拷贝（处理环形跨越的情况）
+    uint32_t contiguous_space = dest -> size - dest -> end;
+    if (src_used <= contiguous_space) {
+        // 单次拷贝即可
+        memcpy(dest -> buffer + dest -> end, 
+               src -> buffer + src -> start, 
+               src_used);
+    } else {
+        // 第一次拷贝：填充尾部剩余空间
+        memcpy(dest -> buffer + dest -> end,
+               src -> buffer + src -> start,
+               contiguous_space);
+        
+        // 第二次拷贝：从头部继续
+        memcpy(dest -> buffer,
+               src -> buffer + src -> start + contiguous_space,
+               src_used - contiguous_space);
+    }
+
+    // 更新环形索引（自动处理回绕）
+    dest -> end = (dest -> end + src_used) % dest -> size;
     
-    buffer_free(other);
+    // 清空源缓冲区（但不释放内存）
+    src -> start = src -> end = 0;
     return true;
 }
+
+static inline uint32_t buffer_merge2(struct Buffer* dest, struct Buffer* src) {
+    if (!dest || !src || dest == src) return 0;
+
+    const uint32_t src_used = buffer_used(src);
+    const uint32_t dest_free = buffer_available(dest);
+    
+    // 计算实际可写入量
+    const uint32_t write_len = (src_used < dest_free) ? src_used : dest_free;
+    if (write_len == 0) return 0;
+
+    // 分两段拷贝（处理环形跨越）
+    uint32_t contiguous_space = dest -> size - dest -> end;
+    if (write_len <= contiguous_space) {
+        memcpy(dest -> buffer + dest -> end, 
+               src -> buffer + src -> start, 
+               write_len);
+    } else {
+        // 第一次拷贝：填充尾部剩余空间
+        memcpy(dest -> buffer + dest -> end,
+               src -> buffer + src -> start,
+               contiguous_space);
+        
+        // 第二次拷贝：从头部继续
+        memcpy(dest -> buffer,
+               src -> buffer + src -> start + contiguous_space,
+               write_len - contiguous_space);
+    }
+
+    // 更新目标缓冲区索引
+    dest -> end = (dest -> end + write_len) % dest -> size;
+    
+    // 更新源缓冲区已读取部分
+    src -> start = (src -> start + write_len) % src -> size;
+    
+    return write_len;
+}
+
 
 static const char map[] = "0123456789ABCDEF";
 static inline uint8_t u32tohex(uint32_t value, char* hex) {

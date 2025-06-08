@@ -210,10 +210,10 @@ const char *get_mime_by_ext(const char *ext) {
     if (!ext || *ext == '\0') return "application/octet-stream";
     size_t ext_len = strlen(ext);
 
-    for (const struct MimeTypeEntry *entry = mime_types; entry->mime_type != NULL; entry++) {
-        for (int i = 0; entry->extensions[i] != NULL; i++) {
-            if (entry->extensions[i][ext_len] == '\0' && memcmp(entry->extensions[i], ext, ext_len) == 0) {
-                return entry->mime_type;
+    for (const struct MimeTypeEntry *entry = mime_types; entry -> mime_type != NULL; entry++) {
+        for (int i = 0; entry -> extensions[i] != NULL; i++) {
+            if (entry -> extensions[i][ext_len] == '\0' && memcmp(entry -> extensions[i], ext, ext_len) == 0) {
+                return entry -> mime_type;
             }
         }
     }

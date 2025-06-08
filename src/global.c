@@ -223,11 +223,12 @@ bool LJS_init_global_helper(JSContext *ctx) {
     return true;
 }
 
-void LJS_dispatch_ev(JSContext *ctx, const char * name, JSValue data){
+void js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data){
+    JSValue evname = JS_NewString(ctx, name);
     JS_Call(ctx, event_notifier, JS_UNDEFINED, 2, (JSValueConst[]){
-        JS_NewString(ctx, name),
-        data
+        evname, data
     });
+    JS_FreeValue(ctx, evname);
 }
 
 //  ---------- VM features ----------
@@ -374,10 +375,12 @@ static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, i
                     if(JS_IsString(val)){
                         init_apps[init_apps_len++] = (char*)JS_ToCString(ctx, val);
                     }
+                    JS_FreeValue(ctx, val);
                 }
             }
             init_apps[init_apps_len] = '\0';
         }
+        JS_FreeValue(ctx, init_apps_obj);
 
         // module loader
         JSValue loader = JS_GetPropertyStr(ctx, argv[0], "loader");
@@ -391,7 +394,7 @@ static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, i
 
             app -> module_loader = JS_NewCFunctionData(
                 app -> ctx, sandbox_func_proxy, 1, 1,
-                1, (JSValue[]){ JS_MKPTR(JS_TAG_OBJECT, app -> ctx), loader }
+                1, (JSValue[]){ JS_MKPTR(JS_TAG_INT, app -> ctx), loader }
             );
         }
     }
@@ -420,9 +423,11 @@ static JSClassDef js_sandbox_def = {
 static int vm_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetModuleExportList(ctx, m, js_vm_funcs, countof(js_vm_funcs));
 
+    JSValue sandbox = JS_GetClassProto(ctx, js_sandbox_class_id);
     JSValue sandbox_ctor = JS_NewCFunction2(ctx, js_sandbox_constructor, "Sandbox", 1, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, sandbox_ctor, JS_GetClassProto(ctx, js_sandbox_class_id));
+    JS_SetConstructor(ctx, sandbox_ctor, sandbox);
     JS_SetModuleExport(ctx, m, "Sandbox", sandbox_ctor);
+    JS_FreeValue(ctx, sandbox);
 
     JSValue set_event_notifier = JS_NewCFunction(ctx, js_set_event_notifier, "setEventNotifier", 1);
     JS_SetModuleExport(ctx, m, "setEventNotifier", set_event_notifier);
@@ -513,7 +518,7 @@ bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback 
 //     JSValue promise = ((struct JSValueProxy*)opaque) -> val;
 //     if(!JS_PromiseIsHandled(ctx, promise)){
 //         fprintf(stderr, "Uncaught (in promise) ");
-//         LJS_dump_error(ctx, reason);
+//         js_dump(ctx, reason, stderr);
 //     }
 // }
 
@@ -531,8 +536,8 @@ void js_handle_promise_reject(
         // data -> opaque = LJS_NewJSValueProxy(ctx, promise);
         // list_add_tail(&data -> list, &promise_jobs);
         fprintf(stderr, "Uncaught (in promise) ");
-        LJS_dump_error(ctx, reason);
-        JS_FreeValue(ctx, reason);
+        js_dump(ctx, reason, stderr);
+        // JS_FreeValue(ctx, reason);
     }
 }
 

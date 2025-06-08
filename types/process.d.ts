@@ -25,8 +25,6 @@ declare module 'process'{
         readonly pid: number,
         readonly argv: string[],
         readonly entry: string,
-        readonly dirname: string,
-        readonly filename: string,
         cwd: string,
         readonly env: ReactiveEnviron,
         readonly ppid: number,

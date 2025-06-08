@@ -11,11 +11,6 @@ declare const console: {
     warn: (...args: any[]) => void;
     debug: (...args: any[]) => void;
     info: (...args: any[]) => void;
-    count: () => void;
-    countReset: () => void;
-    time: (label?: string) => void;
-    timeEnd: (label?: string) => void;
-    timeLog: (label?: string) => void;
     assert: (expression: any, message?: string) => void;
     clear: () => void;
 }
@@ -172,9 +167,10 @@ declare class U8Pipe {
 
 interface ImportMeta {
     name: string;
-    path: string;
+    url: string;    // note: 如果是文件，为绝对路径，不带"file://"前缀(LJS URL class也可解析此类)
     filename: string;
     dirname: string;
+    main: boolean;   // note: 检查 Worker.onmessage 以分辨是Worker还是主线程
 }
 
 // performance
