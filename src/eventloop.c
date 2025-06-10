@@ -1070,6 +1070,7 @@ static void handle_close(int fd, void* _evfd) {
 
     // remove in epoll
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+    TRACE_EVENTS(evfd, -1);
     __handle_closing = false;
 }
 

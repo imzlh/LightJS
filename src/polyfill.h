@@ -203,3 +203,9 @@ end:
     JS_FreeValue(ctx, jsobj);
     return ret;
 }
+
+static inline void JS_SetCtorProto(JSContext* ctx, JSValueConst ctor, JSClassID class_id){
+    JSValue proto = JS_GetClassProto(ctx, class_id);
+    JS_SetConstructor(ctx, ctor, proto);
+    JS_FreeValue(ctx, proto);
+}

@@ -1687,7 +1687,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     EvFD* fd = NULL;
     JSValue jsobj;
     jsobj = JS_GetPropertyStr(ctx, obj, "keepalive");
-    bool keep_alive = JS_ToBool(ctx, jsobj);
+    bool keep_alive = JS_IsBool(jsobj) ? JS_ToBool(ctx, jsobj) : true;
     JS_FreeValue(ctx, jsobj);
     if(unlikely(!keep_alive && websocket))
         return LJS_Throw(ctx, "WebSocket connection requires keepalive option", NULL);
@@ -2438,17 +2438,16 @@ static JSValue js_url_getQuery(JSContext *ctx, JSValueConst this_val, int argc, 
         JSValue value_arr;
         int64_t len = 0;
         if(JS_IsUndefined(value_arr = JS_GetPropertyStr(ctx, query_obj, query -> key))){
-            value_arr = JS_NewArray(ctx);
-            JS_SetPropertyStr(ctx, query_obj, query -> key, JS_DupValue(ctx, value_arr));
+            value_arr = JS_NewArray(ctx);   // ref=1
+            JS_SetPropertyStr(ctx, query_obj, query -> key, JS_DupValue(ctx, value_arr));   //ref+1-1
         }else{
             JS_GetLength(ctx, value_arr, &len);
         }
         if(likely(query -> value)){
             JSValue value_val = JS_NewString(ctx, query -> value);
             JS_SetPropertyUint32(ctx, value_arr, len ++, value_val);
-        }else{
-            JS_FreeValue(ctx, value_arr);
         }
+        JS_FreeValue(ctx, value_arr);   // ref=0
         JS_SetLength(ctx, value_arr, len);
     }
 
@@ -3814,19 +3813,19 @@ static JSClassDef handler_class = {
 
 int init_http(JSContext *ctx, JSModuleDef *m){
     JSValue headers_ctor = JS_NewCFunction2(ctx, js_headers_constructor, "Headers", 1, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, headers_ctor, JS_GetClassProto(ctx, headers_class_id));
+    JS_SetCtorProto(ctx, headers_ctor, headers_class_id);
     JS_SetModuleExport(ctx, m, "Headers", headers_ctor);
 
     JSValue response_constructor = JS_NewCFunction2(ctx, js_response_constructor, "Response", 1, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, response_constructor, JS_GetClassProto(ctx, response_class_id));
+    JS_SetCtorProto(ctx, response_constructor, response_class_id);
     JS_SetModuleExport(ctx, m, "Response", response_constructor);
 
     JSValue websocket_ctor = JS_NewCFunction2(ctx, js_ws_constructor, "WebSocket", 1, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, websocket_ctor, JS_GetClassProto(ctx, ws_class_id));
+    JS_SetCtorProto(ctx, websocket_ctor, ws_class_id);
     JS_SetModuleExport(ctx, m, "WebSocket", websocket_ctor);
 
     JSValue handler_ctor = JS_NewCFunction2(ctx, js_handler_constructor, "Handler", 1, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, handler_ctor, JS_GetClassProto(ctx, handler_class_id));
+    JS_SetCtorProto(ctx, handler_ctor, handler_class_id);
     JS_SetModuleExport(ctx, m, "Handler", handler_ctor);
 
     // Handler.prototype.from
@@ -3834,7 +3833,7 @@ int init_http(JSContext *ctx, JSModuleDef *m){
 
     // Cookies
     JSValue cookie_ctor = JS_NewCFunction2(ctx, js_cookies_constructor, "Cookies", 1, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, cookie_ctor, JS_GetClassProto(ctx, cookie_jar_class_id));
+    JS_SetCtorProto(ctx, cookie_ctor, cookie_jar_class_id);
     JS_SetModuleExport(ctx, m, "Cookies", cookie_ctor);
 
     return true;
