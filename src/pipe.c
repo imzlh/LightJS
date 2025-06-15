@@ -16,7 +16,7 @@
 #include <termios.h>
 
 struct PipeRWTask{
-    struct promise* promise;
+    Promise* promise;
     JSValue write_data; // for write()
     struct U8Pipe_T* pipe;
 };
@@ -30,14 +30,14 @@ struct FDPipe_T{
     bool closed;
     bool is_socket; // 为socket优化
 
-    struct promise* close;
+    Promise* close;
     uint8_t* data_before_eof;   // read buffer before EOF
     size_t eofbuf_size;
 };
 struct U8PipeTransfer {
     struct U8Pipe_T* pipe[2];
     JSValue filter;             // JS_UNDEFINED if not set
-    struct promise* promise;
+    Promise* promise;
     bool active;
     bool aborted;
 };
@@ -70,14 +70,14 @@ struct Pipe_T{
 };
 
 // Pipe
-static thread_local JSClassID Pipe_class_id;
+static thread_local JSClassID pipe_class_id;
 
 // U8Pipe
-static thread_local JSClassID U8Pipe_class_id;
+static thread_local JSClassID u8pipe_class_id;
 static thread_local uint32_t PIPE_u8_buf_size = 16 * 1024;
 
 // ---------------- Pipe -------------------
-#define GET_PIPE_OPAQUE(var, pipe) struct Pipe_T* var = JS_GetOpaque(pipe, Pipe_class_id); if(!var) return JS_EXCEPTION;
+#define GET_PIPE_OPAQUE(var, pipe) struct Pipe_T* var = JS_GetOpaque(pipe, pipe_class_id); if(!var) return JS_EXCEPTION;
 #define CHECK_PIPE_CLOSED(pipe) if(pipe -> closed) return JS_ThrowTypeError(ctx, "Pipe is closed");
 #define CHECK_PIPE_READABLE(pipe) if(!(pipe -> flag & PIPE_READ)) return JS_ThrowTypeError(ctx, "Pipe is not readable");
 #define CHECK_PIPE_WRITEABLE(pipe) if(!(pipe -> flag & PIPE_WRITE)) return JS_ThrowTypeError(ctx, "Pipe is not writable");
@@ -136,7 +136,7 @@ static void pipe_cleanup(JSRuntime *rt, struct Pipe_T* pipe) {
 }
 
 static void js_pipe_cleanup(JSRuntime *rt, JSValue val) {
-    struct Pipe_T *pipe = JS_GetOpaque(val, Pipe_class_id);
+    struct Pipe_T *pipe = JS_GetOpaque(val, pipe_class_id);
     pipe_cleanup(rt, pipe);
 }
 
@@ -226,7 +226,7 @@ else \
     }
 
     // proto
-    JSValue obj = JS_NewObjectClass(ctx, Pipe_class_id);
+    JSValue obj = JS_NewObjectClass(ctx, pipe_class_id);
 
     // close promise
     DEF_ONCLOSE(pipe);
@@ -241,15 +241,15 @@ else \
 }
 
 // -------------------- U8Pipe ------------------
-#define GET_U8PIPE_OPAQUE(var, pipe) struct U8Pipe_T* var = ((struct U8Pipe_T*)JS_GetOpaque2(ctx, pipe, U8Pipe_class_id)); if(!var) return JS_EXCEPTION;
+#define GET_U8PIPE_OPAQUE(var, pipe) struct U8Pipe_T* var = ((struct U8Pipe_T*)JS_GetOpaque2(ctx, pipe, u8pipe_class_id)); if(!var) return JS_EXCEPTION;
 #define CHECK_U8PIPE_CLOSED(pipe) if(u8pipe_closed(pipe)) return JS_ThrowTypeError(ctx, "U8Pipe is closed");
-#define CHECK_U8PIPE_CLOSED2(pipe, promise) if(u8pipe_closed(pipe)){ LJS_Promise_Reject(promise, "U8Pipe is closed"); return promise -> promise; }
+#define CHECK_U8PIPE_CLOSED2(pipe, promise) if(u8pipe_closed(pipe)){ js_reject(promise, "U8Pipe is closed"); return promise -> promise; }
 #define CHECK_U8PIPE_READABLE(pipe) if(!u8pipe_is(ctx, pipe, PIPE_READ)) return JS_ThrowTypeError(ctx, "U8Pipe is not readable");
 #define CHECK_U8PIPE_WRITEABLE(pipe) if(!u8pipe_is(ctx, pipe, PIPE_WRITE)) return JS_ThrowTypeError(ctx, "U8Pipe is not writable");
 #define CHECK_U8PIPE_LOCKED(pipe, read) if(u8pipe_locked(ctx, pipe, read)) return JS_ThrowTypeError(ctx, "U8Pipe is locked");
 
-#define U8PIPE_UNREF(pipe) pipe -> refcount --; u8pipe_free(JS_GetRuntime(ctx), pipe);
-#define U8PIPE_UNREF_RT(pipe) pipe -> refcount --; u8pipe_free(rt, pipe);
+#define U8PIPE_UNREF(pipe) if(u8pipe_unref(pipe)) u8pipe_free(JS_GetRuntime(ctx), pipe);
+#define U8PIPE_UNREF_RT(pipe) if(u8pipe_unref(pipe)) u8pipe_free(rt, pipe);
 #undef EXCEPTION_THEN_CLOSE
 #define EXCEPTION_THEN_CLOSE(val, ret) if(JS_IsException(val)){ U8PIPE_UNREF(pipe); return ret; } \
     else if(JS_IsPromise(val)) JS_PromiseHandleError(ctx, val);
@@ -268,11 +268,13 @@ else \
 
 static inline bool u8pipe_closed(struct U8Pipe_T* pipe);
 static inline void u8pipe_free(JSRuntime *rt, struct U8Pipe_T* pipe);
+static inline bool u8pipe_unref(struct U8Pipe_T* pipe);
+static inline void u8pipe_ref(struct U8Pipe_T* pipe);
 
 static void u8pipe_handle_close(JSRuntime *rt, struct U8Pipe_T* pipe){
     // transfer owned 1 ref
     if(pipe -> transfer && pipe -> refcount == 1){
-        LJS_Promise_Reject(pipe -> transfer -> promise, "U8Pipe is closed");
+        js_reject(pipe -> transfer -> promise, "U8Pipe is closed");
         js_free_rt(rt, pipe -> transfer);
         U8PIPE_UNREF_RT(pipe -> transfer -> pipe[1]);
         U8PIPE_UNREF_RT(pipe);
@@ -290,18 +292,27 @@ static void u8pipe_handle_close(JSRuntime *rt, struct U8Pipe_T* pipe){
                     error = errno;
 
                 if(error == 0){
-                    LJS_Promise_Resolve(fdpipe -> close, JS_UNDEFINED);
+                    js_resolve(fdpipe -> close, JS_UNDEFINED);
                 } else {
-                    LJS_Promise_Reject(fdpipe -> close, strerror(error));
+                    js_reject(fdpipe -> close, strerror(error));
                 }
             }else{
-                LJS_Promise_Resolve(fdpipe -> close, JS_UNDEFINED);
+                js_resolve(fdpipe -> close, JS_UNDEFINED);
             }
         }
         // pipe -> pipe.fdpipe  -> fd was freed by evfd
     }else{
         pipe_handle_close(rt, pipe -> pipe.pipe);
     }
+}
+
+// Return true if u8pipe will be GCed
+static inline bool u8pipe_unref(struct U8Pipe_T* pipe){
+    return 1 == pipe -> refcount --;
+}
+
+static inline void u8pipe_ref(struct U8Pipe_T* pipe){
+    pipe -> refcount ++;
 }
 
 static inline void u8pipe_free(JSRuntime *rt, struct U8Pipe_T* pipe) {
@@ -316,9 +327,9 @@ static inline void u8pipe_free(JSRuntime *rt, struct U8Pipe_T* pipe) {
     }
 }
 
-static void js_u8pipe_cleanup(JSRuntime *rt, JSValue val) {
+static void u8pipe_finalizer(JSRuntime *rt, JSValue val) {
     // U8Pipe will be 
-    struct U8Pipe_T* pipe = ((struct U8Pipe_T*)JS_GetOpaque(val, U8Pipe_class_id));
+    struct U8Pipe_T* pipe = ((struct U8Pipe_T*)JS_GetOpaque(val, u8pipe_class_id));
     U8PIPE_UNREF_RT(pipe);
 }
 
@@ -358,7 +369,7 @@ void free_malloc(JSRuntime* rt, void* opaque, void* ptr){
 }
 
 struct PipeFillJob {
-    struct promise* promise;
+    Promise* promise;
     uint32_t total;
     struct U8Pipe_T* pipe;
     bool once;
@@ -369,7 +380,7 @@ static void u8pipe_fill_job(JSContext* ctx, bool is_error, JSValue result, void*
     struct Pipe_T* pipe = job -> pipe -> pipe.pipe;
 
     if(is_error){
-        LJS_Promise_Reject(job -> promise, "Pipe EOF reached");
+        js_reject(job -> promise, "Pipe EOF reached");
         pipe_handle_close(JS_GetRuntime(ctx), pipe);
         goto done;
     }
@@ -377,7 +388,7 @@ static void u8pipe_fill_job(JSContext* ctx, bool is_error, JSValue result, void*
     size_t size;
     uint8_t* data = JS_GetUint8Array(ctx, &size, result);
     if(!data){
-        LJS_Promise_Reject(job -> promise, "Invaild data returned by pull()");
+        js_reject(job -> promise, "Invaild data returned by pull()");
         goto done;
     }
     JS_FreeValue(ctx, result);
@@ -391,11 +402,12 @@ static void u8pipe_fill_job(JSContext* ctx, bool is_error, JSValue result, void*
         buffer_seek(pipe -> read_buf, pipe -> read_buf -> start + size);
         JSValue ret = JS_NewUint8Array(ctx, res, size2, free_js_malloc, NULL, false);
         
-        LJS_Promise_Resolve(job -> promise, ret);
+        js_resolve(job -> promise, ret);
         if(writed < size){
             // lost: re-push
             buffer_push(pipe -> read_buf, res + size, size - writed);
         }
+        JS_FreeValue(ctx, ret);
 done:
         U8PIPE_UNREF(job -> pipe);
         buffer_free(pipe -> read_buf);
@@ -411,7 +423,7 @@ done:
     }
 }
 
-static inline bool u8pipe_fill(JSContext* ctx, struct U8Pipe_T* pipe, struct promise* promise, uint32_t total, bool once){
+static inline bool u8pipe_fill(JSContext* ctx, struct U8Pipe_T* pipe, Promise* promise, uint32_t total, bool once){
     struct PipeFillJob* job = js_malloc(ctx, sizeof(struct PipeFillJob));
     job -> promise = promise;
     job -> total = total;
@@ -434,10 +446,11 @@ static int evread_callback(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void
     struct U8Pipe_T* piperaw = task -> pipe;
     struct FDPipe_T* pipe = piperaw -> pipe.fdpipe;
     if(read_size == 0 && NULL == buffer){// note: read_size == 0 is not always means EOF
-        LJS_Promise_Reject(task -> promise, "Pipe reached EOF");
+        js_reject(task -> promise, "Pipe reached EOF");
     }else{
         JSValue data = JS_NewUint8Array(pipe -> ctx, buffer, read_size, free_js_malloc, NULL, false);
-        LJS_Promise_Resolve(task -> promise, data);
+        js_resolve(task -> promise, data);
+        JS_FreeValue(pipe -> ctx, data);
     }
     JSContext* ctx = pipe -> ctx;
     U8PIPE_UNREF(piperaw);
@@ -449,7 +462,7 @@ static int evread_callback(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void
     JSValue ret_promise = promise -> promise; \
     if(pipe -> pipe.fdpipe -> data_before_eof) blk \
     else{ \
-        LJS_Promise_Reject(promise, "U8Pipe is closed"); \
+        js_reject(promise, "U8Pipe is closed"); \
         return ret_promise; \
     } \
 }
@@ -467,7 +480,7 @@ static JSValue js_U8Pipe_read(JSContext *ctx, JSValueConst this_val, int argc, J
     CHECK_U8PIPE_LOCKED(pipe, true);
 
     uint32_t expected_size = 0;
-    struct promise* promise = LJS_NewPromise(ctx);
+    Promise* promise = js_promise(ctx);
     JSValue promiseobj = promise -> promise;
 
     if(argc == 1){
@@ -485,12 +498,13 @@ static JSValue js_U8Pipe_read(JSContext *ctx, JSValueConst this_val, int argc, J
                 // rest data
                 memmove(pipe -> pipe.fdpipe -> data_before_eof, pipe -> pipe.fdpipe -> data_before_eof + expected_size, pipe -> pipe.fdpipe -> eofbuf_size - expected_size);
             }
-            LJS_Promise_Resolve(promise, buf);
+            js_resolve(promise, buf);
+            js_resolve(pipe -> pipe.fdpipe -> close, JS_UNDEFINED);
             return ret_promise;
         });
 
         NEW_TASK(promise, pipe);
-        pipe -> refcount ++;
+        u8pipe_ref(pipe);
 
         if(expected_size == 0){
             uint8_t* buf = js_malloc(ctx, PIPE_u8_buf_size);
@@ -501,7 +515,7 @@ static JSValue js_U8Pipe_read(JSContext *ctx, JSValueConst this_val, int argc, J
         }
     }else{  // U8PIPE
         CHECK_U8PIPE_CLOSED2(pipe, promise);
-        pipe -> refcount ++;
+        u8pipe_ref(pipe);
         if(!u8pipe_fill(ctx, pipe, promise, expected_size, expected_size == 0))
             return LJS_Throw(ctx, "Failed to fill buffer", NULL);
     }
@@ -512,9 +526,9 @@ static JSValue js_U8Pipe_read(JSContext *ctx, JSValueConst this_val, int argc, J
 static void evwrite_callback(EvFD* evfd, bool success, void* opaque){
     struct PipeRWTask* task = opaque;
     if(success)
-        LJS_Promise_Resolve(task -> promise, JS_UNDEFINED);
+        js_resolve(task -> promise, JS_UNDEFINED);
     else
-        LJS_Promise_Reject(task -> promise, "Write failed");
+        js_reject(task -> promise, "Write failed");
     JSContext* ctx = task -> pipe -> pipe.fdpipe -> ctx;
     U8PIPE_UNREF(task -> pipe);
     js_free(ctx, task);
@@ -537,9 +551,9 @@ static JSValue js_U8Pipe_write(JSContext *ctx, JSValueConst this_val, int argc, 
 
     if(expected_size == 0) return LJS_NewResolvedPromise(ctx, JS_UNDEFINED);
 
-    pipe -> refcount ++;
+    u8pipe_ref(pipe);
     if (pipe -> fdpipe){
-        struct promise* promise = LJS_NewPromise(ctx);
+        Promise* promise = js_promise(ctx);
         // 发送数据
         NEW_TASK(promise, pipe);
         task -> write_data = JS_DupValue(ctx, argv[0]); 
@@ -570,13 +584,11 @@ static JSValue js_U8Pipe_close(JSContext *ctx, JSValueConst this_val, int argc, 
 }
 
 static void sync_promise_proxy(EvFD* fd, bool success, void* opaque){
-    struct promise* promise = opaque;
-    if(((uintptr_t)(promise -> user_data) ++) == 1){
-        if(success)
-            LJS_Promise_Resolve(promise, JS_UNDEFINED);
-        else
-            LJS_Promise_Reject(promise, "Pipe closed");
-    }
+    Promise* promise = opaque;
+    if(success)
+        js_resolve(promise, JS_UNDEFINED);
+    else
+        js_reject(promise, "Pipe closed");
 }
 
 static JSValue js_U8Pipe_sync(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -584,10 +596,8 @@ static JSValue js_U8Pipe_sync(JSContext *ctx, JSValueConst this_val, int argc, J
     CHECK_U8PIPE_CLOSED(pipe);
     if(!pipe -> fdpipe) return LJS_Throw(ctx, "U8Pipe.sync() only support for fdpipe", NULL);
 
-    struct promise* promise = LJS_NewPromise(ctx);
-    promise -> user_data = 0;
-    evfd_wait(pipe -> pipe.fdpipe -> fd, false, sync_promise_proxy, promise);
-    evfd_wait(pipe -> pipe.fdpipe -> fd, true, sync_promise_proxy, promise);
+    Promise* promise = js_promise(ctx);
+    evfd_wait2(pipe -> pipe.fdpipe -> fd, sync_promise_proxy, promise);
     return promise -> promise;
 }
 
@@ -605,20 +615,21 @@ static JSValue js_U8Pipe_readline(JSContext *ctx, JSValueConst this_val, int arg
     if(argc == 1) JS_ToUint32(ctx, &expected_size, argv[0]);
     uint8_t* buffer = js_malloc(ctx, expected_size);
 
-    struct promise* promise = LJS_NewPromise(ctx);
+    Promise* promise = js_promise(ctx);
     if(!promise){
         return JS_ThrowOutOfMemory(ctx);
     }
 
     U8PIPE_FD_EOFCHECK(pipe, promise, {
         EXPORT_EOF(pipe, buf, pipe -> pipe.fdpipe -> eofbuf_size);
-        LJS_Promise_Resolve(promise, buf);
+        js_resolve(promise, buf);
+        js_resolve(pipe -> pipe.fdpipe -> close, JS_UNDEFINED);
         return promise -> promise;
     });
 
     NEW_TASK(promise, pipe);
 
-    pipe -> refcount ++;
+    u8pipe_ref(pipe);
     evfd_readline(pipe -> pipe.fdpipe -> fd, expected_size, buffer, evread_callback, task);
     return promise -> promise;
 }
@@ -632,7 +643,7 @@ static struct U8PipeTransfer* pipeto_transfer_new(JSContext* ctx, JSValue jsfrom
     struct U8PipeTransfer* transfer = js_malloc(ctx, sizeof(struct U8PipeTransfer));
     transfer -> pipe[0] = from;
     transfer -> pipe[1] = to;
-    transfer -> promise = LJS_NewPromise(ctx);
+    transfer -> promise = js_promise(ctx);
     transfer -> active = true;
     transfer -> aborted = false;
     return transfer;
@@ -663,6 +674,7 @@ static bool pipeto_transfer_filter(struct Buffer* buf, void* user_data){
     JSValue arr = JS_NewUint8Array(ctx, buf -> buffer, buffer_used(buf), NULL, NULL, false);
     CALL_FILTER(arr, filter);
     buf -> end = size;  // size from filter
+    JS_FreeValue(ctx, arr);
     return true;    // continue
     
 _false:
@@ -673,7 +685,7 @@ _false:
 done:
     js_free(ctx, buf -> buffer);
     buffer_free(buf);
-    LJS_Promise_Resolve(transfer -> promise, JS_UNDEFINED);
+    js_resolve(transfer -> promise, JS_UNDEFINED);
     FREE_TRANSFER(ctx, transfer -> pipe[0], transfer -> pipe[1]);
     return false;   // stop
 }
@@ -681,11 +693,11 @@ done:
 static void pipeto_transfer_callback(struct EvFD* from, struct EvFD* to, EvPipeToNotifyType type, void* user_data){
     struct U8PipeTransfer* transfer = user_data;
     JSContext* ctx = transfer -> promise -> ctx;
-    LJS_Promise_Resolve(transfer -> promise, JS_UNDEFINED);
+    js_resolve(transfer -> promise, JS_UNDEFINED);
     FREE_TRANSFER(ctx, transfer -> pipe[0], transfer -> pipe[1]);
 }
 
-#define GET_ALL_OPAQUE(pipe, pipe2) struct U8Pipe_T* pipe_ ##pipe = JS_GetOpaque(pipe, U8Pipe_class_id); struct U8Pipe_T* pipe_ ##pipe2 = JS_GetOpaque(pipe2, U8Pipe_class_id);
+#define GET_ALL_OPAQUE(pipe, pipe2) struct U8Pipe_T* pipe_ ##pipe = JS_GetOpaque(pipe, u8pipe_class_id); struct U8Pipe_T* pipe_ ##pipe2 = JS_GetOpaque(pipe2, u8pipe_class_id);
 static JSValue pipeto_init_fd2fd(JSContext* ctx, JSValue from, JSValue to, JSValue filter){
     GET_ALL_OPAQUE(from, to);
     EvFD *fd_in = pipe_from -> pipe.fdpipe -> fd,
@@ -700,7 +712,7 @@ static JSValue pipeto_init_fd2fd(JSContext* ctx, JSValue from, JSValue to, JSVal
         pipeto_transfer_callback, t
     )){ 
         pipeto_transfer_free(ctx, t);
-        LJS_Promise_Reject(t -> promise, "Failed to pipe");
+        js_reject(t -> promise, "Failed to pipe");
     }
     return t -> promise -> promise;
 }
@@ -714,7 +726,7 @@ static void pipeto_promisecb(JSContext* ctx, bool is_error, JSValue val, void* u
     struct U8PipeTransfer* transfer = user_data;
     if(is_error){
         JSContext* ctx = transfer -> promise -> ctx;
-        LJS_Promise_Resolve(transfer -> promise, JS_UNDEFINED);
+        js_resolve(transfer -> promise, JS_UNDEFINED);
         transfer -> pipe[1] -> pipe.pipe -> write_lock = false; // release lock
         FREE_TRANSFER(ctx, transfer -> pipe[0], transfer -> pipe[1]);
     }else if(transfer -> pipe[0] -> fdpipe){
@@ -748,7 +760,7 @@ static void pipeto_promisecb2(JSContext* ctx, bool is_error, JSValue val, void* 
 
 done:
         JSContext* ctx = transfer -> promise -> ctx;
-        LJS_Promise_Resolve(transfer -> promise, JS_UNDEFINED);
+        js_resolve(transfer -> promise, JS_UNDEFINED);
         FREE_TRANSFER(ctx, transfer -> pipe[0], transfer -> pipe[1]);
     }else if(transfer -> pipe[1] -> fdpipe){
         size_t psize;
@@ -779,6 +791,7 @@ static int pipeto_evloopcb(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void
             CALL_FILTER(data, t -> filter);
         }
         JSValue ret = JS_Call(ctx, write, JS_NULL, 1, (JSValueConst[]){ data });
+        JS_FreeValue(ctx, data);
         LJS_enqueue_promise_job(ctx, ret, pipeto_promisecb, t);
 
 _false:
@@ -786,7 +799,7 @@ _false:
     }else{
 done:
         JSContext* ctx = t -> promise -> ctx;
-        LJS_Promise_Resolve(t -> promise, JS_UNDEFINED);
+        js_resolve(t -> promise, JS_UNDEFINED);
         FREE_TRANSFER(ctx, t -> pipe[0], t -> pipe[1]);
     }
 
@@ -799,7 +812,7 @@ static JSValue pipeto_init_any2any(JSContext* ctx, JSValue from, JSValue to, JSV
         pipe_from -> transfer = 
             pipeto_transfer_new(ctx, from, to, pipe_from, pipe_to);
     if(!t){
-        LJS_Promise_Reject(t -> promise, "Failed to pipe");
+        js_reject(t -> promise, "Failed to pipe");
         goto end;
     }
     t -> filter = JS_DupValue(ctx, filter);
@@ -817,7 +830,7 @@ static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc,
     CHECK_U8PIPE_LOCKED(from, true);
 
     JSValue to = argv[0], filter = argc == 2 ? argv[1] : JS_NULL;
-    struct U8Pipe_T* to_data = JS_GetOpaque(to, U8Pipe_class_id);
+    struct U8Pipe_T* to_data = JS_GetOpaque(to, u8pipe_class_id);
     if(!to_data){
         return LJS_Throw(ctx, "Expected a U8Pipe object", "U8Pipe.pipeTo(to: U8Pipe, filter?: Function): Promise<boolean>");
     }
@@ -830,10 +843,11 @@ static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc,
 
     if(from -> fdpipe && from -> pipe.fdpipe -> closed && from -> pipe.fdpipe -> data_before_eof){
         // write to target
-        js_U8Pipe_write(ctx, to, 1, (JSValueConst[]){
-            JS_NewUint8Array(ctx, from -> pipe.fdpipe -> data_before_eof, from -> pipe.fdpipe -> eofbuf_size, free_js_malloc, NULL, false)
-        });
+        JSValue data = JS_NewUint8Array(ctx, from -> pipe.fdpipe -> data_before_eof, from -> pipe.fdpipe -> eofbuf_size, free_js_malloc, NULL, false);
+        js_U8Pipe_write(ctx, to, 1, (JSValueConst[]){data});
         from -> pipe.fdpipe -> data_before_eof = NULL;
+        js_resolve(from -> pipe.fdpipe -> close, JS_UNDEFINED);
+        JS_FreeValue(ctx, data);
 
         JSValue prom[2];
         JSValue ret = JS_NewPromiseCapability(ctx, prom);
@@ -845,8 +859,8 @@ static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc,
 
     // Note: use ref to control lifetime, -- to release
     CHECK_U8PIPE_CLOSED(from);
-    from -> refcount ++;
-    to_data -> refcount ++;
+    u8pipe_ref(from);
+    u8pipe_ref(to_data);
 
     JSValue ret;
     if(from -> fdpipe && to_data -> fdpipe){
@@ -864,12 +878,13 @@ static void evclose_callback(EvFD* fd, void* opaque){
     U8PIPE_UNREF(pipe);
 
     if(!fdpipe -> data_before_eof){
+        js_resolve(fdpipe -> close, JS_UNDEFINED);
         fdpipe -> closed = true;
     }
 }
 
 static JSValue js_U8Pipe_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
-    JSValue obj = JS_NewObjectClass(ctx, U8Pipe_class_id);
+    JSValue obj = JS_NewObjectClass(ctx, u8pipe_class_id);
     if(JS_IsException(obj)){
         return JS_ThrowOutOfMemory(ctx);
     }
@@ -922,7 +937,7 @@ static JSValue js_U8Pipe_constructor(JSContext *ctx, JSValueConst new_target, in
 }
 
 static inline int get_fd_from_pipe(JSContext* ctx, JSValueConst pipe){
-    struct U8Pipe_T* pipe_data = JS_GetOpaque(pipe, U8Pipe_class_id);
+    struct U8Pipe_T* pipe_data = JS_GetOpaque(pipe, u8pipe_class_id);
     if(!pipe_data || !pipe_data -> fdpipe) return -1;
     EvFD* fd = pipe_data -> pipe.fdpipe -> fd;
     return evfd_getfd(fd, NULL);
@@ -1033,7 +1048,7 @@ static JSValue js_iopipe_istty(JSContext *ctx, JSValueConst this_val){
 }
 
 static JSValue js_iopipe_fflush(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-    struct U8Pipe_T* pipe = JS_GetOpaque(this_val, U8Pipe_class_id);
+    struct U8Pipe_T* pipe = JS_GetOpaque(this_val, u8pipe_class_id);
     if(!pipe) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
     EvFD* fd = pipe -> pipe.fdpipe -> fd;
     if(evfd_isAIO(fd)) return JS_UNDEFINED; // 不支持异步IO
@@ -1090,7 +1105,7 @@ static JSValue js_iopipe_fseek(JSContext *ctx, JSValueConst this_val, int argc, 
 
 static JSClassDef U8Pipe_class = {
     "U8Pipe",
-    .finalizer = js_u8pipe_cleanup
+    .finalizer = u8pipe_finalizer
 };
 static const JSCFunctionListEntry U8Pipe_proto_funcs[] = {
     JS_CFUNC_DEF("read", 0, js_U8Pipe_read),
@@ -1117,22 +1132,22 @@ bool LJS_init_pipe(JSContext *ctx) {
     JSRuntime* rt = JS_GetRuntime(ctx);
 
     // U8Pipe
-    JS_NewClassID(rt, &U8Pipe_class_id);
-    if(-1 == JS_NewClass(rt, U8Pipe_class_id, &U8Pipe_class)) return false;
+    JS_NewClassID(rt, &u8pipe_class_id);
+    if(-1 == JS_NewClass(rt, u8pipe_class_id, &U8Pipe_class)) return false;
     JSValue u8pipe_proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, u8pipe_proto, U8Pipe_proto_funcs, countof(U8Pipe_proto_funcs));
-    JS_SetClassProto(ctx, U8Pipe_class_id, u8pipe_proto);
+    JS_SetClassProto(ctx, u8pipe_class_id, u8pipe_proto);
 
     JSValue u8pipe_constructor = JS_NewCFunction2(ctx, js_U8Pipe_constructor, "U8Pipe", 2, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, u8pipe_constructor, u8pipe_proto);
     JS_SetPropertyStr(ctx, global_obj, "U8Pipe", u8pipe_constructor);
 
     // Pipe
-    JS_NewClassID(rt, &Pipe_class_id);
-    if(-1 == JS_NewClass(rt, Pipe_class_id, &Pipe_class)) return false;
+    JS_NewClassID(rt, &pipe_class_id);
+    if(-1 == JS_NewClass(rt, pipe_class_id, &Pipe_class)) return false;
     JSValue pipe_proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, pipe_proto, Pipe_proto_funcs, countof(Pipe_proto_funcs));
-    JS_SetClassProto(ctx, Pipe_class_id, pipe_proto);
+    JS_SetClassProto(ctx, pipe_class_id, pipe_proto);
 
     JSValue pipe_constructor = JS_NewCFunction2(ctx, js_pipe_constructor, "Pipe", 0, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, pipe_constructor, pipe_proto);
@@ -1151,7 +1166,7 @@ bool LJS_init_pipe(JSContext *ctx) {
  * @param pipe 管道结构体
  */
 static inline JSValue u8pipe_new(JSContext *ctx, bool fdpipe, struct U8Pipe_T *pipe){
-    JSValue obj = JS_NewObjectClass(ctx, U8Pipe_class_id);
+    JSValue obj = JS_NewObjectClass(ctx, u8pipe_class_id);
     pipe -> transfer = NULL;
     pipe -> fdpipe = fdpipe;
     JS_SetOpaque(obj, pipe);
@@ -1159,7 +1174,7 @@ static inline JSValue u8pipe_new(JSContext *ctx, bool fdpipe, struct U8Pipe_T *p
     pipe -> refcount = 1;
     if(fdpipe){
         pipe -> pipe.fdpipe = js_malloc(ctx, sizeof(struct FDPipe_T));
-        struct promise* p = pipe -> pipe.fdpipe -> close = LJS_NewPromise(ctx);
+        Promise* p = pipe -> pipe.fdpipe -> close = js_promise(ctx);
         JS_SetPropertyStr(ctx, obj, "onclose", p -> promise);
         
         pipe -> pipe.fdpipe -> closed = false;
@@ -1290,7 +1305,7 @@ JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag,
 ){
     if(!ctx) abort();
     struct Pipe_T *pipe = js_malloc(ctx, sizeof(struct Pipe_T));
-    JSValue obj = JS_NewObjectClass(ctx, Pipe_class_id);
+    JSValue obj = JS_NewObjectClass(ctx, pipe_class_id);
     
     JSValue data[] = { 
         JS_MKPTR(JS_TAG_INT, pipe),
@@ -1319,7 +1334,7 @@ JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag,
 }
 
 EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj){
-    struct U8Pipe_T* pipe = JS_GetOpaque(obj, U8Pipe_class_id);
+    struct U8Pipe_T* pipe = JS_GetOpaque(obj, u8pipe_class_id);
     if(!pipe) return NULL;
     return pipe -> pipe.fdpipe ? pipe -> pipe.fdpipe -> fd : NULL;
 }

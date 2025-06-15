@@ -191,6 +191,9 @@ typedef struct {
     // module
     JSValue module_loader;
     JSValue module_format;
+
+    // thread
+    pthread_t thread;
 } App;
 
 typedef struct SignalEvent {
@@ -250,7 +253,6 @@ typedef void (*DnsErrorCallback)(const char* error_msg, void* user_data);
 
 // Core events
 void js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data);
-_Noreturn void js_exit(int ret_code);
 
 // console
 void js_dump(JSContext *ctx, JSValueConst val, FILE* target_fd);
@@ -317,7 +319,7 @@ bool evfd_remove_sni(const char* name);
 bool evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config);
 #endif
 EvFD* evcore_setTimeout(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
-EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
+EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* cbopaque, EvCloseCallback close_cb, void* close_opaque);
 bool evcore_clearTimer(int timer_fd);
 bool evcore_clearTimer2(EvFD* evfd);
 EvFD* evcore_inotify(EvINotifyCallback callback, void* user_data);
@@ -382,3 +384,29 @@ void free_malloc(JSRuntime* rt, void* opaque, void* ptr);
 void base64_decode(const char *input, size_t len, uint8_t *output, size_t *output_len);
 void base64_decode(const char *input, size_t len, uint8_t *output, size_t *output_len);
 void base64_encode(const uint8_t *input, size_t len, char *output);
+
+typedef struct promise{
+    JSContext* ctx;
+    JSValue resolve;
+    JSValue reject;
+    JSValue promise;
+
+#ifdef LJS_DEBUG
+    const char* created;
+    const char* resolved;
+
+    struct list_head link;
+#endif
+} Promise;
+
+Promise* __js_promise(JSContext *ctx, const char* __debug__);
+void __js_resolve(struct promise* proxy, JSValue value, const char* __debug__);
+void __js_reject(struct promise* proxy, const char* msg, const char* __debug__);
+void __js_reject2(struct promise* proxy, JSValue value, const char* __debug__);
+
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+#define js_promise(ctx) __js_promise(ctx, __FILE__ ":" TOSTRING(__LINE__))
+#define js_resolve(proxy, value) __js_resolve(proxy, value, __FILE__ ":" TOSTRING((__LINE__)))
+#define js_reject(proxy, msg) __js_reject(proxy, msg, __FILE__ ":" TOSTRING(__LINE__))
+#define js_reject2(proxy, value) __js_reject2(proxy, value, __FILE__ ":" STRINGIFY(__LINE__))

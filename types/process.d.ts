@@ -33,7 +33,7 @@ declare module 'process'{
         removeSignal: (callback: () => void, sig?: number) => boolean
     }
 
-    const exit: (code?: number) => void;
+    const exit: (code?: number) => never;
 
     const signals: {
         readonly SIGHUP: number,

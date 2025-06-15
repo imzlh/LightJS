@@ -134,6 +134,15 @@ var term_cursor_x = 0;
 
 var content = new Sandbox();
 
+/**
+ * 
+ * @param {string} data 
+ */
+function writeToStdout(data){
+    const d = encodeStr(data);
+    stdout.write(d);
+}
+
 function termInit() {
     var tab;
 
@@ -143,7 +152,7 @@ function termInit() {
         tab = stdin.ttySize;
         stdin.ttyRaw(true);
         if (tab)
-            term_width = tab.cols;
+            term_width = tab[1];
     }
 
     /* install a Ctrl-C signal handler */
@@ -266,9 +275,9 @@ async function print_color_text(str, start, style_names) {
         var style = style_names[i = j];
         while (++j < str.length && style_names[j] == style)
             continue;
-        stdout.write(encodeStr(colors[styles[style] || 'none']));
-        stdout.write(encodeStr(str.substring(i, j)));
-        stdout.write(encodeStr(colors['none']));
+        writeToStdout(colors[styles[style] || 'none']);
+        writeToStdout(str.substring(i, j));
+        writeToStdout(colors['none']);
     }
 }
 
@@ -278,7 +287,7 @@ async function print_color_text(str, start, style_names) {
  * @param {string} code 
  */
 function print_csi(n, code) {
-    stdout.write(encodeStr("\x1b[" + ((n != 1) ? n : "") + code));
+    writeToStdout("\x1b[" + ((n != 1) ? n : "") + code);
 }
 
 /* XXX: handle double-width characters */
@@ -291,7 +300,7 @@ function move_cursor(delta) {
     if (delta > 0) {
         while (delta != 0) {
             if (term_cursor_x == (term_width - 1)) {
-                stdout.write(encodeStr("\n")); /* translated to CRLF */
+                writeToStdout("\n"); /* translated to CRLF */
                 term_cursor_x = 0;
                 delta--;
             } else {
@@ -326,7 +335,7 @@ function update() {
     if (cmd != last_cmd) {
         if (!show_colors && last_cmd.substring(0, last_cursor_pos) == cmd.substring(0, last_cursor_pos)) {
             /* optimize common case */
-            stdout.write(encodeStr(cmd.substring(last_cursor_pos)));
+            writeToStdout(cmd.substring(last_cursor_pos));
         } else {
             /* goto the start of the line */
             move_cursor(-ucs_length(last_cmd.substring(0, last_cursor_pos)));
@@ -336,16 +345,16 @@ function update() {
                 var colorstate = colorize_js(str);
                 print_color_text(str, start, colorstate[2]);
             } else {
-                stdout.write(encodeStr(cmd));
+                writeToStdout(cmd);
             }
         }
         term_cursor_x = (term_cursor_x + ucs_length(cmd)) % term_width;
         if (term_cursor_x == 0) {
             /* show the cursor on the next line */
-            stdout.write(encodeStr(" \x08"));
+            writeToStdout(" \x08");
         }
         /* remove the trailing characters */
-        stdout.write(encodeStr("\x1b[J"));
+        writeToStdout("\x1b[J");
         last_cmd = cmd;
         last_cursor_pos = cmd.length;
     }
@@ -446,7 +455,7 @@ function clear_screen() {
 }
 
 function accept_line() {
-    stdout.write(encodeStr("\n"));
+    writeToStdout("\n");
     history_add(cmd);
     return -1;
 }
@@ -542,7 +551,7 @@ function delete_char() {
 
 function control_d() {
     if (cmd.length == 0) {
-        stdout.write(encodeStr("\n"));
+        writeToStdout("\n");
         return -3; /* exit read eval print loop */
     } else {
         delete_char_dir(1);
@@ -635,13 +644,14 @@ function yank() {
 }
 
 function control_c() {
-    if (last_fun === control_c) {
-        stdout.write(encodeStr("\n"));
-        _exit(0);
-    } else {
-        stdout.write(encodeStr("\n(Press Ctrl-C again to quit)\n"));
+    // if (last_fun === control_c) {
+    //     writeToStdout("\n");
+    //     _exit(0);
+    // } else {
+    //     writeToStdout("\n(Press Ctrl-C again to quit)\n");
+    writeToStdout("^C\n");
         readline_print_prompt();
-    }
+    // }
 }
 
 function reset() {
@@ -809,7 +819,7 @@ function completion() {
         max_width += 2;
         n_cols = Math.max(1, Math.floor((term_width + 1) / max_width));
         n_rows = Math.ceil(tab.length / n_cols);
-        stdout.write(encodeStr("\n"));
+        writeToStdout("\n");
         /* display the sorted list column-wise */
         for (row = 0; row < n_rows; row++) {
             for (col = 0; col < n_cols; col++) {
@@ -819,9 +829,9 @@ function completion() {
                 s = tab[i];
                 if (col != n_cols - 1)
                     s = s.padEnd(max_width);
-                stdout.write(encodeStr(s));
+                writeToStdout(s);
             }
-            stdout.write(encodeStr("\n"));
+            writeToStdout("\n");
         }
         /* show a new prompt */
         readline_print_prompt();
@@ -899,7 +909,7 @@ function dupstr(str, count) {
 /** @type {Function} */ var readline_cb;
 
 function readline_print_prompt() {
-    stdout.write(encodeStr(prompt));
+    writeToStdout(prompt);
     term_cursor_x = ucs_length(prompt) % term_width;
     last_cmd = "";
     last_cursor_pos = 0;
@@ -1609,8 +1619,8 @@ util.inspect = function (val, show_hidden, max_depth = 1, use_colors = true) {
  * @param {string} val 
  */
 function print(val) {
-    stdout.write(encodeStr(util.inspect(val, { depth: show_depth, colors: show_colors, showHidden: show_hidden })));
-    stdout.write(encodeStr("\n"));
+    writeToStdout(util.inspect(val, { depth: show_depth, colors: show_colors, showHidden: show_hidden }));
+    writeToStdout("\n");
 }
 
 /* return true if the string was a directive */
@@ -1646,14 +1656,14 @@ function handle_directive(a) {
     if (fun && partial < 2) {
         fun(a.substring(pos).trim());
     } else {
-        stdout.write(encodeStr(`Unknown directive: ${cmd}\n`));
+        writeToStdout(`Unknown directive: ${cmd}\n`);
     }
     return true;
 }
 
 function help() {
     var sel = (/** @type {boolean} */ n) => n ? "*" : " ";
-    stdout.write(encodeStr(".help    print this help\n" +
+    writeToStdout(".help    print this help\n" +
         ".x      " + sel(hex_mode) + "hexadecimal number display\n" +
         ".dec    " + sel(!hex_mode) + "decimal number display\n" +
         ".time   " + sel(show_time) + "toggle timing display\n" +
@@ -1665,7 +1675,7 @@ function help() {
         ".light  " + sel(styles == themes.light) + "select light color theme\n" +
         ".clear   clear the terminal\n" +
         ".load    load source code from a file\n" +
-        ".quit    exit\n"));
+        ".quit    exit\n");
 }
 
 /**
@@ -1679,13 +1689,14 @@ function load(s) {
         const data = read(s, true);
         content.eval(data);
     } catch (e) {
-        stdout.write(encodeStr(`${e}\n`));
+        writeToStdout(`${e}\n`);
     }
 }
 
 /**
  * 
  * @param {number} e 
+ * @returns {never}
  */
 function _exit(e) {
     save_history();
@@ -1714,7 +1725,7 @@ var directives = Object.setPrototypeOf(/** @type {Record<string, (p: string) => 
     "color": (s) => { show_colors = to_bool(s, !show_colors); },
     "dark": () => { styles = themes.dark; },
     "light": () => { styles = themes.light; },
-    "clear": () => { stdout.write(encodeStr("\x1b[H\x1b[J")) },
+    "clear": () => { writeToStdout("\x1b[H\x1b[J") },
     "quit": () => { _exit(0); },
 }), null);
 
@@ -1755,8 +1766,6 @@ function handle_cmd(expr) {
         return false;
     }
     mexpr = "";
-
-    eval_and_print(expr);
 
     return true;
 }
@@ -1803,22 +1812,33 @@ function print_eval_result(result) {
  */
 function print_eval_error(error) {
     if (show_colors) {
-        stdout.write(encodeStr(colors[styles.error]));
+        writeToStdout(colors[styles.error]);
     }
     if (error instanceof Error) {
-        stdout.write(encodeStr(String(error)));
-        stdout.write(encodeStr('\n'));
+        writeToStdout(String(error));
+        writeToStdout('\n');
         if (error.stack) {
-            stdout.write(encodeStr(error.stack));
+            // remove stack in current file
+            let eval_and_print = false;
+            var stack = error.stack.split('\n').filter(s => {
+                if(s.includes('at eval_and_print')){
+                    eval_and_print = true;
+                    return false;
+                }
+                return !eval_and_print;
+            });
+            stack.forEach(s => {
+                writeToStdout(s + '\n');
+            });
         }
     } else {
-        stdout.write(encodeStr("Throw: "));
-        stdout.write(encodeStr(error));
-        stdout.write(encodeStr('\n'));
+        writeToStdout("Throw: ");
+        writeToStdout(error);
+        writeToStdout('\n');
     }
 
     if (show_colors) {
-        stdout.write(encodeStr(colors.none));
+        writeToStdout(colors.none);
     }
 
     handle_cmd_end();

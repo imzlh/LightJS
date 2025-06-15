@@ -12,6 +12,7 @@
 #include <string.h>
 #include <threads.h>
 #include <assert.h>
+#include <signal.h>
 #include <sys/stat.h>
 
 // ------- event --------------
@@ -25,7 +26,7 @@ static JSValue js_set_event_notifier(JSContext *ctx, JSValueConst this_val, int 
     }
 
     if(JS_GetContextOpaque(ctx) != JS_GetRuntimeOpaque(JS_GetRuntime(ctx)))
-        return JS_ThrowInternalError(ctx, "setEventNotifier() cannot be used in a SandBox");
+        return JS_ThrowTypeError(ctx, "setEventNotifier() cannot be used in a SandBox");
 
     if(!JS_IsUndefined(event_notifier))
         JS_FreeValue(ctx, event_notifier);
@@ -451,7 +452,7 @@ bool LJS_init_vm(JSContext *ctx) {
 }
 
 // ================ promise loop ==============
-struct promise_data {
+struct Promise_data {
     struct list_head list;
     JSValue promise;
     JSContext* ctx;
@@ -471,7 +472,7 @@ int js_run_promise_jobs(){
     int count = 0;
     struct list_head *cur, *tmp;
     list_for_each_safe(cur, tmp, &promise_jobs){
-        struct promise_data* data = list_entry(cur, struct promise_data, list);
+        struct Promise_data* data = list_entry(cur, struct Promise_data, list);
         JSPromiseStateEnum res = JS_PromiseState(data -> ctx, data -> promise);
         if(res != JS_PROMISE_PENDING){
 #ifdef LJS_DEBUG
@@ -504,7 +505,7 @@ bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback 
         return true;
     }
 
-    struct promise_data* data = (struct promise_data*)malloc(sizeof(struct promise_data));
+    struct Promise_data* data = (struct Promise_data*)malloc(sizeof(struct Promise_data));
     data -> promise = JS_DupValue(ctx, promise);
     data -> ctx = ctx;
     data -> callback = callback;
@@ -529,7 +530,7 @@ void js_handle_promise_reject(
 ){
     if (!is_handled){
         // force next_tick
-        // struct promise_data* data = (struct promise_data*)malloc(sizeof(struct promise_data));
+        // struct Promise_data* data = (struct Promise_data*)malloc(sizeof(struct Promise_data));
         // data -> promise = JS_DupValue(ctx, promise);
         // data -> ctx = ctx;
         // data -> callback = handle_promise;
@@ -544,4 +545,103 @@ void js_handle_promise_reject(
 void* js_malloc_proxy(size_t size, void* opaque){
     JSRuntime* rt = opaque;
     return js_malloc_rt(rt, size);
+}
+
+#ifdef LJS_DEBUG
+static thread_local struct list_head promise_debug_jobs;
+
+__attribute__((constructor)) void init_promise_debug_jobs(){
+    init_list_head(&promise_debug_jobs);
+}
+
+void __js_dump_not_resolved_promises(){
+    if(list_empty(&promise_debug_jobs)) return;
+    printf("Unresolved promises:\n");
+    struct list_head *cur, *tmp;
+    list_for_each_safe(cur, tmp, &promise_debug_jobs){
+        struct promise* proxy = list_entry(cur, struct promise, link);
+        printf("  %p created at %s\n", proxy, proxy -> created);
+    }
+}
+
+#else
+
+void __js_dump_not_resolved_promises(){}
+
+#endif
+
+/**
+ * 创建一个Promise Proxy，方便在C中操作
+ * @param ctx 运行时上下文
+ */
+struct promise* __js_promise(JSContext *ctx, const char* __debug__){
+    struct promise* proxy = js_malloc(ctx, sizeof(struct promise));
+    assert(ctx != NULL && proxy != NULL);
+    JSValue resolving_funcs[2];
+    proxy -> ctx = ctx;
+    proxy -> promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    proxy -> resolve = resolving_funcs[0];
+    proxy -> reject = resolving_funcs[1];
+
+#ifdef LJS_DEBUG
+    assert(__debug__!= NULL);
+    proxy -> created = __debug__;
+    proxy -> resolved = NULL;
+    list_add_tail(&proxy -> link, &promise_debug_jobs);
+#endif
+
+    return proxy;
+}
+
+static inline void free_promise(struct promise* proxy){
+    assert(NULL != proxy -> ctx);   // error: already free
+    JS_FreeValue(proxy -> ctx, proxy -> resolve);
+    JS_FreeValue(proxy -> ctx, proxy -> reject);
+    // WARN: 此处应该由用户决策，所有权是否转移到JS层？
+    // JS_FreeValue(proxy -> ctx, proxy -> promise);
+
+#ifdef LJS_DEBUG
+    list_del(&proxy -> link);
+#endif
+
+    JSContext* ctx = proxy -> ctx;
+    proxy -> ctx = NULL;
+    js_free(ctx, proxy);
+}
+
+void __js_resolve(struct promise* proxy, JSValue value, const char* __debug__){
+    assert(NULL != proxy -> ctx);   // error: already free
+    JSValue args[1] = {value};
+    JS_Call(proxy -> ctx, proxy -> resolve, proxy -> promise, 1, args);
+
+#ifdef LJS_DEBUG
+    proxy -> resolved = __debug__;
+#endif
+
+    free_promise(proxy);
+}
+
+void __js_reject(struct promise* proxy, const char* msg, const char* __debug__){
+    assert(NULL != proxy -> ctx);   // error: already free
+    JSValue error = JS_NewError(proxy -> ctx);
+    JS_SetPropertyStr(proxy -> ctx, error, "message", JS_NewString(proxy -> ctx, msg));
+    JS_Call(proxy -> ctx, proxy -> reject, proxy -> promise, 1, (JSValueConst[]){error});
+    JS_FreeValue(proxy -> ctx, error);
+
+#ifdef LJS_DEBUG
+    proxy -> resolved = __debug__;
+#endif
+
+    free_promise(proxy);
+}
+
+void __js_reject2(struct promise* proxy, JSValue value, const char* __debug__){
+    assert(NULL != proxy -> ctx);   // error: already free
+    JS_Call(proxy -> ctx, proxy -> reject, proxy -> promise, 1, (JSValueConst[]){value});
+
+#ifdef LJS_DEBUG
+    proxy -> resolved = __debug__;
+#endif
+
+    free_promise(proxy);
 }

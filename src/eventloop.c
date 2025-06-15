@@ -173,6 +173,7 @@ struct TimerFD {
 
     uint64_t time;  // 0 marks unused
     bool once;
+    bool executed;
 };
 
 static thread_local int epoll_fd = -1;
@@ -1397,6 +1398,9 @@ void evcore_destroy() {
     list_for_each_prev_safe(cur, tmp, &timer_list) {
         struct EvFD* timer = list_entry(cur, struct EvFD, link);
         evcore_clearTimer2(timer);
+        close(timer -> fd[0]);
+        list_del(&timer -> link);
+        free(timer);
     }
 
     // free all evfd
@@ -2071,6 +2075,7 @@ static inline EvFD* timer_new(uint64_t milliseconds, EvTimerCallback callback, v
     evfd -> task_based = true;
     tfd -> time = milliseconds;
     tfd -> once = once;
+    tfd -> executed = false;
 
     // 初始化任务队列
     init_list_head(&evfd -> u.task.read_tasks);
@@ -2138,9 +2143,13 @@ static inline bool timer_task(struct EvFD* evfd, EvTimerCallback callback, void*
     return true;
 }
 
-EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* user_data) {
-    struct EvFD* evfd = timer_new(milliseconds, callback, user_data, false);
-    if(timer_task(evfd, callback, user_data)) return evfd;
+EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* cbopaque, EvCloseCallback close_cb, void* close_opaque) {
+    struct EvFD* evfd = timer_new(milliseconds, callback, cbopaque, false);
+    if(timer_task(evfd, callback, cbopaque)){
+        evfd_onclose(evfd, close_cb, close_opaque);
+        return evfd;
+    }
+    close_cb(evfd, close_opaque);
     evfd_close(evfd);
     return NULL;
 }
@@ -2161,13 +2170,34 @@ bool evcore_clearTimer2(EvFD* evfd) {
     printf("yield timer fd:%d\n", evfd_getfd(evfd, NULL));
 #endif
 
+    struct TimerFD* tfd = (void*)evfd;
+
     // 清理任务队列
     struct list_head *pos, *tmp;
     list_for_each_prev_safe(pos, tmp, &evfd -> u.task.read_tasks) {
         struct Task* task = list_entry(pos, struct Task, list);
+
+        // execute callback if once and not executed
+        if(!tfd -> executed && tfd -> once)
+            task -> cb.timer(0, task -> opaque);
+
         list_del(pos);
         TRACE_EVENTS(evfd, -1);
         free(task);
+    }
+
+    // clear onclose tasks
+    if(tfd -> once){
+        assert(list_empty(&evfd -> u.task.close_tasks));
+    }else{
+        struct list_head *pos2, *tmp2;
+        list_for_each_prev_safe(pos2, tmp2, &evfd -> u.task.close_tasks) {
+            struct Task* task = list_entry(pos2, struct Task, list);
+            task -> cb.close(evfd, task -> opaque);
+            list_del(pos2);
+            TRACE_EVENTS(evfd, -1);
+            free(task);
+        }
     }
 
     // stop timerfd
@@ -2177,6 +2207,7 @@ bool evcore_clearTimer2(EvFD* evfd) {
         return false;
     }
 
+    tfd -> executed = true;
     return true;
 }
 

@@ -118,9 +118,8 @@ endif()
 # don't explicitly check for that because who knows what the future will bring?
 # QJS_ENABLE_MSAN only works with clang at the time of writing; also not checked
 # for the same reason
-xoption(QJS_BUILD_EXAMPLES "Build examples" OFF)
 xoption(QJS_BUILD_STATIC "Build a static ljs executable" OFF)
-xoption(QJS_BUILD_WITH_MIMALLOC "Build the ljs executable with mimalloc" OFF)
+xoption(QJS_BUILD_WITH_MIMALLOC "Build the ljs executable with mimalloc" ON)
 xoption(QJS_BUILD_WITH_STATIC_MIMALLOC "Build the ljs executable with mimalloc (statically linked)" OFF)
 xoption(QJS_ENABLE_ASAN "Enable AddressSanitizer (ASan)" OFF)
 xoption(QJS_ENABLE_MSAN "Enable MemorySanitizer (MSan)" OFF)
@@ -327,27 +326,22 @@ endif()
 # Install target
 #
 
-# if(NOT IOS)
-#     file(STRINGS quickjs.h quickjs_h REGEX QJS_VERSION)
-#     string(REGEX MATCHALL "([0-9])" QJS_VERSION "${quickjs_h}")
-#     list(GET QJS_VERSION 0 QJS_VERSION_MAJOR)
-#     list(GET QJS_VERSION 1 QJS_VERSION_MINOR)
-#     list(GET QJS_VERSION 2 QJS_VERSION_PATCH)
-#     set_target_properties(ljs PROPERTIES
-#         VERSION ${QJS_VERSION_MAJOR}.${QJS_VERSION_MINOR}.${QJS_VERSION_PATCH}
-#         SOVERSION ${QJS_VERSION_MAJOR}
-#     )
-#     install(FILES quickjs.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-#     if(QJS_BUILD_LIBC)
-#         install(FILES quickjs-libc.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-#     endif()
-#     install(TARGETS ljs_exe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-#     install(TARGETS ljsc RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-#     install(TARGETS ljs EXPORT ljsConfig
-#             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-#             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-#             ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-#     install(EXPORT ljsConfig DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/quickjs)
-#     install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
-#     install(DIRECTORY examples DESTINATION ${CMAKE_INSTALL_DOCDIR})
-# endif()
+if(NOT IOS)
+    file(STRINGS src/core.h ljs_h REGEX LJS_VERSION)
+    string(REGEX MATCHALL "([0-9]+)" LJS_VERSION "${ljs_h}")
+    list(GET LJS_VERSION 0 LJS_VERSION_MAJOR)
+    list(GET LJS_VERSION 1 LJS_VERSION_MINOR)
+    list(GET LJS_VERSION 2 LJS_VERSION_PATCH)
+    message(STATUS "Building version ${LJS_VERSION_MAJOR}.${LJS_VERSION_MINOR}.${LJS_VERSION_PATCH}")
+    set_target_properties(ljs PROPERTIES
+        VERSION ${LJS_VERSION_MAJOR}.${LJS_VERSION_MINOR}.${LJS_VERSION_PATCH}
+        SOVERSION ${LJS_VERSION_MAJOR}
+    )
+    install(FILES src/core.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(TARGETS ljs_exe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS ljs EXPORT ljsConfig
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT ljsConfig DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/lightjs)
+endif()

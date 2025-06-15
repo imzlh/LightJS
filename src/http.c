@@ -567,7 +567,6 @@ void LJS_free_url(URL_data *url_struct){
 char* LJS_format_url(URL_data *url_struct){
     // Scheme://login:password@address:port/path/to/resource?query_string#fragment
     char* data = malloc(2048);
-    if(!data) LJS_panic("Out of memory");
     size_t datapos = 0;
 
     char enctmp[1024 *2]; // for URL encode, same as max length in Chrome
@@ -1110,7 +1109,7 @@ static JSValue js_response_get_ok(JSContext *ctx, JSValueConst this_val) {
 // after read the whole body, return the content as a string to JS
 // as `read_body` callback
 static void callback_tou8(LHTTPData *data, uint8_t *buffer, uint32_t len, void *userdata){
-    struct promise *promise = userdata;
+    Promise *promise = userdata;
     if(NULL == buffer){
         if(data -> state == HTTP_ERROR)
             JS_Call(promise -> ctx, promise -> reject, JS_NewError(promise -> ctx), 0, NULL);
@@ -1121,14 +1120,11 @@ static void callback_tou8(LHTTPData *data, uint8_t *buffer, uint32_t len, void *
             JS_NewUint8Array(promise -> ctx, buffer, len, free_js_malloc, NULL, false),    
         0, NULL);
     }
-
-    // free promise
-    LJS_FreePromise(promise);
 }
 
 // for U8Pipe
 static JSValue response_poll(JSContext* ctx, void* ptr, JSValue __){
-    struct promise *promise = LJS_NewPromise(ctx);
+    Promise *promise = js_promise(ctx);
     struct HTTP_Response *response = ptr;
     read_body(response -> data, callback_tou8, promise, false);
     return promise -> promise;
@@ -1142,7 +1138,7 @@ struct buf_link {
 };
 
 struct readall_promise{
-    struct promise *promise;
+    Promise *promise;
     struct list_head u8arrs;
     struct HTTP_Response *response;
 
@@ -1153,7 +1149,7 @@ struct readall_promise{
 };
 
 // init task
-static inline struct readall_promise* init_tou8_merge_task(struct promise *promise, struct HTTP_Response *response){
+static inline struct readall_promise* init_tou8_merge_task(Promise *promise, struct HTTP_Response *response){
     struct readall_promise *task = malloc(sizeof(struct readall_promise));
     task -> promise = promise;
     task -> response = response;
@@ -1197,7 +1193,7 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
         }else{
             res = JS_NewUint8Array(ctx, merged_buf, length, free_js_malloc, NULL, false);
         }
-        LJS_Promise_Resolve(task -> promise, res);
+        js_resolve(task -> promise, res);
         free(merged_buf);
         // after this, buffer=NULL will be passed to this again
     }else if(data -> state == HTTP_BODY){
@@ -1215,9 +1211,9 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
             free(bufobj);
         }
 
-        struct promise *promise = task -> promise;
+        Promise *promise = task -> promise;
         // if(data -> state == HTTP_ERROR)
-        LJS_Promise_Reject(promise, "Failed to receive data");
+        js_reject(promise, "Failed to receive data");
         // else
         //     LJS_Promise_Resolve(promise, )
         free(task); // done!
@@ -1252,7 +1248,7 @@ struct formdata_addition_data {
 };
 
 // parse form data from response body
-static inline struct formdata_addition_data* init_formdata_parse_task(struct promise *promise, struct HTTP_Response *response){
+static inline struct formdata_addition_data* init_formdata_parse_task(Promise *promise, struct HTTP_Response *response){
     struct formdata_addition_data *task = malloc(sizeof(struct formdata_addition_data));
     task -> state = FD_BOUNDARY;
     task -> readed = 0;
@@ -1283,7 +1279,7 @@ static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_si
         char* line = (char*) buffer;
         if (line[0] != '-' || line[1] != '-' || strcmp(line + 2, fd_task -> boundary) != 0) {
             // error
-            LJS_Promise_Reject(task -> promise, "Invalid boundary");
+            js_reject(task -> promise, "Invalid boundary");
             goto end;
         }
         fd_task -> state = FD_HEADER;
@@ -1312,7 +1308,7 @@ static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_si
         SPLIT_HEADER(line);
         if (!value) {
             // error
-            LJS_Promise_Reject(task -> promise, "Invalid header");
+            js_reject(task -> promise, "Invalid header");
             goto end_cleanup;
         }
 
@@ -1347,7 +1343,7 @@ static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_si
             int len = atoi(value);
             if (len < 0) {
                 // error
-                LJS_Promise_Reject(task -> promise, "Invalid content-length");
+                js_reject(task -> promise, "Invalid content-length");
                 goto end_cleanup;
             }
             formdata -> length = len;
@@ -1361,7 +1357,7 @@ static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_si
     if (fd_task -> state == FD_DATA) {
         if (formdata -> length < read_size) {
             // error
-            LJS_Promise_Reject(task -> promise, "Failed to receive data: short readed");
+            js_reject(task -> promise, "Failed to receive data: short readed");
             goto end_cleanup;
         }
 
@@ -1414,7 +1410,6 @@ end:
     FREE_IF_NOT_NULL(buffer);
     // free promise
     free(fd_task);
-    LJS_FreePromise(task -> promise);
     return EVCB_RET_DONE;
 }
 
@@ -1440,7 +1435,7 @@ static JSValue js_response_get_locked(JSContext *ctx, JSValueConst this_val) {
 #define INIT_TOU8_TASK \
     RESPONSE_GET_OPAQUE(response, this_val); \
     if(response -> data -> state != HTTP_BODY) return JS_ThrowTypeError(ctx, "Body is not available"); \
-    struct promise *promise = LJS_NewPromise(ctx); \
+    Promise *promise = js_promise(ctx); \
     struct readall_promise* data = init_tou8_merge_task(promise, response); \
     read_body(response -> data, response_merge_cb, data, true);
 
@@ -1482,7 +1477,7 @@ not_found:
     return LJS_Throw(ctx, "Invalid or missing content-type. Please ensure boundary is set", NULL);
 
 main:
-    struct promise *promise = LJS_NewPromise(ctx);
+    Promise *promise = js_promise(ctx);
     struct formdata_addition_data* task = init_formdata_parse_task(promise, response);
     task -> boundary = boundary;
     uint8_t* buf = js_malloc(ctx, BUFFER_SIZE);
@@ -1585,31 +1580,39 @@ __attribute__((constructor)) static void init_keepalive_list(){
     pthread_mutex_init(&keepalive_mutex, NULL);
 }
 
+struct FetchResult {
+    Promise* promise;
+    struct keepalive_connection* keepalive;
+};
+
 // alert: buffer = NULL
 // fetch: return Response object
 void fetch_resolve(LHTTPData *data, uint8_t *buffer, uint32_t len, void* ptr){
-    struct promise *promise = ptr;
+    struct FetchResult *fr = ptr;
+    Promise* promise = fr -> promise;
     JSContext *ctx = promise -> ctx;
     JSValue obj = LJS_NewResponse(ctx, data, true);
-    LJS_Promise_Resolve(promise, obj);
+    js_resolve(promise, obj);
     // del onclose callback
     evfd_onclose(data -> fd, NULL, NULL);
     
     // keep-alive?
-    if(promise -> user_data){
-        struct keepalive_connection *conn = promise -> user_data;
+    if(fr -> keepalive){
+        struct keepalive_connection *conn = fr -> keepalive;
         pthread_mutex_lock(&keepalive_mutex);
         list_add_tail(&conn -> list, &keepalive_list);
         pthread_mutex_unlock(&keepalive_mutex);
     }
+
+    js_free(ctx, fr);
 }
 
 // fetch: return WebSocket object
 void ws_resolve(LHTTPData *data, uint8_t *buffer, uint32_t len, void* ptr){
-    struct promise *promise = ptr;
+    Promise *promise = ptr;
     JSContext *ctx = promise -> ctx;
     JSValue obj = LJS_NewWebSocket(ctx, data -> fd, data -> is_client);
-    LJS_Promise_Resolve(promise, obj);
+    js_resolve(promise, obj);
     // del onclose callback
     evfd_onclose(data -> fd, NULL, NULL);
 }
@@ -1630,8 +1633,8 @@ bool body_chunked_filter(struct Buffer* buf, void* user_data){
 
 // reject on fd close
 static void fetch_close_cb(EvFD* evfd, void* user_data){
-    struct promise *promise = user_data;
-    LJS_Promise_Reject(promise, "Connection closed or failed");
+    Promise *promise = user_data;
+    js_reject(promise, "Connection closed or failed");
 }
 
 // free after write
@@ -1723,7 +1726,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     if(unlikely(!fd)) return LJS_Throw(ctx, "Failed to open connection", NULL);
 
     // bind close event
-    struct promise *promise = LJS_NewPromise(ctx);
+    Promise *promise = js_promise(ctx);
     evfd_onclose(fd, fetch_close_cb, promise);
 
     // parse options and write headers
@@ -1824,18 +1827,26 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     }
     JS_FreeValue(ctx, body);
 
+    struct FetchResult* fr;
+    if(!websocket){
+        fr = js_malloc(ctx, sizeof(struct FetchResult));
+        fr -> promise = promise;
+        fr -> keepalive = NULL;
+    }
+
     // keepalive?
     if (keep_alive && !websocket) {
         struct keepalive_connection* conn = malloc(sizeof(struct keepalive_connection));
         conn -> fd = fd;
         strncpy(conn -> host, url.host, 64);
-        promise -> user_data = conn;
+        fr -> keepalive = conn;
     }
 
     // parse response
     LHTTPData *data = js_malloc(ctx, sizeof(LHTTPData));
-    LJS_parse_from_fd(fd, data, false, websocket ? ws_resolve : fetch_resolve, promise);
+    LJS_parse_from_fd(fd, data, false, websocket ? ws_resolve : fetch_resolve, websocket ? (void*)promise : (void*)fr);
     LJS_free_url(&url);
+    JS_FreeValue(ctx, obj);
     return promise -> promise;
 }
 
@@ -1864,7 +1875,7 @@ struct JSWebSocket_T{
     struct WebSocketFrame frame;
 
     struct Buffer wbuffer;
-    struct promise* send_promise;
+    Promise* send_promise;
 
     bool closed;
     uint8_t free_count;    // refcount, used by eventloop and JS
@@ -1980,7 +1991,7 @@ static void event_ws_close(EvFD* evfd, void* user_data){
         JS_Call(ws -> ctx, ws -> onclose, JS_UNDEFINED, 0, NULL);
     }
     if(ws -> send_promise)
-        LJS_Promise_Reject(ws -> send_promise, "WebSocket is already closed");
+        js_reject(ws -> send_promise, "WebSocket is already closed");
 
     js_ws_free(JS_GetRuntime(ws -> ctx), ws);
 }
@@ -2032,7 +2043,7 @@ static void event_ws_writable(EvFD* evfd, bool __unused__, void* opaque){
     buffer_write(&ws -> wbuffer, evfd_getfd(evfd, NULL), UINT32_MAX);
     if(buffer_used(&ws -> wbuffer) == 0){
         evfd_yield(evfd, false, true);
-        LJS_Promise_Resolve(ws -> send_promise, JS_UNDEFINED);
+        js_resolve(ws -> send_promise, JS_UNDEFINED);
         ws -> send_promise = NULL;
     }
 }
@@ -2060,7 +2071,7 @@ static JSValue js_ws_send(JSContext *ctx, JSValueConst this_val, int argc, JSVal
         return LJS_Throw(ctx, "WebSocket.send() requires a string or Uint8Array argument", "WebSocket.send(data: Uint8Array | string): Promise<void>");
     }
 
-    struct promise* promise = LJS_NewPromise(ctx);
+    Promise* promise = js_promise(ctx);
     ws -> send_promise = promise;
     buffer_init2(&ws -> wbuffer, NULL, len + 16);
     build_ws_frame(&ws -> wbuffer, true, opcode, data, len, ws -> enable_mask);
@@ -2932,7 +2943,7 @@ static thread_local JSClassID handler_class_id;
 
 // Handler.from() return a Promise
 struct JSClientAsyncResult {
-    struct promise* promise;
+    Promise* promise;
     struct JSClientHandler* handler;
     JSValue reusing_obj;    // if reuse(), return myself
 };
@@ -2946,7 +2957,7 @@ struct JSClientHandler {
 
     struct CookieJar cookiejar; // note: ref_count is used to manage lifetime of handler
 
-    struct promise* promise;
+    Promise* promise;
 
     struct list_head chunks;
 
@@ -2974,7 +2985,7 @@ struct JSEventStreamData {
     if(!handler) return JS_EXCEPTION;
     
 // define "end" field in class
-#define DEF_END_PROMISE(obj, handler) handler -> promise = LJS_NewPromise(ctx); \
+#define DEF_END_PROMISE(obj, handler) handler -> promise = js_promise(ctx); \
     JS_SetPropertyStr(ctx, obj, "end", handler -> promise -> promise);
 
 // define headers and request in class
@@ -3011,7 +3022,7 @@ static void handler_close_cb(EvFD* fd, void* data){
     if(handler -> destroy) return;
     handler -> destroy = true;
     if(handler -> promise){
-        LJS_Promise_Reject(handler -> promise, "Connection closed");
+        js_reject(handler -> promise, "Connection closed");
         free(handler);
     }
 
@@ -3026,14 +3037,14 @@ static void handler_parse_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, voi
     bool error = data -> state == HTTP_ERROR;
     
     if(error){
-        LJS_Promise_Reject(async_result -> promise, "Failed to parse request: Invaild request");
+        js_reject(async_result -> promise, "Failed to parse request: Invaild request");
         free(async_result);
         free(handler);
         return;
     }else if(!JS_IsUndefined(async_result -> reusing_obj)){
         // reusing object: resolve it directly
         DEF_END_PROMISE(async_result -> reusing_obj, handler);
-        LJS_Promise_Resolve(async_result -> promise, async_result -> reusing_obj);
+        js_resolve(async_result -> promise, async_result -> reusing_obj);
 #ifdef LJS_DEBUG
         printf("http request(reused): %s %s\n", handler -> request.method, handler -> request.path);
 #endif
@@ -3050,7 +3061,7 @@ static void handler_parse_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, voi
         JS_SetOpaque(cookie_jar, &handler -> cookiejar);
         JS_SetPropertyStr(ctx, obj, "cookies", cookie_jar);
 
-        LJS_Promise_Resolve(async_result -> promise, obj);
+        js_resolve(async_result -> promise, obj);
 
 #ifdef LJS_DEBUG
         printf("http request: %s %s\n", handler -> request.method, handler -> request.path);
@@ -3090,7 +3101,7 @@ static void handler_wbody_cb(EvFD* fd, bool success, void* data){
             handler -> response.state = HTTP_DONE;
             // after Response.*(), request will be in HTTP_DONE state
             // if(handler -> request.state >= HTTP_DONE){
-            LJS_Promise_Resolve(handler -> promise, JS_UNDEFINED);
+            js_resolve(handler -> promise, JS_UNDEFINED);
             handler -> promise = NULL;
             // }
         }
@@ -3188,7 +3199,7 @@ static inline void handler_write_all_header(JSContext* ctx, struct JSClientHandl
         // r, w all resolved
         // if(handler -> request.state >= HTTP_DONE){
             // not required to write body
-            LJS_Promise_Resolve(handler -> promise, JS_UNDEFINED);
+            js_resolve(handler -> promise, JS_UNDEFINED);
             handler -> promise = NULL;
         // }
     }else{
@@ -3201,7 +3212,7 @@ static void handler_final_chunk_cb(EvFD* fd, bool success, void* data){
     struct JSClientHandler* handler = data;
     handler -> response.state = HTTP_DONE;
     // if(handler -> request.state >= HTTP_DONE){
-        LJS_Promise_Resolve(handler -> promise, JS_UNDEFINED);
+        js_resolve(handler -> promise, JS_UNDEFINED);
         handler -> promise = NULL;
     // }
 }
@@ -3223,7 +3234,7 @@ static inline void init_handler(EvFD* fd, JSContext* ctx, struct JSClientHandler
 static inline struct JSClientAsyncResult* init_async_result(struct JSClientHandler* handler){
     struct JSClientAsyncResult* async_result = js_malloc(handler -> ctx, sizeof(struct JSClientAsyncResult));
     if(! likely(async_result)) return NULL;
-    async_result -> promise = LJS_NewPromise(handler -> ctx);
+    async_result -> promise = js_promise(handler -> ctx);
     async_result -> handler = handler;
     async_result -> reusing_obj = JS_UNDEFINED; // if reuse(), please set it after this
     return async_result;
@@ -3447,7 +3458,7 @@ static JSValue js_handler_done(JSContext *ctx, JSValueConst this_val, int argc, 
                 return JS_DupValue(ctx, this_val);
             }else if(handler -> response.content_length == -1){
                 // close connection
-                LJS_Promise_Resolve(handler -> promise, JS_UNDEFINED);
+                js_resolve(handler -> promise, JS_UNDEFINED);
                 handler -> promise = NULL;
                 evfd_shutdown(handler -> response.fd);
                 handler -> destroy = true;
@@ -3758,7 +3769,7 @@ param_err:
     // AsyncResult
     struct JSClientAsyncResult* async_result = js_malloc(handler -> ctx, sizeof(struct JSClientAsyncResult));
     if(!async_result) return JS_ThrowOutOfMemory(ctx);
-    async_result -> promise = handler -> promise = LJS_NewPromise(ctx);
+    async_result -> promise = handler -> promise = js_promise(ctx);
     async_result -> reusing_obj = JS_UNDEFINED;
     async_result -> handler = handler;
     

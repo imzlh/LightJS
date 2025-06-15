@@ -4,19 +4,22 @@
 
 #include "src/core.h"
 #include "engine/quickjs.h"
-#include "lib/lrepl.h"
+#include "src/polyfill.h"
+
+#include "src/repl.h"
 
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <setjmp.h>
 #include <signal.h>
 #include <threads.h>
 
 static JSRuntime *runtime;
 static App* app;
+bool exiting = false;
+static int exit_code = 0;
 
 static inline void run_jobs(){
     int jobs = 0;
@@ -31,9 +34,13 @@ static inline void run_jobs(){
             res = JS_ExecutePendingJob(rt, &ectx);
             if(res < 0){    // error
                 JSValue exception = JS_GetException(ectx);
-                js_dump(ectx, exception, stderr);
+                if(unlikely(JS_IsInternalError(app -> ctx, exception))){
+                    exiting = true;
+                }else{
+                    js_dump(ectx, exception, stderr);
+                }
                 JS_FreeValue(ectx, exception);
-            }else if(res > 0){
+            } else if(res > 0) {
                 jobs++;
             }
         }
@@ -53,14 +60,21 @@ static bool check_promise_resolved(void* opaque){
             return true;
     }else if(state == JS_PROMISE_REJECTED){
         JSValue result = JS_PromiseResult(app -> ctx, *prom);
-        js_dump(app -> ctx, result, stderr);
-        JS_FreeValue(app -> ctx, result);
+        if(unlikely(JS_IsInternalError(app -> ctx, result))){
+            JSValue ecode = JS_GetProperty(app -> ctx, result, JS_ATOM__ret_);
+            JS_ToInt32(app -> ctx, &exit_code, ecode);
+            JS_FreeValue(app -> ctx, ecode);
+        }else{
+            js_dump(app -> ctx, result, stderr);
+            JS_FreeValue(app -> ctx, result);
+        }
         return true;
     }else{  // TIMING
         run_jobs();
+        return check_promise_resolved(opaque);
     }
 
-    return false;
+    return exiting;
 }
 
 static size_t parse_limit(const char *arg) {
@@ -92,14 +106,14 @@ static size_t parse_limit(const char *arg) {
     return (size_t)(d * unit);
 }
 
-static thread_local sigjmp_buf exit_buf;
-
 // signal listener
 static void exit_signal_handler(int sig) {
 #ifdef LJS_DEBUG
     printf("Received signal %d, exiting...\n", sig);
 #endif
-    siglongjmp(exit_buf, 1);
+
+    // kill all threads
+    exiting = true;
 }
 
 __attribute__((constructor)) void init_signal_handler() {
@@ -113,9 +127,7 @@ __attribute__((constructor)) void init_signal_handler() {
     sigaction(SIGABRT, &sa, NULL);
 }
 
-_Noreturn void js_exit(int ret_code){
-    longjmp(exit_buf, ret_code);
-}
+extern void __js_dump_not_resolved_promises();
 
 int main(int argc, char **argv) {
 
@@ -173,6 +185,34 @@ int main(int argc, char **argv) {
                 return 0;
             }else if(strcmp(longopt, "version") == 0 || opt == 'v'){
                 printf("LightJS %s with QuickJS-ng %s\n", LJS_VERSION, JS_GetVersion());
+                printf("Built on %s, by "
+#ifdef __GNUC__
+                    "gcc " TOSTRING(__GNUC__) "." TOSTRING(__GNUC_MINOR__) "." TOSTRING(__GNUC_PATCHLEVEL__) 
+#elif defined(__clang__)
+                    "clang " TOSTRING(__clang_major__) "." TOSTRING(__clang_minor__) "." TOSTRING(__clang_patchlevel__) 
+#else
+                    "unknown compiler"
+#endif
+
+#ifdef __WIN32__
+                    " (Windows)"
+#else
+                    " (POSIX)"
+#endif
+
+#ifdef __x86_64__
+                    " (x86_64)"
+#elif defined(__i386__)
+                    " (i386)"
+#elif defined(__aarch64__)
+                    " (aarch64)"
+#elif defined(__arm__)
+                    " (arm)"
+#else
+                    " (unknown)"
+#endif
+
+                    "\n" , __DATE__);
                 return 0;
             }else if(strcmp(longopt, "eval") == 0 || opt == 'e'){
                 eval_code = true;
@@ -252,7 +292,7 @@ int main(int argc, char **argv) {
         printf("LightJS %s with QuickJS-NG %s\n", LJS_VERSION, JS_GetVersion());
         printf("Type \".help\" for usage. for more information, please access github wiki.\n");
 
-        JSValue buf = JS_ReadObject(app -> ctx, code_lrepl, sizeof(code_lrepl), JS_READ_OBJ_BYTECODE);
+        JSValue buf = JS_ReadObject(app -> ctx, code_repl, sizeof(code_repl), JS_READ_OBJ_BYTECODE);
         JSValue val = JS_EvalFunction(app -> ctx, buf);
         if(JS_IsException(val)) js_dump(app -> ctx, JS_GetException(app -> ctx), stderr);
 
@@ -308,10 +348,6 @@ int main(int argc, char **argv) {
     }
 
     evcore_set_memory(js_malloc_proxy, runtime);
-    
-    // for exit()
-    int ret_code = setjmp(exit_buf);
-    if(ret_code != 0) goto finalize;
 
     // parse
     JSValue code = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
@@ -321,7 +357,7 @@ print_error:
         JSValue exception = JS_GetException(app -> ctx);
         js_dump(app -> ctx, exception, stderr);
         JS_FreeValue(app -> ctx, exception);
-        ret_code = 1;
+        exit_code = 1;
         goto finalize;
     }
     js_set_import_meta(app -> ctx, code, raw_name, true);
@@ -343,10 +379,12 @@ finalize:
     evcore_destroy();
     run_jobs();
     JS_FreeValue(app -> ctx, ret_val);
+    JS_RunGC(runtime);
+    __js_dump_not_resolved_promises();
     
     LJS_destroy_app(app);
     JS_FreeRuntime(runtime);
     if(!eval_code) free(script_path);
-    if(ret_code < 0) ret_code = 0;
-    return ret_code;
+    if(exit_code < 0) exit_code = 0;
+    return exit_code;
 }

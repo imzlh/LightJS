@@ -19,6 +19,8 @@ declare function setTimeout(callback: () => void, timeout: number): number;
 declare function setInterval(callback: () => void, timeout: number): number;
 declare function clearTimer(intervalId: number): void;
 declare function delay(time_ms: number): Promise<void>;
+// QuickJS internal API
+declare function queueMicrotask(func: (this: typeof globalThis) => void): void;
 
 declare function atob(encoded: string): string;
 declare function btoa(raw: string): string;

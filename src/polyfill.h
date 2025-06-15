@@ -66,62 +66,6 @@ static inline JSValue LJS_ThrowWithError(JSContext *ctx, const char *msg, const 
     return JS_EXCEPTION;
 }
 
-static inline void LJS_panic(const char *msg){
-    printf("LightJS fatal error: %s\n", msg);
-    js_exit(1);
-}
-
-struct promise{
-    JSContext* ctx;
-    JSValue resolve;
-    JSValue reject;
-    JSValue promise;
-    void* user_data;
-};
-
-/**
- * 创建一个Promise Proxy，方便在C中操作
- * @param ctx 运行时上下文
- */
-static inline struct promise* LJS_NewPromise(JSContext *ctx){
-    struct promise* proxy = js_malloc(ctx, sizeof(struct promise));
-    if(!proxy) return NULL;
-    assert(ctx != NULL);
-    JSValue resolving_funcs[2];
-    proxy -> ctx = ctx;
-    proxy -> promise = JS_NewPromiseCapability(ctx, resolving_funcs);
-    proxy -> resolve = resolving_funcs[0];
-    proxy -> reject = resolving_funcs[1];
-    return proxy;
-}
-
-static inline void LJS_FreePromise(struct promise* proxy){
-    assert(NULL != proxy -> ctx);   // error: already free
-    JS_FreeValue(proxy -> ctx, proxy -> resolve);
-    JS_FreeValue(proxy -> ctx, proxy -> reject);
-    // WARN: 此处应该由用户决策，所有权是否转移到JS层？
-    // JS_FreeValue(proxy -> ctx, proxy -> promise);
-    JSContext* ctx = proxy -> ctx;
-    proxy -> ctx = NULL;
-    js_free(ctx, proxy);
-    
-}
-
-static inline void LJS_Promise_Resolve(struct promise* proxy, JSValue value){
-    assert(NULL != proxy -> ctx);   // error: already free
-    JSValue args[1] = {value};
-    JS_Call(proxy -> ctx, proxy -> resolve, proxy -> promise, 1, args);
-    LJS_FreePromise(proxy);
-}
-
-static inline void LJS_Promise_Reject(struct promise* proxy, const char* msg){
-    assert(NULL != proxy -> ctx);   // error: already free
-    JSValue error = JS_NewError(proxy -> ctx);
-    JS_SetPropertyStr(proxy -> ctx, error, "message", JS_NewString(proxy -> ctx, msg));
-    JS_Call(proxy -> ctx, proxy -> reject, proxy -> promise, 1, (JSValueConst[]){error});
-    LJS_FreePromise(proxy);
-}
-
 static inline JSValue LJS_NewResolvedPromise(JSContext* ctx, JSValue value){
     JSValue cb[2];
     JSValue ret = JS_NewPromiseCapability(ctx, cb);
@@ -208,4 +152,11 @@ static inline void JS_SetCtorProto(JSContext* ctx, JSValueConst ctor, JSClassID 
     JSValue proto = JS_GetClassProto(ctx, class_id);
     JS_SetConstructor(ctx, ctor, proto);
     JS_FreeValue(ctx, proto);
+}
+
+static inline bool JS_IsInternalError(JSContext* ctx, JSValueConst val){
+    if(!JS_IsError(ctx, val)) return false;
+    const char* name = LJS_ToCString(ctx, JS_GetProperty(ctx, val, JS_ATOM_name), NULL);
+    if(!name || strcmp(name, "InternalError") != 0) return false;
+    return true;
 }

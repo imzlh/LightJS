@@ -636,8 +636,8 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
 }
 
 void ssl_handshake_callback(EvFD* evfd, void* user_data) {
-    struct promise* promise = (struct promise*)user_data;
-    LJS_Promise_Resolve(promise, JS_UNDEFINED);
+    Promise* promise = (Promise*)user_data;
+    js_resolve(promise, JS_UNDEFINED);
 }
 
 static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
@@ -689,7 +689,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
         JS_FreeValue(ctx, val);
     }
 
-    struct promise* promise = LJS_NewPromise(ctx);
+    Promise* promise = js_promise(ctx);
     mbedtls_ssl_config* config = NULL;
     evfd_initssl(fd, &config, is_client, preset, ssl_handshake_callback, promise);
 
@@ -708,7 +708,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 void js_handle_dns_resolve(int total_records, dns_record** records, void* user_data) {
-    struct promise* promise = (struct promise*)user_data;
+    Promise* promise = (Promise*)user_data;
     JSContext* ctx = promise -> ctx;
     JSValue arr = JS_NewArray(ctx);
     for(int i = 0; i < total_records; i++){
@@ -757,13 +757,13 @@ void js_handle_dns_resolve(int total_records, dns_record** records, void* user_d
         JS_SetPropertyUint32(ctx, arr, i, obj);
         free(record);
     }
-    LJS_Promise_Resolve(promise, arr);
+    js_resolve(promise, arr);
     free(records);
 }
 
 static void js_handle_dns_error(const char* error_msg, void* user_data) {
-    struct promise* promise = (struct promise*)user_data;
-    LJS_Promise_Reject(promise, error_msg);
+    Promise* promise = (Promise*)user_data;
+    js_reject(promise, error_msg);
 }
 
 static JSValue js_resolve_dns(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
@@ -784,7 +784,7 @@ static JSValue js_resolve_dns(JSContext *ctx, JSValueConst this_val, int argc, J
         if(dns_server_str) dns_server = dns_server_str;
     }
 
-    struct promise* promise = LJS_NewPromise(ctx);
+    Promise* promise = js_promise(ctx);
     async_dns_resolve(dns_server, domain, js_handle_dns_resolve, js_handle_dns_error, promise);
     return promise -> promise;
 }

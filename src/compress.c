@@ -172,8 +172,8 @@ error:
 struct js_zlib_stream {
     z_stream zstream;
     JSValue buffer;
-    struct promise* poll_promise;
-    struct promise* write_promise;
+    Promise* poll_promise;
+    Promise* write_promise;
     bool compress;
     bool closed;
 };
@@ -183,11 +183,11 @@ static JSValue stream_poll(JSContext* ctx, void* ptr, JSValueConst data){
     if(stream -> closed) abort();
 
     if(stream -> poll_promise) abort();  // pipe should not be polled again before previous poll is resolved
-    stream -> poll_promise = LJS_NewPromise(ctx);
+    stream -> poll_promise = js_promise(ctx);
     if(stream -> zstream.avail_in) goto loop;  // have some data to consume
 
     if(stream -> write_promise){    // get data
-        LJS_Promise_Resolve(stream -> poll_promise, JS_NULL); 
+        js_resolve(stream -> poll_promise, JS_NULL); 
         size_t size;
         uint8_t* data = JS_GetUint8Array(ctx, &size, stream -> buffer);
         stream -> zstream.avail_in = size;
@@ -221,7 +221,7 @@ loop:
                 // full
                 if (stream -> zstream.avail_out == 0 || stream -> zstream.avail_in == 0) {
                     JSValue chunk = JS_NewUint8Array(ctx, outbuf, stream -> zstream.next_out - outbuf, free_js_malloc, NULL, false);
-                    LJS_Promise_Resolve(stream -> poll_promise, chunk);
+                    js_resolve(stream -> poll_promise, chunk);
 
                     outbuf = js_malloc(ctx, LJS_ZLIB_CHUNK_SIZE);
                     if (!outbuf) {
@@ -239,7 +239,7 @@ loop:
 error:
     stream -> closed = true;
     stream -> poll_promise = NULL;
-    LJS_Promise_Reject(stream -> poll_promise, error);
+    js_reject(stream -> poll_promise, error);
 
     if(stream -> compress) inflateEnd(&stream -> zstream);
     else deflateEnd(&stream -> zstream);
@@ -254,7 +254,7 @@ static JSValue stream_write(JSContext* ctx, void* ptr, JSValueConst data){
     if(stream -> closed) abort();
 
     if(stream -> write_promise) abort();  // pipe should not be written again before previous write is resolved
-    stream -> write_promise = LJS_NewPromise(ctx);
+    stream -> write_promise = js_promise(ctx);
 
     return stream -> write_promise -> promise;
 }
@@ -264,8 +264,8 @@ static JSValue stream_close(JSContext* ctx, void* ptr, JSValueConst data){
     if(stream -> closed) return JS_NULL;
 
     stream -> closed = true;
-    if(stream -> poll_promise) LJS_Promise_Reject(stream -> poll_promise, "Stream closed");
-    if(stream -> write_promise) LJS_Promise_Reject(stream -> write_promise, "Stream closed");
+    if(stream -> poll_promise) js_reject(stream -> poll_promise, "Stream closed");
+    if(stream -> write_promise) js_reject(stream -> write_promise, "Stream closed");
 
     if(stream -> compress) inflateEnd(&stream -> zstream);
     else deflateEnd(&stream -> zstream);

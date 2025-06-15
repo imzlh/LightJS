@@ -195,15 +195,17 @@ static JSValue js_process_exit(JSContext* ctx, JSValueConst this_val, int argc, 
     printf("jsvm: exit with code %d\n", exit_code);
 #endif
 
-    js_exit(exit_code);
-    return JS_UNDEFINED;
+    JS_ThrowInternalError(ctx, " ");
+    JSValue ie = JS_GetException(ctx);
+    JS_SetProperty(ctx, ie, JS_ATOM__ret_, JS_NewInt32(ctx, exit_code));
+    JS_SetUncatchableError(ctx, ie);
+    return JS_Throw(ctx, ie);
 }
 
 typedef struct {
     JSValue handler;
     JSContext* ctx;
     int sig;
-    pthread_t thread_id;
     struct list_head list;
 } signal_data;
 
@@ -217,12 +219,13 @@ static void js_signal_handler(int sig){
     list_for_each_safe(el, el1, &signal_list){
         signal_data* data = list_entry(el, signal_data, list);
         if(data -> sig == sig){
-            if(data -> thread_id == pthread_self()){
+            App* app = (App*)JS_GetContextOpaque(data -> ctx);
+            if(app -> thread == pthread_self()){
                 // exec in current thread
                 JSValue ret = JS_Call(data -> ctx, data -> handler, JS_UNDEFINED, 0, NULL);
                 JS_FreeValue(data -> ctx, ret);
             }else{
-                pthread_kill(data -> thread_id, sig);
+                pthread_kill(app -> thread, sig);
                 break;
             }
         }
@@ -247,7 +250,6 @@ static JSValue js_set_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
     data -> handler = JS_DupValue(ctx, argv[1]);
     data -> ctx = ctx;
     data -> sig = sig;
-    data -> thread_id = pthread_self();
 
     if(-1 == sigaction(sig, &default_sa, NULL)) {
         free(data);

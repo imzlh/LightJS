@@ -3,6 +3,7 @@
 #include "../engine/quickjs.h"
 
 #include <pthread.h>
+#include <signal.h>
 #include <threads.h>
 #include <sys/eventfd.h>
 #include <stdio.h>
@@ -389,6 +390,7 @@ struct Worker_Props{
     pthread_mutex_t lock;
 
     App* parent;
+    bool exiting;   // pthread_join is pending
 };
 
 // Note: in worker thread
@@ -451,6 +453,7 @@ App* LJS_create_app(
     app -> module_loader = JS_UNDEFINED;
     app -> module_format = JS_UNDEFINED;
     app -> worker = NULL;
+    app -> thread = pthread_self();
 
     init_list_head(&app -> workers);
 
@@ -542,6 +545,8 @@ void LJS_destroy_app(App* app) {
         list_for_each_safe(pos, tmp, &app -> workers){
             App* child = list_entry(pos, App, link);
             JSRuntime* rt = JS_GetRuntime(child -> ctx);
+            pthread_kill(child -> thread, SIGINT);
+            pthread_join(child -> thread, NULL);
             worker_free_app(child);
             JS_FreeRuntime(rt);
         }
@@ -696,11 +701,24 @@ static void main_close_callback(EvFD* fd, void* user_data){
     evfd_close(app -> worker -> efd_main2worker.main);
 }
 
+static bool worker_check_abort(void* opaque){
+    App* app = (App*)opaque;
+    if(app -> worker -> exiting) return true;
+    return false;
+}
+
 static void worker_main_loop(App* app, JSValue func){
     JSContext* ctx = app -> ctx;
 
     // 初始化epoll
     evcore_init();
+
+    // prevent signal(only handled in main thread)
+    sigset_t sigmask;
+    sigfillset(&sigmask);
+    sigdelset(&sigmask, SIGUSR1);
+    sigdelset(&sigmask, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, NULL, &sigmask);
 
     // 监听pipe
     app -> worker -> efd_main2worker.worker = 
@@ -734,7 +752,10 @@ static void worker_main_loop(App* app, JSValue func){
     }
 
     // 启动事件循环
-    evcore_run(NULL, NULL);
+    evcore_run(worker_check_abort, app);
+
+    // exit
+    worker_exit(app, 0, "worker thread exited");
 }
 
 void LJS_init_runtime(JSRuntime* rt){
@@ -810,6 +831,7 @@ static void* worker_entry(void* arg){
 
     // init
     evcore_init();
+    app -> thread = pthread_self();
 
     // eval script
     uint32_t buf_len;
@@ -1065,45 +1087,53 @@ struct Timer_T {
 static void timer_callback(uint64_t count, void* ptr){
     struct Timer_T* timer = (struct Timer_T*)ptr;
     JS_Call(timer -> ctx, timer -> resolve, JS_UNDEFINED, 1, (JSValue[1]){ JS_NewInt64(timer -> ctx, count) });
+    JS_FreeValue(timer -> ctx, timer -> resolve);
 
     if(timer -> once){
-        free(timer);
+        js_free(timer -> ctx, timer);
     }
+}
+
+static void timer_free_callback(EvFD* fd, void* ptr){
+    struct Timer_T* timer = (struct Timer_T*)ptr;
+    js_free(timer -> ctx, timer);
 }
 
 static JSValue js_timer_delay(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc!= 1 || !JS_IsNumber(argv[0])){
-        return LJS_Throw(ctx, "Timer.delay takes 1 argument: delay_time", "Timer.delay(delay_time: number): Promise<void>");
+        return LJS_Throw(ctx, "delay takes 1 argument: delay_time", "delay(delay_time: number): Promise<void>");
     }
 
-    struct promise* promise = LJS_NewPromise(ctx);
-    struct Timer_T* timer = (struct Timer_T*)malloc(sizeof(struct Timer_T));
+    JSValue promise_cb[2];
+    JSValue promise = JS_NewPromiseCapability(ctx, promise_cb);
+    struct Timer_T* timer = (struct Timer_T*)js_malloc(ctx, sizeof(struct Timer_T));
     timer -> ctx = ctx;
-    timer -> resolve = JS_DupValue(ctx, promise -> resolve);
+    timer -> resolve = promise_cb[0];
     timer -> once = true;
 
     uint32_t delay_time;
     if(-1 == JS_ToUint32(ctx, &delay_time, argv[0]) || delay_time == 0){
-        return LJS_Throw(ctx, "Timer.delay takes a non-zero delay_time", NULL);
+        return LJS_Throw(ctx, "delay takes a non-zero delay_time", NULL);
     }
 
     evcore_setTimeout(delay_time, timer_callback, timer);
 
-    return promise -> promise;
+    JS_FreeValue(ctx, promise_cb[1]);
+    return promise;
 }
 
 static JSValue js_timer_timeout(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc!= 2 || !JS_IsNumber(argv[1]) || !JS_IsFunction(ctx, argv[0])){
-        return LJS_Throw(ctx, "Timer.setTimeout takes 2 argument", "Timer.setTimeout(callback: () => void, delay_time: number): number");
+        return LJS_Throw(ctx, "setTimeout takes 2 argument", "setTimeout(callback: () => void, delay_time: number): number");
     }
 
     JSValue callback = JS_DupValue(ctx, argv[0]);
     uint32_t delay_time;
     if(-1 == JS_ToUint32(ctx, &delay_time, argv[1]) || delay_time == 0){
-        return LJS_Throw(ctx, "Timer.setTimeout takes a non-zero delay_time", NULL);
+        return LJS_Throw(ctx, "setTimeout takes a non-zero delay_time", NULL);
     }
 
-    struct Timer_T* timer = (struct Timer_T*)malloc(sizeof(struct Timer_T));
+    struct Timer_T* timer = (struct Timer_T*)js_malloc(ctx, sizeof(struct Timer_T));
     timer -> ctx = ctx;
     timer -> resolve = callback;
     timer -> once = true;
@@ -1115,28 +1145,28 @@ static JSValue js_timer_timeout(JSContext* ctx, JSValueConst this_val, int argc,
 
 static JSValue js_timer_interval(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc!= 2 || !JS_IsNumber(argv[1]) || !JS_IsFunction(ctx, argv[0])){
-        return LJS_Throw(ctx, "Timer.interval takes 2 argument", "Timer.interval(callback: () => void, interval_time: number): number");
+        return LJS_Throw(ctx, "interval takes 2 argument", "interval(callback: () => void, interval_time: number): number");
     }
 
     JSValue callback = JS_DupValue(ctx, argv[0]);
     uint32_t interval_time;
     if(-1 == JS_ToUint32(ctx, &interval_time, argv[1]) || interval_time == 0){
-        return LJS_Throw(ctx, "Timer.interval takes a non-zero interval_time", NULL);
+        return LJS_Throw(ctx, "interval takes a non-zero interval_time", NULL);
     }
 
-    struct Timer_T* timer = (struct Timer_T*)malloc(sizeof(struct Timer_T));
+    struct Timer_T* timer = (struct Timer_T*)js_malloc(ctx, sizeof(struct Timer_T));
     timer -> ctx = ctx;
     timer -> resolve = callback;
     timer -> once = false;
 
-    EvFD* fd = evcore_interval(interval_time, timer_callback, timer);
+    EvFD* fd = evcore_interval(interval_time, timer_callback, timer, timer_free_callback, timer);
 
     return JS_NewUint32(ctx, evfd_getfd(fd, NULL));
 }
 
 static JSValue js_timer_clear(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc!= 1 || !JS_IsNumber(argv[0])){
-        return LJS_Throw(ctx, "Timer.clear takes 1 argument: timer", "Timer.clear(timer: number): boolean");
+        return LJS_Throw(ctx, "clearTimer takes 1 argument: timer", "clearTimer(timer: number): boolean");
     }
     
     int id;
