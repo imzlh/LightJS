@@ -487,7 +487,7 @@ int js_run_promise_jobs(){
             );
             list_del(cur);
             JS_FreeValue(data -> ctx, data -> promise);
-            free(data);
+            free2(data);
             count ++;
         }
     }
@@ -495,6 +495,7 @@ int js_run_promise_jobs(){
 }
 
 // return true if promise has been resolved or rejected
+// Note: promise will not js_dup, call dupvalue if needed after this call
 bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback callback, void* opaque){
     int state = JS_PromiseState(ctx, promise);
     if(state != JS_PROMISE_PENDING){
@@ -505,7 +506,7 @@ bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback 
         return true;
     }
 
-    struct Promise_data* data = (struct Promise_data*)malloc(sizeof(struct Promise_data));
+    struct Promise_data* data = (struct Promise_data*)malloc2(sizeof(struct Promise_data));
     data -> promise = JS_DupValue(ctx, promise);
     data -> ctx = ctx;
     data -> callback = callback;
@@ -523,14 +524,16 @@ bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback 
 //     }
 // }
 
+static thread_local bool catch_error = false; 
+
 void js_handle_promise_reject(
     JSContext *ctx, JSValue promise,
     JSValue reason,
     bool is_handled, void *opaque
 ){
-    if (!is_handled){
+    if (!is_handled && !catch_error){
         // force next_tick
-        // struct Promise_data* data = (struct Promise_data*)malloc(sizeof(struct Promise_data));
+        // struct Promise_data* data = (struct Promise_data*)malloc2(sizeof(struct Promise_data));
         // data -> promise = JS_DupValue(ctx, promise);
         // data -> ctx = ctx;
         // data -> callback = handle_promise;
@@ -540,6 +543,23 @@ void js_handle_promise_reject(
         js_dump(ctx, reason, stderr);
         // JS_FreeValue(ctx, reason);
     }
+}
+
+JSValue JS_CallSafe(JSContext *ctx, JSValueConst func_obj, JSValueConst this_val, int argc, JSValueConst *argv, bool* is_exception){
+    catch_error = true;
+    JSValue ret = JS_Call(ctx, func_obj, this_val, argc, argv);
+    JSValue exception = JS_GetException(ctx);
+    if(JS_IsException(ret)){
+        JS_ClearUncatchableError(ctx, exception);
+        if(is_exception) *is_exception = true;
+    }else if(JS_IsPromise(ret) && JS_PROMISE_REJECTED == JS_PromiseState(ctx, ret)){
+        ret = JS_PromiseHandleError(ctx, ret);
+        if(is_exception) *is_exception = true;
+    }else{
+        if(is_exception) *is_exception = false;
+    }
+    catch_error = false;
+    return ret;
 }
 
 void* js_malloc_proxy(size_t size, void* opaque){

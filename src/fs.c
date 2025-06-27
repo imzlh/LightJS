@@ -578,14 +578,14 @@ static bool get_all_files_or_dirs(
                 *dir_list_length += 16;
                 *dir_list = realloc(*dir_list, *dir_list_length * sizeof(char*));
             }
-            (*dir_list)[*dir_list_used] = strdup(ent -> d_name);
+            (*dir_list)[*dir_list_used] = strdup2(ent -> d_name);
             (*dir_list_used)++;
         }else{
             if (*list_used >= *list_length) {
                 *list_length += 16;
                 *list = realloc(*list, *list_length * sizeof(char*));
             }
-            (*list)[*list_used] = strdup(ent -> d_name);
+            (*list)[*list_used] = strdup2(ent -> d_name);
             (*list_used)++;
         }
     }

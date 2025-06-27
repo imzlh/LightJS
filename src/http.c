@@ -71,12 +71,12 @@
 
 // resolve linux-style path
 static char* normalize_path(const char* path) {
-    char* copy = strdup(path);
+    char* copy = strdup2(path);
     if (!copy) return NULL;
 
-    char** parts = malloc(sizeof(char*) * PATH_MAX);
+    char** parts = malloc2(sizeof(char*) * PATH_MAX);
     if (!parts) {
-        free(copy);
+        free2(copy);
         return NULL;
     }
     
@@ -91,7 +91,7 @@ static char* normalize_path(const char* path) {
             // pop last part
             if (part_count > 0) part_count--;
         } else {
-            parts[part_count++] = strdup(token);
+            parts[part_count++] = strdup2(token);
         }
         token = strtok_r(NULL, "/", &saveptr);
     }
@@ -107,7 +107,7 @@ static char* normalize_path(const char* path) {
     
     if (part_count > 0) total_len--;
 
-    char* result = malloc(total_len);
+    char* result = malloc2(total_len);
     result[0] = '\0';
     
     if (is_absolute) strcat(result, "/");
@@ -115,11 +115,11 @@ static char* normalize_path(const char* path) {
     for (int i = 0; i < part_count; i++) {
         if (i > 0) strcat(result, "/");
         strcat(result, parts[i]);
-        free(parts[i]);
+        free2(parts[i]);
     }
     
-    free(parts);
-    free(copy);
+    free2(parts);
+    free2(copy);
     return result;
 }
 
@@ -229,11 +229,11 @@ static bool url_encode(const char* src, char* dest, size_t dest_len) {
 // if base is not provided, use current working directory
 // return NULL on error
 char* LJS_resolve_path(const char* path, const char* _base) {
-    if (!path || !*path) return strdup(_base);
+    if (!path || !*path) return strdup2(_base);
     
     // absolute path
     if (path[0] == '/') return normalize_path(path);
-    char* base = strdup(_base ? _base : "");
+    char* base = strdup2(_base ? _base : "");
     if(!base) {
         base = getcwd(NULL, 0);
     }
@@ -241,7 +241,7 @@ char* LJS_resolve_path(const char* path, const char* _base) {
     // relative path
     size_t base_len = strlen(base);
     size_t path_len = strlen(path);
-    char* combined = malloc(base_len + path_len + 2);
+    char* combined = malloc2(base_len + path_len + 2);
 
     // Remove filename from base path
     if(base[base_len-1] != '/'){
@@ -261,8 +261,8 @@ char* LJS_resolve_path(const char* path, const char* _base) {
 
     // normalize concatenated path
     char* resolved = normalize_path(combined);
-    free(combined);
-    free(base);
+    free2(combined);
+    free2(base);
     return resolved;
 }
 
@@ -272,7 +272,7 @@ static inline bool url_parse_query(char *query, struct list_head *query_list){
         return false;
     }
     while(true){
-        URL_query* query_obj = malloc(sizeof(URL_query));
+        URL_query* query_obj = malloc2(sizeof(URL_query));
         if(query_obj == NULL){
             return false;
         }
@@ -284,14 +284,14 @@ static inline bool url_parse_query(char *query, struct list_head *query_list){
             eq_pos == NULL || 
             (eq_pos != NULL && next_query != NULL && next_query < eq_pos) // "=" ahead of "&"
         ){
-            query_obj -> key = url_decode(strdup(query));
+            query_obj -> key = url_decode(strdup2(query));
         }else{  // both value and key
             eq_pos[0] = '\0';
-            query_obj -> key = url_decode(strdup(query));
+            query_obj -> key = url_decode(strdup2(query));
             if(next_query){
                 *next_query = '\0';
             }
-            query_obj -> value = url_decode(strdup(eq_pos + 1));
+            query_obj -> value = url_decode(strdup2(eq_pos + 1));
         }
         list_add_tail(&query_obj -> link, query_list);
 
@@ -312,12 +312,12 @@ static void url_query_dup(URL_data* source, URL_data* dest){
     struct list_head *cur, *tmp;
     list_for_each_safe(cur, tmp, &source -> query) {
         URL_query* query = list_entry(cur, URL_query, link);
-        URL_query* new_query = malloc(sizeof(URL_query));
+        URL_query* new_query = malloc2(sizeof(URL_query));
         if(new_query == NULL){
             return;
         }
-        new_query -> key = strdup(query -> key);
-        new_query -> value = strdup(query -> value);
+        new_query -> key = strdup2(query -> key);
+        new_query -> value = strdup2(query -> value);
         list_add_tail(&new_query -> link, &dest -> query);
     }
 }
@@ -331,7 +331,7 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
         goto error;
     }
     init_list_head(&url_struct -> query);
-    char* url = __url = strdup(_url);
+    char* url = __url = strdup2(_url);
 
     // fallback to default url if base is NULL
     if (!base) {
@@ -344,7 +344,7 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
     }
 
     // starter
-#define dup(c) c ? strdup(c) : NULL
+#define dup(c) c ? strdup2(c) : NULL
     if(url[0] == '/'){  // path
         if(url[1] == '/'){
             url_struct -> protocol = dup(base -> protocol);
@@ -364,7 +364,7 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
         char *hash_start = strchr(url, '#');
         if(hash_start){
             *hash_start = '\0';
-            url_struct -> hash = url_decode(strdup(hash_start + 1));
+            url_struct -> hash = url_decode(strdup2(hash_start + 1));
         }
 
         // parse query
@@ -381,7 +381,7 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
         url_query_dup(base, url_struct);
 
         url += 1;
-        url_struct -> hash = url_decode(strdup(url));
+        url_struct -> hash = url_decode(strdup2(url));
         return true;    // finished
 #undef dup
     }
@@ -391,7 +391,7 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
         char* pos = strstr(url, ":");
         if(pos){
             pos[0] = '\0';
-            url_struct -> protocol = strtolower(strdup(url));
+            url_struct -> protocol = strtolower(strdup2(url));
             url = pos + 1;
         }else{  // recognize as absolute path
             goto skip_host;
@@ -432,10 +432,10 @@ skip_protocol:
                 char *colon = strchr(url, ':');
                 if (colon) {
                     *colon = '\0';
-                    url_struct -> username = url_decode(strdup(url));
-                    url_struct -> password = url_decode(strdup(colon + 1));
+                    url_struct -> username = url_decode(strdup2(url));
+                    url_struct -> password = url_decode(strdup2(colon + 1));
                 } else {
-                    url_struct -> username = url_decode(strdup(url));
+                    url_struct -> username = url_decode(strdup2(url));
                 }
                 url = last_at + 1; 
             }
@@ -446,7 +446,7 @@ skip_up:
         if(*host == '['){   // ipv6
             char* ipv6_end = strchr(host, ']');
             if(ipv6_end){
-                url_struct -> host = strndup(host, ipv6_end - host);
+                url_struct -> host = strndup2(host, ipv6_end - host);
                 host_end = ipv6_end + 1;
 
                 // check if ipv6 vaild
@@ -497,7 +497,7 @@ skip_up:
             }
         }
 
-        url_struct -> host = strdup(host);
+        url_struct -> host = strdup2(host);
     }
 
 skip_host:
@@ -508,7 +508,7 @@ skip_host:
 
         if (hash_start) {
             *hash_start = '\0';
-            url_struct -> hash = url_decode(strdup(hash_start + 1));
+            url_struct -> hash = url_decode(strdup2(hash_start + 1));
         }
 
         if (query_start) {
@@ -521,22 +521,22 @@ skip_host:
 
         if (*path_start != '/') {
             // Note: LJS_resolve_path will motify input path
-            char* bpath = strdup(base -> path ? base -> path : ".");
+            char* bpath = strdup2(base -> path ? base -> path : ".");
             url_struct -> path = LJS_resolve_path(url_decode(path_start), bpath);
-            free(bpath);
+            free2(bpath);
             if (!url_struct -> path) {
                 goto error;
             }
         } else {
-            url_struct -> path = url_decode(strdup(path_start));
+            url_struct -> path = url_decode(strdup2(path_start));
         }
     }
 
-    free(__url);
+    free2(__url);
     return true;
 
 error:
-    if(__url) free(__url);
+    if(__url) free2(__url);
     LJS_free_url(url_struct);
     return false;
 }
@@ -544,14 +544,14 @@ error:
 // free URL struct
 // note: this function will not free data itself, please free it by yourself
 void LJS_free_url(URL_data *url_struct){
-#define free2(ptr) if(ptr) free(ptr)
+#define free2(ptr) if(ptr) free2(ptr)
     if(url_struct -> query.next != NULL && !list_empty(&url_struct -> query)){
         struct list_head *cur, *tmp;
         list_for_each_safe(cur, tmp, &url_struct -> query) {
             URL_query* query = list_entry(cur, URL_query, link);
-            free(query -> key);
-            free(query -> value);
-            free(query);
+            free2(query -> key);
+            free2(query -> value);
+            free2(query);
         }
     }
     free2(url_struct -> protocol);
@@ -566,7 +566,7 @@ void LJS_free_url(URL_data *url_struct){
 // format `url_struct` to standard URL string
 char* LJS_format_url(URL_data *url_struct){
     // Scheme://login:password@address:port/path/to/resource?query_string#fragment
-    char* data = malloc(2048);
+    char* data = malloc2(2048);
     size_t datapos = 0;
 
     char enctmp[1024 *2]; // for URL encode, same as max length in Chrome
@@ -626,14 +626,14 @@ void LJS_free_http_data(LHTTPData *data){
     struct list_head *cur, *tmp;
     list_for_each_safe(cur, tmp, &data -> headers){
         LHttpHeader* header = list_entry(cur, LHttpHeader, link);
-        DEL_HEADER(header);
+        DEL_HEADER2(header);
     }
 
-#define free2(ptr) if(ptr) free(ptr)
+#define free2(ptr) if(ptr) free2(ptr)
     free2(data -> method);
     free2(data -> path);
 #undef free2
-    // free(data);
+    // free2(data);
 }
 
 // check JS args by JSTag
@@ -652,7 +652,7 @@ static inline void init_http_data(LHTTPData *data, bool is_client); // forward d
 static JSValue js_headers_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
     // CHECK_ARGS(1, "Headers(): Headers", JS_TAG_OBJECT);
     // TODO: import Headers from Object or Array
-    LHTTPData* data = malloc(sizeof(LHTTPData));
+    LHTTPData* data = malloc2(sizeof(LHTTPData));
     init_http_data(data, true);
     data -> __header_owned = true;
     
@@ -728,8 +728,8 @@ static JSValue js_headers_set(JSContext *ctx, JSValueConst this_val, int argc, J
     })
 
     if(header){
-        free(header -> value);
-        header -> value = strdup(value);
+        free2(header -> value);
+        header -> value = strdup2(value);
     }else{
         PUT_HEADER_DUP(data, key, value);
     }
@@ -792,11 +792,11 @@ void headers_finalizer(JSRuntime *rt, JSValue val) {
         struct list_head *cur, *tmp;
         list_for_each_safe(cur, tmp, &data -> headers){
             LHttpHeader* header = list_entry(cur, LHttpHeader, link);
-            free(header -> key);
-            free(header -> value);
-            free(header);
+            free2(header -> key);
+            free2(header -> value);
+            free2(header);
         }
-        free(data);
+        free2(data);
     }
 }
 
@@ -869,7 +869,7 @@ static inline uint32_t hex2int(char* c){
     return hex;
 }
 
-#define COPY_BUF(var, buf, len) uint8_t* var = malloc(len); memcpy(var, buf, len);
+#define COPY_BUF(var, buf, len) uint8_t* var = malloc2(len); memcpy(var, buf, len);
 
 // predef
 static int parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len, void* user_data);
@@ -883,10 +883,10 @@ static int parse_evloop_chunk_callback(EvFD* evfd, uint8_t* chunk_data, uint32_t
         data -> content_resolved += len;
     }
 
-    free(chunk_data);
+    free2(chunk_data);
     
     if(data -> __read_all){
-        uint8_t* buf = malloc(BUFFER_SIZE);
+        uint8_t* buf = malloc2(BUFFER_SIZE);
         evfd_readline(evfd, BUFFER_SIZE, buf, parse_evloop_body_callback, data);
     }
     return EVCB_RET_DONE;
@@ -905,10 +905,10 @@ static int parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len,
         if (chunk_size == 0) goto done;
 
         // chunk read
-        uint8_t* buf = malloc(chunk_size);
+        uint8_t* buf = malloc2(chunk_size);
         evfd_readsize(evfd, chunk_size, buf, parse_evloop_chunk_callback, data);
 
-        free(line_data);
+        free2(line_data);
         return EVCB_RET_DONE;
     }else {
         COPY_BUF(databuf, buffer, len);
@@ -932,7 +932,7 @@ end:
 done:
     data -> state = HTTP_DONE;
     data -> cb(data, NULL, 0, data -> userdata);
-    free(buffer);
+    free2(buffer);
     return EVCB_RET_DONE;
 }
 
@@ -965,8 +965,8 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
         // GET / HTTP/1.1
         if (data -> is_client){
             strtoupper(param1);
-            data -> method = strdup(param1);
-            data -> path = strdup(param2);
+            data -> method = strdup2(param1);
+            data -> path = strdup2(param2);
             data -> version = parse_http_version (param3);
             if (data -> version < 1.0){
                 goto error;
@@ -986,7 +986,7 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
             else
                 data -> state = HTTP_BODY;
             data -> cb(data, NULL, 0, data -> userdata);
-            free(line_data);
+            free2(line_data);
             data -> cb = NULL;
             return EVCB_RET_DONE;
         }
@@ -1004,7 +1004,7 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
         ){
             data -> chunked = true;
         }else{
-            PUT_HEADER_DUP(data, name, value);
+            PUT_HEADER2(data, strdup2(name), strdup2(value));
         }
     }
 
@@ -1015,7 +1015,7 @@ error:
     evfd_close(evfd);
 error2:
     data -> state = HTTP_ERROR;
-    free(_line_data);
+    free2(_line_data);
     return EVCB_RET_DONE;
 }
 
@@ -1037,23 +1037,23 @@ static void write_evloop_callback(EvFD* evfd, bool success, void *userdata){
     list_del(el);
 
     LHttpHeader* header = list_entry(el, LHttpHeader, link);
-    char *line = malloc(1024);
+    char *line = malloc2(1024);
     sprintf(line, "%s: %s\r\n", header -> key, header -> value);
     evfd_write(data -> fd, (uint8_t*)line, strlen(line), write_evloop_callback, data);
-    free(line);
+    free2(line);
 }
 
 // write first line of response/request
 // after write_firstline, write_evloop_callback will be called
 static inline void write_firstline(int fd, LHTTPData *data){
-    char *first_line = malloc(1024);
+    char *first_line = malloc2(1024);
     if(data -> is_client){
         sprintf(first_line, "%s %s HTTP/%.1f\r\n", data -> method, data -> path, data -> version);
     }else{
         sprintf(first_line, "HTTP/%.1f %d OK\r\n", data -> version, data -> status);
     }
     evfd_write(data -> fd, (uint8_t*)first_line, strlen(first_line), write_evloop_callback, data);
-    free(first_line);
+    free2(first_line);
 }
 
 // read and parse body from socket fd.
@@ -1065,7 +1065,7 @@ static inline void read_body(LHTTPData *data, HTTP_ParseCallback callback, void 
     data -> userdata = userdata;
     data -> __read_all = readall;
 
-    uint8_t *buffer = malloc(BUFFER_SIZE);
+    uint8_t *buffer = malloc2(BUFFER_SIZE);
     if(data -> chunked) evfd_readline(data -> fd, BUFFER_SIZE, buffer, parse_evloop_body_callback, data);
     else evfd_read(data -> fd, BUFFER_SIZE, buffer, parse_evloop_body_callback, data);
 }
@@ -1081,7 +1081,7 @@ void LJS_parse_from_fd(EvFD* fd, LHTTPData *data, bool is_client,
     data -> userdata = userdata;
 
     // write the first line
-    uint8_t *buffer = malloc(BUFFER_SIZE);
+    uint8_t *buffer = malloc2(BUFFER_SIZE);
     evfd_readline(data -> fd, BUFFER_SIZE, buffer, parse_evloop_callback, data);
 }
 
@@ -1150,7 +1150,7 @@ struct readall_promise{
 
 // init task
 static inline struct readall_promise* init_tou8_merge_task(Promise *promise, struct HTTP_Response *response){
-    struct readall_promise *task = malloc(sizeof(struct readall_promise));
+    struct readall_promise *task = malloc2(sizeof(struct readall_promise));
     task -> promise = promise;
     task -> response = response;
     task -> tostr = false;
@@ -1179,8 +1179,8 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
             size_t copy_len2 = MIN(bufobj -> len, length - copy_len);
             memcpy(merged_buf + copy_len, bufobj -> buf, copy_len2);
             copy_len += copy_len2;
-            free(bufobj -> buf);
-            free(bufobj);
+            free2(bufobj -> buf);
+            free2(bufobj);
         }
 
         merged_buf[copy_len] = '\0';
@@ -1194,11 +1194,11 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
             res = JS_NewUint8Array(ctx, merged_buf, length, free_js_malloc, NULL, false);
         }
         js_resolve(task -> promise, res);
-        free(merged_buf);
+        free2(merged_buf);
         // after this, buffer=NULL will be passed to this again
     }else if(data -> state == HTTP_BODY){
         // push to u8arrs
-        struct buf_link *bufobj = malloc(sizeof(struct buf_link));
+        struct buf_link *bufobj = malloc2(sizeof(struct buf_link));
         bufobj -> buf = buffer;
         bufobj -> len = len;
         list_add_tail(&bufobj -> list, &task -> u8arrs);
@@ -1207,8 +1207,8 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
         struct list_head *tmp, *cur;
         list_for_each_safe(cur, tmp, &task -> u8arrs){
             struct buf_link *bufobj = list_entry(cur, struct buf_link, list);
-            free(bufobj -> buf);
-            free(bufobj);
+            free2(bufobj -> buf);
+            free2(bufobj);
         }
 
         Promise *promise = task -> promise;
@@ -1216,7 +1216,7 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
         js_reject(promise, "Failed to receive data");
         // else
         //     LJS_Promise_Resolve(promise, )
-        free(task); // done!
+        free2(task); // done!
     }
 }
 
@@ -1249,7 +1249,7 @@ struct formdata_addition_data {
 
 // parse form data from response body
 static inline struct formdata_addition_data* init_formdata_parse_task(Promise *promise, struct HTTP_Response *response){
-    struct formdata_addition_data *task = malloc(sizeof(struct formdata_addition_data));
+    struct formdata_addition_data *task = malloc2(sizeof(struct formdata_addition_data));
     task -> state = FD_BOUNDARY;
     task -> readed = 0;
     init_list_head(&task -> formdata);
@@ -1258,7 +1258,7 @@ static inline struct formdata_addition_data* init_formdata_parse_task(Promise *p
 
 #define SET_IF_NOT_NULL(obj, prop, val) if(val){ \
     JS_SetPropertyStr(ctx, obj, prop, JS_NewString(ctx, val)); \
-    free(val); \
+    free2(val); \
 }
 #define FREE_IF_NOT_NULL(obj) if(obj) js_free(ctx, obj);
 
@@ -1324,21 +1324,21 @@ static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_si
                 if (tmp2) {
                     tmp2 += 9;
                     STRTRIM(tmp2);
-                    filename = strdup(tmp2);
+                    filename = strdup2(tmp2);
                 }
                 tmp2 = strstr(tmp, "type=");
                 if (tmp2) {
                     tmp2 += 5;
                     STRTRIM(tmp2);
-                    type = strdup(tmp2);
+                    type = strdup2(tmp2);
                 }
             } else {
-                filename = strdup(value);
+                filename = strdup2(value);
             }
             formdata -> filename = filename;
             formdata -> type = type;
         } else if (strcmp(name, "Content-Type") == 0) {
-            formdata -> type = strdup(value);
+            formdata -> type = strdup2(value);
         } else if (strcmp(name, "Content-Length") == 0) {
             int len = atoi(value);
             if (len < 0) {
@@ -1409,7 +1409,7 @@ end_cleanup:
 end:
     FREE_IF_NOT_NULL(buffer);
     // free promise
-    free(fd_task);
+    free2(fd_task);
     return EVCB_RET_DONE;
 }
 
@@ -1640,7 +1640,7 @@ static void fetch_close_cb(EvFD* evfd, void* user_data){
 // free after write
 // Note: do not use `js_malloc`
 static void write_then_free(EvFD* evfd, bool success, void* opaque){
-    free(opaque);
+    free2(opaque);
 }
 
 // create random key for websocket request
@@ -1649,14 +1649,14 @@ static inline char* ws_random_key(){
     if(-1 == getrandom(key, 24, GRND_NONBLOCK))
         for (uint8_t i = 0; i < 24; i++) key[i] = (rand() >> 5) & 0xff;
 
-    char* result = malloc(40);
+    char* result = malloc2(40);
     base64_encode(key, 24, result);
     return result;
 }
 
 // format and write to fd
 #define FORMAT_WRITE(template, guessed_size, ...) { \
-    char* buf = malloc(guessed_size +2); \
+    char* buf = malloc2(guessed_size +2); \
     int len = snprintf(buf, guessed_size, template "\r\n", __VA_ARGS__); \
     assert(len > 0); \
     evfd_write(fd, (uint8_t*) buf, len, write_then_free, buf); \
@@ -1703,7 +1703,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
             if(strcmp(conn -> host, url.host) == 0){
                 list_del(cur);
                 fd = conn -> fd;
-                free(conn); // TODO: reuse it
+                free2(conn); // TODO: reuse it
                 break;
             }
         }
@@ -1762,7 +1762,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
         evfd_write(fd, (uint8_t*) "Sec-WebSocket-Version: 13\r\n", 31, NULL, NULL);
         char* key = ws_random_key();
         FORMAT_WRITE("Sec-WebSocket-Key: %s", 64, key);
-        free(key);
+        free2(key);
     }
 
     // headers
@@ -1803,15 +1803,15 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
             : JS_GetArrayBuffer(ctx, &data_len, body);
         if (data) {
             size_t len = 22 + sizeof(size_t);
-            char* buf = malloc(len);
+            char* buf = malloc2(len);
             snprintf(buf, len, "Content-Length: %lu\r\n\r\n", data_len);
             evfd_write(fd, (uint8_t*) buf, len, write_then_free, buf);
-            free(buf);
+            free2(buf);
         }
 
         // body content
         // Note: u8 will likely to be changed in JS, clone it 
-        uint8_t* data2 = malloc(data_len);
+        uint8_t* data2 = malloc2(data_len);
         memcpy(data2, data, data_len);
         evfd_write(fd, data2, data_len, write_then_free, data2);
         if(JS_IsString(body)) JS_FreeCString(ctx, (char*) data);
@@ -1836,7 +1836,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
 
     // keepalive?
     if (keep_alive && !websocket) {
-        struct keepalive_connection* conn = malloc(sizeof(struct keepalive_connection));
+        struct keepalive_connection* conn = malloc2(sizeof(struct keepalive_connection));
         conn -> fd = fd;
         strncpy(conn -> host, url.host, 64);
         fr -> keepalive = conn;
@@ -2249,7 +2249,7 @@ static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst val
     if (!js_url_struct) return JS_EXCEPTION; \
     const char *str = JS_ToCString(ctx, value); \
     if (!str) return LJS_Throw(ctx, err_msg, NULL); \
-    js_url_struct -> self -> field = strdup(str); \
+    js_url_struct -> self -> field = strdup2(str); \
     return JS_UNDEFINED; \
 }
 
@@ -2259,8 +2259,8 @@ static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst val
     if (!js_url_struct) return JS_EXCEPTION; \
     const char *str = JS_ToCString(ctx, value); \
     if (!str) return LJS_Throw(ctx, err_msg, NULL); \
-    free(js_url_struct -> self -> field); \
-    js_url_struct -> self -> field = strdup(str); \
+    free2(js_url_struct -> self -> field); \
+    js_url_struct -> self -> field = strdup2(str); \
     JS_FreeCString(ctx, str); \
     return JS_UNDEFINED; \
 }
@@ -2384,7 +2384,7 @@ static JSValue js_url_toString(JSContext *ctx, JSValueConst this_val, int argc, 
 
     char* data = LJS_format_url(url_struct);
     JSValue url_val = JS_NewString(ctx, data);
-    free(data);
+    free2(data);
     return url_val;
 }
 
@@ -2419,7 +2419,7 @@ static JSValue js_url_getQueryStr(JSContext *ctx, JSValueConst this_val){
     }
     query_str[qoffset] = '\0';
     JSValue query_val = JS_NewStringLen(ctx, query_str, qoffset);
-    free(query_str);
+    free2(query_str);
     return query_val;
 }
 
@@ -2592,7 +2592,7 @@ struct CookieJar {
 
 // allocate and initialize a new CookieJar
 void init_cookie_jar(struct CookieJar *jar, int initial_capacity) {
-    jar -> pairs = (struct CookiePair *)malloc(initial_capacity * sizeof(struct CookiePair));
+    jar -> pairs = (struct CookiePair *)malloc2(initial_capacity * sizeof(struct CookiePair));
     jar -> count = 0;
     jar -> capacity = initial_capacity;
     jar -> ref_count = 1;
@@ -2622,33 +2622,37 @@ static void mark_modified(struct CookieJar *jar, struct CookiePair *pair) {
 void free_cookie_jar(struct CookieJar *jar) {
     if(jar -> ref_count != 0) return;
     for (int i = 0; i < jar -> count; i++) {
-        free(jar -> pairs[i].name);
-        free(jar -> pairs[i].value);
+        free2(jar -> pairs[i].name);
+        free2(jar -> pairs[i].value);
     }
-    free(jar -> pairs);
+    free2(jar -> pairs);
     jar -> count = 0;
     jar -> capacity = 0;
     jar -> mod_count = 0;
     jar -> mod_capacity = 0;
-    free(jar -> modified);
+    free2(jar -> modified);
 }
 
 // set a cookie pair to the cookie jar
-void set_cookie_pair(struct CookieJar *jar, const char *name, const char *value) {
+// Note: `is_modified` is used only in server to update the cookie in response header
+void set_cookie_pair(struct CookieJar *jar, const char *name, const char *value, bool is_modified) {
     for (int i = 0; i < jar -> count; i++) {
         if (strcmp(jar -> pairs[i].name, name) == 0) {
-            free(jar -> pairs[i].value);
-            jar -> pairs[i].value = strdup(value);
+            free2(jar -> pairs[i].value);
             
             if (value[0] == '\0') {
-                free(jar -> pairs[i].name);
+                free2(jar -> pairs[i].name);
+                // Move the last pair to the current position
+                // and decrease the count to delete the pair
                 if (i < jar -> count - 1) {
                     jar -> pairs[i] = jar -> pairs[jar -> count - 1];
                 }
                 jar -> count--;
+            }else{
+                jar -> pairs[i].value = strdup2(value);
             }
 
-            mark_modified(jar, &jar -> pairs[i]);
+            if(is_modified) mark_modified(jar, &jar -> pairs[i]);
             return;
         }
     }
@@ -2662,10 +2666,11 @@ void set_cookie_pair(struct CookieJar *jar, const char *name, const char *value)
         );
     }
     
-    jar -> pairs[jar -> count].name = strdup(name);
-    jar -> pairs[jar -> count].value = strdup(value);
+    jar -> pairs[jar -> count].name = strdup2(name);
+    jar -> pairs[jar -> count].value = strdup2(value);
     jar -> count++;
-    mark_modified(jar, &jar -> pairs[jar -> count]);
+
+    if(is_modified) mark_modified(jar, &jar -> pairs[jar -> count]);
 }
 
 struct CookiePair** get_modified_cookies(struct CookieJar *jar, int *count) {
@@ -2687,7 +2692,7 @@ void parse_set_cookie(struct CookieJar *jar, const char *set_cookie_str) {
     if (*p != '=') return;
     
     size_t name_len = p - name_start;
-    char *name = strndup(name_start, name_len);
+    char *name = strndup2(name_start, name_len);
     
     p++; // skip '='
     
@@ -2696,27 +2701,28 @@ void parse_set_cookie(struct CookieJar *jar, const char *set_cookie_str) {
     value_start = p;
     while (*p && *p != ';') p++;
     size_t value_len = p - value_start;
-    char *value = strndup(value_start, value_len);
+    char *value = strndup2(value_start, value_len);
     
     // overwrite existing cookie with the same name
     for (int i = 0; i < jar -> count; i++) {
         if (strcmp(jar -> pairs[i].name, name) == 0) {
-            free(jar -> pairs[i].value);
-            jar -> pairs[i].value = strdup(value);
-            free(name);
-            free(value);
+            free2(jar -> pairs[i].value);
+            jar -> pairs[i].value = strdup2(value);
+            free2(name);
+            free2(value);
             return;
         }
     }
     
     // add new cookie
-    set_cookie_pair(jar, name, value);
-    free(name);
-    free(value);
+    set_cookie_pair(jar, name, value, false);
+    free2(name);
+    free2(value);
 }
 
-// parse Cookie header and set the cookies to the cookie jar
+// parse "Cookie" header and set the cookies to the cookie jar
 // it is useful in client to set the cookies to the request header
+// Note: "Set-Cookie" header should be parsed by `parse_set_cookie`
 void parse_cookie_string(struct CookieJar *jar, const char *cookie_str) {
     const char *p = cookie_str;
     
@@ -2731,7 +2737,7 @@ void parse_cookie_string(struct CookieJar *jar, const char *cookie_str) {
         if (*p != '=') continue;
         
         size_t name_len = p - name_start;
-        char *name = strndup(name_start, name_len);
+        char *name = strndup2(name_start, name_len);
         
         p++; // skip '='
         
@@ -2740,13 +2746,13 @@ void parse_cookie_string(struct CookieJar *jar, const char *cookie_str) {
         const char *value_start = p;
         while (*p && *p != ';') p++;
         size_t value_len = p - value_start;
-        char *value = strndup(value_start, value_len);
+        char *value = strndup2(value_start, value_len);
         
         // append cookie (not overwrite)
-        set_cookie_pair(jar, name, value);
+        set_cookie_pair(jar, name, value, false);
         
-        free(name);
-        free(value);
+        free2(name);
+        free2(value);
     }
 }
 
@@ -2770,7 +2776,7 @@ static JSValue js_cookies_set(JSContext *ctx, JSValueConst this_val, int argc, J
     const char* value = JS_ToCString(ctx, argv[1]);
     if(!name ||!value) return JS_EXCEPTION;
 
-    set_cookie_pair(jar, name, value);
+    set_cookie_pair(jar, name, value, true);
 
     JS_FreeCString(ctx, name);
     JS_FreeCString(ctx, value);
@@ -2812,8 +2818,8 @@ static JSValue js_cookies_del(JSContext *ctx, JSValueConst this_val, int argc, J
 
     for (int i = 0; i < jar -> count; i++) {
         if (strcmp(jar -> pairs[i].name, name) == 0) {
-            free(jar -> pairs[i].name);
-            free(jar -> pairs[i].value);
+            free2(jar -> pairs[i].name);
+            free2(jar -> pairs[i].value);
             jar -> pairs[i] = jar -> pairs[jar -> count - 1];
             jar -> count--;
             break;
@@ -2899,7 +2905,7 @@ static JSValue js_cookies_constructor(JSContext *ctx, JSValueConst this_val, int
             const char* name = JS_AtomToCString(ctx, properties[i].atom);
             const char* value = JS_ToCString(ctx, jsobj = JS_GetProperty(ctx, argv[0], properties[i].atom ));
             JS_FreeValue(ctx, jsobj);
-            set_cookie_pair(jar, name, value);
+            set_cookie_pair(jar, name, value, false);
             JS_FreeCString(ctx, name);
             JS_FreeCString(ctx, value);
         }
@@ -3000,12 +3006,12 @@ struct JSEventStreamData {
 static void handler_free(JSRuntime* rt, struct JSClientHandler* handler) {
     if(handler -> ref_count -- == 1){
         if(handler -> sending_data)
-            free(handler -> sending_data);
+            free2(handler -> sending_data);
 
         struct list_head* cur, *tmp;
         list_for_each_safe(cur, tmp, &handler -> chunks){
             struct JSChunkData* chunk = list_entry(cur, struct JSChunkData, link);
-            free(chunk -> data);
+            free2(chunk -> data);
             js_free_rt(rt, chunk);
         }
 
@@ -3023,7 +3029,7 @@ static void handler_close_cb(EvFD* fd, void* data){
     handler -> destroy = true;
     if(handler -> promise){
         js_reject(handler -> promise, "Connection closed");
-        free(handler);
+        free2(handler);
     }
 
     handler_free(JS_GetRuntime(handler -> ctx), handler);
@@ -3038,8 +3044,8 @@ static void handler_parse_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, voi
     
     if(error){
         js_reject(async_result -> promise, "Failed to parse request: Invaild request");
-        free(async_result);
-        free(handler);
+        free2(async_result);
+        free2(handler);
         return;
     }else if(!JS_IsUndefined(async_result -> reusing_obj)){
         // reusing object: resolve it directly
@@ -3084,14 +3090,14 @@ static void handler_parse_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, voi
         parse_cookie_string(&handler -> cookiejar, value -> value);
     })
 
-    free(async_result);
+    free2(async_result);
 }
 
 // TODO: eventstream
 // write body to client
 static void handler_wbody_cb(EvFD* fd, bool success, void* data){
     struct JSClientHandler* handler = data;
-    if(handler -> sending_data) free(handler -> sending_data);
+    if(handler -> sending_data) free2(handler -> sending_data);
     if(!success) return;
 
     if(list_empty(&handler -> chunks)){
@@ -3179,13 +3185,13 @@ static inline void handler_write_all_header(JSContext* ctx, struct JSClientHandl
             char* value = modified[i] -> value;
             char* modify = modified[i] -> modify ? modified[i] -> modify : "";
             size_t len = strlen(cookie) + strlen(value) + strlen(modify) + 32;
-            char* set_cookie = malloc(len);
+            char* set_cookie = malloc2(len);
             int real_size = snprintf(set_cookie, len, "%s=%s; %s", cookie, value, modify);
             if(real_size > 0) evfd_write(fd, (uint8_t*)set_cookie, real_size, write_then_free, set_cookie);
-            free(cookie);
-            free(value);
-            if(modified[i] -> modify) free(modified[i] -> modify);
-            free(modified[i]);
+            free2(cookie);
+            free2(value);
+            if(modified[i] -> modify) free2(modified[i] -> modify);
+            free2(modified[i]);
         }
         handler -> cookiejar.mod_count = 0;
     }
@@ -3332,7 +3338,7 @@ static inline void chunk_append(JSContext* ctx, struct list_head* list, uint8_t*
     assert(len != 0);   // should not be empty chunk
 
     chunk -> len = len;
-    chunk -> data = malloc(len);
+    chunk -> data = malloc2(len);
     memcpy(chunk -> data, data, len);
     list_add_tail(&chunk -> link, list);
 }
@@ -3380,7 +3386,7 @@ static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, 
         if(handler -> response.state < HTTP_BODY && list_empty(&handler -> chunks)){
             chunk_append(ctx, &handler -> chunks, data, len);
         }else{
-            uint8_t* chunked = malloc(len + 16);
+            uint8_t* chunked = malloc2(len + 16);
             if(!chunked){
                 JS_ThrowOutOfMemory(ctx);
                 goto error;
@@ -3402,12 +3408,12 @@ static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, 
             handler -> response.content_length += len;
         }else if(clen == -1){
             // continue feed data
-            uint8_t* data2 = malloc(len);
+            uint8_t* data2 = malloc2(len);
             memcpy(data2, data, len);   // avoid free after this function return
             evfd_write(handler -> response.fd, data2, len, write_then_free, data2);
         }else if(handler -> response.content_length >= handler -> response.content_resolved + len){
             len = handler -> response.content_length - handler -> response.content_resolved;
-            uint8_t* data2 = malloc(len);
+            uint8_t* data2 = malloc2(len);
             memcpy(data2, data, len);   // avoid free after this function return
             evfd_write(handler -> response.fd, data2, len, write_then_free, data2);
             handler -> response.content_resolved += len;
@@ -3447,7 +3453,8 @@ static JSValue js_handler_done(JSContext *ctx, JSValueConst this_val, int argc, 
                 handler -> response.content_length = 0;
             }
             handler_write_all_header(ctx, handler);
-            evfd_wait(handler -> response.fd, false, handler_wbody_cb, handler);
+            if(handler -> response.chunked || handler -> response.content_length > 0)
+                evfd_wait(handler -> response.fd, false, handler_wbody_cb, handler);
         break;
 
         case HTTP_BODY:
@@ -3668,7 +3675,7 @@ static inline char* ws_calc_accept(const char* key){
 #endif
 
     // base64
-    char* b64 = malloc(24);
+    char* b64 = malloc2(24);
     if(!b64) return NULL;
     base64_encode(sha1val, 20, b64);
 
@@ -3687,7 +3694,7 @@ static JSValue js_handler_ws(JSContext* ctx, JSValueConst this_val, int argc, JS
         // add to headers
         PUT_HEADER_DUP(&handler -> response, "Upgrade", "websocket");
         PUT_HEADER_DUP(&handler -> response, "Connection", "Upgrade");
-        PUT_HEADER(&handler -> response, strdup("Sec-WebSocket-Accept"), accept);
+        PUT_HEADER(&handler -> response, strdup2("Sec-WebSocket-Accept"), accept);
 
         // free
         DEL_HEADER(value);

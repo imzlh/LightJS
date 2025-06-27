@@ -19,6 +19,8 @@
 
 #define BUFFER_SIZE 64 * 1024
 
+static thread_local JSRuntime* g_runtime = NULL;
+
 // module
 static inline void clear_if_not_equal(char** a, char** b){
     if(*a != *b){
@@ -129,6 +131,7 @@ main:
 memerror:
     errno = ENOMEM;
 finalize:
+    free(filename);
     *_filename = NULL;
     return false;
 }
@@ -489,7 +492,10 @@ App* LJS_create_app(
     }
 
     JS_SetContextOpaque(ctx, app);
-    if(!parent || worker) JS_SetRuntimeOpaque(rt, app);
+    if(!parent || worker){
+        JS_SetRuntimeOpaque(rt, app);
+        if(!g_runtime) g_runtime = rt;
+    }
     return app;
 
 failed:
@@ -1087,9 +1093,9 @@ struct Timer_T {
 static void timer_callback(uint64_t count, void* ptr){
     struct Timer_T* timer = (struct Timer_T*)ptr;
     JS_Call(timer -> ctx, timer -> resolve, JS_UNDEFINED, 1, (JSValue[1]){ JS_NewInt64(timer -> ctx, count) });
-    JS_FreeValue(timer -> ctx, timer -> resolve);
 
     if(timer -> once){
+        JS_FreeValue(timer -> ctx, timer -> resolve);
         js_free(timer -> ctx, timer);
     }
 }
@@ -1185,4 +1191,17 @@ void LJS_init_timer(JSContext* ctx){
     JSValue global_obj = JS_GetGlobalObject(ctx);
     JS_SetPropertyFunctionList(ctx, global_obj, js_timer_funcs, countof(js_timer_funcs));
     JS_FreeValue(ctx, global_obj);
+}
+
+// memory
+void* malloc2(size_t size){
+    return js_malloc_rt(g_runtime, size);
+}
+
+void free2(void* ptr){
+    js_free_rt(g_runtime, ptr);
+}
+
+void* realloc2(void* ptr, size_t size){
+    return js_realloc_rt(g_runtime, ptr, size);
 }

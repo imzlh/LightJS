@@ -1,11 +1,11 @@
-import { stdin, stdout } from "process";
+/**
+ * LightJS 贪吃蛇 终端程序开发示例
+ * 
+ * @copyright iz
+ * @license MIT
+ */
 
-const DIRECTION = {
-    UP: 'up',
-    DOWN: 'down',
-    LEFT: 'left',
-    RIGHT: 'right'
-};
+import { stdin, stdout } from "process";
 
 /**
  * 
@@ -27,6 +27,7 @@ async function snakeGame(stdin, stdout) {
     }
 
     // 设置终端原始模式
+    // 此时允许读取单个键盘输入而不是只有回车后才有数据
     stdin.ttyRaw(true);
     stdout.ttyRaw(true);
 
@@ -47,6 +48,7 @@ async function snakeGame(stdin, stdout) {
     };
 
     // 设置终端尺寸
+    // 这个设置不一定会生效，因为许多终端都没有提供这个设置选项
     stdout.ttySize = [state.width + 10, state.height + 5];
 
     // 绘制游戏界面（优化渲染）
@@ -196,7 +198,8 @@ async function snakeGame(stdin, stdout) {
     }
 }
 // 主循环
-if(!import.meta.name) while(true) {
+// 自0.1.1后使用import.meta.main判断是否是主线程，此处不判断是否为Worker
+if(import.meta.main) while(true) {
     await snakeGame(stdin, stdout);
     await stdout.write(encodeStr('按任意键再来一局...'));
     await stdin.read();

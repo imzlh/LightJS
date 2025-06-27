@@ -143,7 +143,7 @@ static inline bool measure_wrap_disp2(JSContext *ctx, JSValue val){
 }
 
 static void print_jserror(JSContext* ctx, JSValue val, int depth, FILE* target_fd) {
-    const char* indent = getBlank(depth) + 2;
+    const char* indent = getBlank(depth);
 
     JSValue name = JS_GetProperty(ctx, val, JS_ATOM_name);
     JSValue message = JS_GetProperty(ctx, val, JS_ATOM_message);
@@ -166,7 +166,7 @@ static void print_jserror(JSContext* ctx, JSValue val, int depth, FILE* target_f
 
     // print stack
     if (js_stack_str) {
-        char* stack_str_raw = js_stack_str ? strdup(js_stack_str) : NULL;
+        char* stack_str_raw = js_stack_str ? js_strdup(ctx, js_stack_str) : NULL;
         char* stack_str = stack_str_raw;
         char* wrap_pos = strchr(stack_str, '\n');
         while (wrap_pos != NULL) {
@@ -176,7 +176,7 @@ static void print_jserror(JSContext* ctx, JSValue val, int depth, FILE* target_f
             wrap_pos = strchr(stack_str, '\n');
         }
         fprintf(target_fd, "%s%s\n", indent, stack_str);
-        free(stack_str_raw);
+        js_free(ctx, stack_str_raw);
         JS_FreeCString(ctx, js_stack_str);
     }
 

@@ -96,6 +96,7 @@ declare class Pipe<T>{
 
     /**
      * 写入数据
+     * @throws `write`函数返回错误，或者管道已关闭
      * @param data 要写入的数据
      */
     write(data: T): Promise<void>;
@@ -134,6 +135,11 @@ declare class U8Pipe {
         write?(data: Uint8Array): void;
         close?(): void;
     }, mode?: number);
+    /**
+     * 写入数据
+     * @throws 如果管道已关闭，或目标端拒绝数据
+     * @param data 要写入的数据
+     */
     write(data: Uint8Array): Promise<void>;
     /**
      * 向另一个U8Pipe写入数据，可选参数为过滤函数，接收到数据时调用，返回true则写入，否则丢弃

@@ -95,7 +95,7 @@ static void server_handle_close(EvFD* fd, void* user_data) {
         JS_Call(data -> ctx, data -> on_close, JS_UNDEFINED, 0, NULL);
         JS_FreeValue(data -> ctx, data -> on_close);
     }
-    free(data);
+    free2(data);
 }
 
 #define NONBLOCK(fd) fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
@@ -265,7 +265,7 @@ static void parse_dns_response(
 ) {
     // 遍历所有资源记录部分
     for(int i = 0; i < total_records; i++) {
-        dns_record *record = malloc(sizeof(*record));
+        dns_record *record = malloc2(sizeof(*record));
 
         // 解析公共头
         record -> type = ntohs(*(uint16_t*)ptr);
@@ -368,9 +368,9 @@ static void parse_dns_response(
 
 void dns_free_record(dns_record** record, int count) {
     for(int i = 0; i < count; i++) {
-        free(record[i]);
+        free2(record[i]);
     }
-    free(record);
+    free2(record);
 }
 
 int dns_response_handler(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data) {
@@ -409,7 +409,7 @@ int dns_response_handler(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* 
     ptr += 5;
 
     // 解析所有资源记录
-    dns_record **records = malloc(total_records * sizeof(dns_record*));
+    dns_record **records = malloc2(total_records * sizeof(dns_record*));
     int record_i = 0;
     parse_dns_response(records, &record_i, total_records, ptr, buffer);
 
@@ -420,7 +420,7 @@ int dns_response_handler(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* 
 cleanup:
     // 清理资源
     evfd_close(evfd);
-    free(ctx);
+    free2(ctx);
     return EVCB_RET_DONE;
 }
 
@@ -448,7 +448,7 @@ static inline bool async_dns_resolve(const char* dns_server, const char* domain,
     int query_len = build_dns_query(query, domain, transaction_id);
 
     // 创建查询上下文
-    DnsQueryContext* ctx = malloc(sizeof(DnsQueryContext));
+    DnsQueryContext* ctx = malloc2(sizeof(DnsQueryContext));
     ctx -> transaction_id = transaction_id;
     ctx -> user_callback = callback;
     ctx -> error_callback = error_callback;
@@ -462,7 +462,7 @@ static inline bool async_dns_resolve(const char* dns_server, const char* domain,
                             (struct sockaddr*)&server_addr, sizeof(server_addr),
                             NULL, NULL)) {
         close(sockfd);
-        free(ctx);
+        free2(ctx);
         return false;
     }
 
@@ -560,7 +560,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     }
  
     // 添加到evloop
-    struct JS_Server_Data* data = malloc(sizeof(struct JS_Server_Data));
+    struct JS_Server_Data* data = malloc2(sizeof(struct JS_Server_Data));
     data -> on_connection = JS_DupValue(ctx, handler);
     data -> fd = sockfd;
     data -> ctx = ctx;
@@ -667,7 +667,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
         if(JS_IsArray(val = JS_GetPropertyStr(ctx, obj, "ciphers"))) {
             int64_t count;
             if(JS_GetLength(ctx, val, &count) > 0){
-                ciphers = malloc((count +1) * sizeof(int));
+                ciphers = malloc2((count +1) * sizeof(int));
                 for(int i = 0; i < count; i++){
                     JSValue item = JS_GetPropertyUint32(ctx, val, i);
                     int cipher;
@@ -696,7 +696,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
     // chipers
     if(ciphers){
         mbedtls_ssl_conf_ciphersuites(config, ciphers);
-        free(ciphers);
+        free2(ciphers);
     }
 
     return promise -> promise;
@@ -755,10 +755,10 @@ void js_handle_dns_resolve(int total_records, dns_record** records, void* user_d
                 break;
         }
         JS_SetPropertyUint32(ctx, arr, i, obj);
-        free(record);
+        free2(record);
     }
     js_resolve(promise, arr);
-    free(records);
+    free2(records);
 }
 
 static void js_handle_dns_error(const char* error_msg, void* user_data) {
@@ -827,7 +827,7 @@ static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     }
 
     // add to global
-    evfd_set_sni(strdup(name_str), NULL, crt, pk);
+    evfd_set_sni(strdup2(name_str), NULL, crt, pk);
     JS_FreeCString(ctx, name_str);
     
     return JS_UNDEFINED;

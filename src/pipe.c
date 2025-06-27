@@ -81,7 +81,7 @@ static thread_local uint32_t PIPE_u8_buf_size = 16 * 1024;
 #define CHECK_PIPE_CLOSED(pipe) if(pipe -> closed) return JS_ThrowTypeError(ctx, "Pipe is closed");
 #define CHECK_PIPE_READABLE(pipe) if(!(pipe -> flag & PIPE_READ)) return JS_ThrowTypeError(ctx, "Pipe is not readable");
 #define CHECK_PIPE_WRITEABLE(pipe) if(!(pipe -> flag & PIPE_WRITE)) return JS_ThrowTypeError(ctx, "Pipe is not writable");
-#define EXCEPTION_THEN_CLOSE(val, ret) if(JS_IsException(val)){ pipe_handle_close(JS_GetRuntime(ctx), pipe); return ret; }
+#define EXCEPTION_THEN_CLOSE(error, val, ret) if(error){ pipe_handle_close(JS_GetRuntime(ctx), pipe); JS_FreeValue(ctx, val); return ret; }
 #define UNLOCK_AFTER(promise, ref) LJS_enqueue_promise_job(ctx, promise, pipe_unlock_job, ref);
 #define DEF_ONCLOSE(pipe) { \
     JSValue promise[2]; \
@@ -115,6 +115,7 @@ static inline void pipe_handle_promise(JSContext* ctx, JSValue promise, struct P
 
 static void pipe_handle_close(JSRuntime *rt, struct Pipe_T *pipe) {
     if (pipe -> closed) return;
+    pipe -> closed = true;
 
     JS_FreeValueRT(rt, pipe -> pull_func);
     JS_FreeValueRT(rt, pipe -> write_func);
@@ -127,7 +128,6 @@ static void pipe_handle_close(JSRuntime *rt, struct Pipe_T *pipe) {
     }
     
     buffer_free(pipe -> read_buf);
-    pipe -> closed = true;
 }
 
 static void pipe_cleanup(JSRuntime *rt, struct Pipe_T* pipe) {
@@ -148,8 +148,9 @@ static JSValue js_pipe_read(JSContext *ctx, JSValueConst this_val, int argc, JSV
     JSValue data;
     // 调用pull()
     pipe -> read_lock = true;
-    data = JS_Call(ctx, pipe -> pull_func, this_val, 0, NULL);
-    EXCEPTION_THEN_CLOSE(data, JS_NULL);
+    bool exception;
+    data = JS_CallSafe(ctx, pipe -> pull_func, this_val, 0, NULL, &exception);
+    EXCEPTION_THEN_CLOSE(exception, data, JS_NULL);
     pipe_handle_promise(ctx, data, pipe);
     UNLOCK_AFTER(data, &pipe -> read_lock);
 
@@ -168,9 +169,10 @@ static JSValue js_pipe_write(JSContext *ctx, JSValueConst this_val, int argc, JS
     JSValue data = argv[0];
 
     // 传递给write()
-    JSValue ret = JS_Call(ctx, pipe -> write_func, this_val, 1, (JSValueConst[]){data});
+    bool exception;
+    JSValue ret = JS_CallSafe(ctx, pipe -> write_func, this_val, 1, (JSValueConst[]){data}, &exception);
     pipe -> write_lock = true;
-    EXCEPTION_THEN_CLOSE(ret, JS_FALSE);
+    EXCEPTION_THEN_CLOSE(exception, ret, LJS_NewResolvedPromise(ctx, LJS_Throw(ctx, "Pipe write failed", NULL)));
     pipe_handle_promise(ctx, data, pipe);
     UNLOCK_AFTER(ret, &pipe -> write_lock);
 
@@ -251,7 +253,7 @@ else \
 #define U8PIPE_UNREF(pipe) if(u8pipe_unref(pipe)) u8pipe_free(JS_GetRuntime(ctx), pipe);
 #define U8PIPE_UNREF_RT(pipe) if(u8pipe_unref(pipe)) u8pipe_free(rt, pipe);
 #undef EXCEPTION_THEN_CLOSE
-#define EXCEPTION_THEN_CLOSE(val, ret) if(JS_IsException(val)){ U8PIPE_UNREF(pipe); return ret; } \
+#define EXCEPTION_THEN_CLOSE(exception, val, ret) if(exception){ U8PIPE_UNREF(pipe); u8pipe_handle_close(JS_GetRuntime(ctx), pipe); return ret; } \
     else if(JS_IsPromise(val)) JS_PromiseHandleError(ctx, val);
 #define CALL_ONCLOSE(pipe) JS_Call(pipe -> ctx, pipe -> close_rs, JS_NULL, 0, NULL);
 
@@ -328,8 +330,8 @@ static inline void u8pipe_free(JSRuntime *rt, struct U8Pipe_T* pipe) {
 }
 
 static void u8pipe_finalizer(JSRuntime *rt, JSValue val) {
-    // U8Pipe will be 
     struct U8Pipe_T* pipe = ((struct U8Pipe_T*)JS_GetOpaque(val, u8pipe_class_id));
+    if (!pipe) return;
     U8PIPE_UNREF_RT(pipe);
 }
 
@@ -414,8 +416,10 @@ done:
         js_free(ctx, job);
     }else{
         // push
-        JSValue data = JS_Call(ctx, pipe -> pull_func, JS_NULL, 0, NULL);
-        if(JS_IsException(data)){
+        bool exception;
+        JSValue data = JS_CallSafe(ctx, pipe -> pull_func, JS_NULL, 0, NULL, &exception);
+        if(exception){
+            JS_FreeValue(ctx, data);
             pipe_handle_close(JS_GetRuntime(ctx), pipe);
             goto done;
         }
@@ -430,8 +434,10 @@ static inline bool u8pipe_fill(JSContext* ctx, struct U8Pipe_T* pipe, Promise* p
     job -> pipe = pipe;
     job -> once = once;
     
-    JSValue data = JS_Call(ctx, pipe -> pipe.pipe -> pull_func, JS_NULL, 0, NULL);
+    bool exception;
+    JSValue data = JS_CallSafe(ctx, pipe -> pipe.pipe -> pull_func, JS_NULL, 0, NULL, &exception);
     if(JS_IsException(data)){
+        JS_FreeValue(ctx, data);
         pipe_handle_close(JS_GetRuntime(ctx), pipe -> pipe.pipe);
         js_free(ctx, job);
         U8PIPE_UNREF(pipe);
@@ -563,8 +569,9 @@ static JSValue js_U8Pipe_write(JSContext *ctx, JSValueConst this_val, int argc, 
     }else{  // U8PIPE
         // 写入函数
         pipe -> pipe.pipe -> write_lock = true;
-        JSValue ret = JS_Call(ctx, pipe -> pipe.pipe -> write_func, this_val, 1, (JSValueConst[]){argv[1]});
-        EXCEPTION_THEN_CLOSE(ret, JS_EXCEPTION);
+        bool exception;
+        JSValue ret = JS_CallSafe(ctx, pipe -> pipe.pipe -> write_func, this_val, 1, (JSValueConst[]){argv[1]}, &exception);
+        EXCEPTION_THEN_CLOSE(exception, ret, LJS_Throw(ctx, "Pipe write failed", NULL));
         pipe_handle_promise(ctx, ret, pipe -> pipe.pipe);
         U8PIPE_UNREF(pipe);
         return ret;
@@ -849,12 +856,7 @@ static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc,
         js_resolve(from -> pipe.fdpipe -> close, JS_UNDEFINED);
         JS_FreeValue(ctx, data);
 
-        JSValue prom[2];
-        JSValue ret = JS_NewPromiseCapability(ctx, prom);
-        JS_FreeValue(ctx, prom[1]);
-        JS_Call(ctx, prom[0], JS_NULL, 1, (JSValueConst[]){ JS_NewBool(ctx, true) });
-        JS_FreeValue(ctx, prom[0]);
-        return ret;
+        return LJS_NewResolvedPromise(ctx, JS_UNDEFINED);
     }
 
     // Note: use ref to control lifetime, -- to release

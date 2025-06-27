@@ -70,8 +70,8 @@ static int js_re_del_prop(JSContext *ctx, JSValue obj, JSAtom prop){
     const char* name = JS_AtomToCString(ctx, prop);
     for(size_t i = 0; i < env -> env_count; i++){
         if(strcmp(name, env -> env_names[i]) == 0){
-            js_free(ctx, env -> env_names[i]);
-            js_free(ctx, env -> env_values[i]);
+            free(env -> env_names[i]);
+            free(env -> env_values[i]);
             env -> env_count--;
 
             // move from end to fill the gap
@@ -111,8 +111,8 @@ static int js_re_set_prop(JSContext *ctx, JSValue obj, JSAtom atom, JSValue valu
     const char* name = JS_AtomToCString(ctx, atom);
     for(size_t i = 0; i < env -> env_count; i++){
         if(strcmp(name, env -> env_names[i]) == 0){
-            js_free(ctx, env -> env_values[i]);
-            env -> env_values[i] = js_strdup(ctx, JS_ToCString(ctx, value));
+            free(env -> env_values[i]);
+            env -> env_values[i] = strdup(JS_ToCString(ctx, value));
 
             setenv(name, env -> env_values[i], true);
             pthread_rwlock_unlock(&env_lock);
@@ -212,6 +212,7 @@ typedef struct {
 
 static struct list_head signal_list;
 static pthread_rwlock_t signal_lock;
+extern bool exiting;
 
 static void js_signal_handler(int sig){
     pthread_rwlock_rdlock(&signal_lock);
@@ -223,7 +224,16 @@ static void js_signal_handler(int sig){
             if(app -> thread == pthread_self()){
                 // exec in current thread
                 JSValue ret = JS_Call(data -> ctx, data -> handler, JS_UNDEFINED, 0, NULL);
-                JS_FreeValue(data -> ctx, ret);
+                if(JS_IsException(ret)){
+                    JSValue err = JS_GetException(data -> ctx);
+                    if(JS_IsInternalError(data -> ctx, err))
+                        exiting = true;
+                    else
+                        js_dump(data -> ctx, err, stderr);
+                    JS_FreeValue(data -> ctx, err);
+                }else{
+                    JS_FreeValue(data -> ctx, ret);
+                }
             }else{
                 pthread_kill(app -> thread, sig);
                 break;

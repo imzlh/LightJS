@@ -1,9 +1,10 @@
 import { self } from "process";
 import serveFile from "../../lib/http/file";
 import Server from "../../lib/http/server";
-import { stat } from "fs";
+import { read, stat } from "fs";
 
 const server = new Server("0.0.0.0:8000");
+const indexPage = read(import.meta.dirname + "/index.html", true);
 
 /**
  * 
@@ -16,6 +17,12 @@ server.callback = async (client, addr) => {
         .replaceAll('..', '')
         .replaceAll('\\', '/')
         .replaceAll('/./', '/');
+
+    if(url.path === '/'){
+        client.status(200).send(indexPage).done();
+        return;
+    }
+
     try{
         if(stat(url.path).isDirectory){
             let rurl = url.toString() ;
@@ -28,7 +35,7 @@ server.callback = async (client, addr) => {
         client.status(404).send("Not Found").done();
         return;
     }
-    serveFile(client, (import.meta.dirname || self.dirname) + url.path);
+    serveFile(client, import.meta.dirname + url.path);
 };
 
 server.run();

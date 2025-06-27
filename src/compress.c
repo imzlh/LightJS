@@ -51,7 +51,7 @@ main:
 
         case Z_BUF_ERROR:
             outsize *= 2;
-            free(outbuf);
+            js_free(ctx, outbuf);
             outbuf = js_malloc(ctx, outsize);
             if(!outbuf) return JS_ThrowOutOfMemory(ctx);
             goto main;
@@ -243,7 +243,7 @@ error:
 
     if(stream -> compress) inflateEnd(&stream -> zstream);
     else deflateEnd(&stream -> zstream);
-    free(stream);
+    js_free(ctx, stream);
 
 finally:
     return stream -> poll_promise -> promise;
@@ -269,7 +269,7 @@ static JSValue stream_close(JSContext* ctx, void* ptr, JSValueConst data){
 
     if(stream -> compress) inflateEnd(&stream -> zstream);
     else deflateEnd(&stream -> zstream);
-    free(stream);
+    js_free(ctx, stream);
 
     return JS_NULL;
 }

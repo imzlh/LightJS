@@ -126,14 +126,21 @@ struct LHTTPData {
 };
 
 #define PUT_HEADER(hdstruct, _key, _value) { \
-    LHttpHeader* h = malloc(sizeof(LHttpHeader)); \
+    LHttpHeader* h = js_malloc(ctx, sizeof(LHttpHeader)); \
+    h -> key = _key; h -> keylen = strlen(_key); \
+    h -> value = _value; h -> vallen = strlen(_value); \
+    list_add_tail(&h -> link, &(hdstruct) -> headers); \
+}
+
+#define PUT_HEADER2(hdstruct, _key, _value) { \
+    LHttpHeader* h = malloc2(sizeof(LHttpHeader)); \
     h -> key = _key; h -> keylen = strlen(_key); \
     h -> value = _value; h -> vallen = strlen(_value); \
     list_add_tail(&h -> link, &(hdstruct) -> headers); \
 }
 
 #define PUT_HEADER_DUP(hdstruct, _key, _value) \
-    PUT_HEADER((hdstruct), strdup( _key), strdup(_value));
+    PUT_HEADER((hdstruct), js_strdup(ctx, _key), js_strdup(ctx, _value));
 
 #define FIND_HEADERS(hdstruct, _key, varname, callback){ \
     struct list_head *__cur, *__tmp; \
@@ -145,9 +152,15 @@ struct LHTTPData {
 
 #define DEL_HEADER(header) \
     list_del(&header -> link); \
-    free(header -> key); \
-    free(header -> value); \
-    free(header);
+    js_free(ctx, header -> key); \
+    js_free(ctx, header -> value); \
+    js_free(ctx, header);
+
+#define DEL_HEADER2(header) \
+    list_del(&header -> link); \
+    free2(header -> key); \
+    free2(header -> value); \
+    free2(header);
 
 typedef enum{
     EV_REMOVE_READ  = 0b001,
@@ -287,7 +300,6 @@ bool evcore_init();
 bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
 void evcore_destroy();
 EvFD* evcore_attach(int fd, bool use_aio, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
-void evcore_set_memory(void* (*allocator)(size_t, void*), void* opaque);
 EvFD* evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
 void evfd_setup_udp(EvFD* evfd);
 bool evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
@@ -410,3 +422,22 @@ void __js_reject2(struct promise* proxy, JSValue value, const char* __debug__);
 #define js_resolve(proxy, value) __js_resolve(proxy, value, __FILE__ ":" TOSTRING((__LINE__)))
 #define js_reject(proxy, msg) __js_reject(proxy, msg, __FILE__ ":" TOSTRING(__LINE__))
 #define js_reject2(proxy, value) __js_reject2(proxy, value, __FILE__ ":" STRINGIFY(__LINE__))
+
+JSValue JS_CallSafe(JSContext *ctx, JSValueConst func_obj, JSValueConst this_val, int argc, JSValueConst *argv, bool* is_exception);
+#define JS_CallOrHandle(ctx, func_obj, this_val, argc, argv) if(!JS_IsUninitialized(JS_CallSafe(ctx, func_obj, this_val, argc, argv, NULL))
+
+// override malloc, free, realloc
+void* malloc2(size_t size);
+void free2(void* ptr);
+void* realloc2(void* ptr, size_t size);
+
+static inline void* strndup2(const char* str, size_t n){
+    void* memory = malloc2(n + 1);
+    memcpy(memory, str, n);
+    ((char*)memory)[n] = '\0';
+    return memory;
+}
+
+static inline void* strdup2(const char* str){
+    return strndup2(str, strlen(str));
+}

@@ -63,6 +63,7 @@ enum ARG_GCFLAG {
 pthread_mutex_t ffi_mutex;
 pthread_t running_thread;
 char* info;
+char* bt_msg = NULL;
 static thread_local jmp_buf jump_buf;
 static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
     // generate error message
@@ -87,7 +88,7 @@ static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
     void* bt_buff[60];
     int bt_len = backtrace(bt_buff, 60);
     char** bt_str = backtrace_symbols(bt_buff, bt_len);
-    char* bt_msg = malloc(1024);
+    bt_msg = malloc(1024);
     strcat(bt_msg, "Backtrace(if available):\n");
     for(int i = 0; i < bt_len; i++){
         strcat(bt_msg, bt_str[i]);
@@ -104,6 +105,8 @@ static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
         // Not in FFI thread
         printf("program received unhandled %s\n", info);
         free(info);
+        if(bt_msg) free(bt_msg);
+        info = bt_msg = NULL;
         raise(SIGTRAP);
         exit(1);
     }
@@ -405,8 +408,10 @@ error:
     // jump 
 #ifdef LJS_DEBUG
     if(setjmp(jump_buf)){
-        ret_val = LJS_Throw(ctx, "FFI Error: %s", NULL, info);
+        ret_val = LJS_Throw(ctx, "FFI Error: %s", bt_msg, info);
         free(info);
+        free(bt_msg);
+        info = bt_msg = NULL;
         goto cleanup;
     }else{
         // dangerous! start ffi call

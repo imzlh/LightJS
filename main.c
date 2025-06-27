@@ -51,30 +51,37 @@ static inline void run_jobs(){
 }
 
 static bool check_promise_resolved(void* opaque){
+    bool ret = false;
+
     // check if global promise is resolved
     JSValue* prom = (JSValue*)opaque;
     JSPromiseStateEnum state = JS_PromiseState(app -> ctx, *prom);
     if(state == JS_PROMISE_FULFILLED){
         run_jobs();
         if(!JS_IsJobPending(JS_GetRuntime(app -> ctx)))
-            return true;
+            goto ret_true;
     }else if(state == JS_PROMISE_REJECTED){
         JSValue result = JS_PromiseResult(app -> ctx, *prom);
         if(unlikely(JS_IsInternalError(app -> ctx, result))){
             JSValue ecode = JS_GetProperty(app -> ctx, result, JS_ATOM__ret_);
             JS_ToInt32(app -> ctx, &exit_code, ecode);
             JS_FreeValue(app -> ctx, ecode);
+            exiting = true;
         }else{
             js_dump(app -> ctx, result, stderr);
             JS_FreeValue(app -> ctx, result);
         }
-        return true;
+        goto ret_true;
     }else{  // TIMING
         run_jobs();
-        return check_promise_resolved(opaque);
+        goto finalize;
     }
 
-    return exiting;
+ret_true:
+    ret = true;
+finalize:
+    if(exiting) evcore_destroy();
+    return ret;
 }
 
 static size_t parse_limit(const char *arg) {
@@ -135,7 +142,6 @@ int main(int argc, char **argv) {
     bool eval_code = false;
     bool repl = false;
     bool check = false;
-    bool compile = false;
 
     runtime = JS_NewRuntime();
 
@@ -175,7 +181,6 @@ int main(int argc, char **argv) {
                     "    -v, --version      Print the version number\n"
                     "    -e, --eval         Evaluate the follow argument as JavaScript code\n"
                     "    -c, --check        Check syntax only (no execution)\n"
-                    "    -b, --compile      Compile scripts in given directory to \"<dirname>.jspack\"\n"
                     "    -r, --repl         Start a read-eval-print loop\n"
                     "        --stack-size   Set the stack size in bytes\n"
                     "        --memory-limit Set the memory limit in bytes\n"
@@ -218,8 +223,6 @@ int main(int argc, char **argv) {
                 eval_code = true;
             }else if(strcmp(longopt, "check") == 0 || opt == 'c'){
                 check = true;
-            }else if(strcmp(longopt, "compile") == 0 || opt == 'b'){
-                compile = true;
             }else if(strcmp(longopt, "repl") == 0 || opt == 'r'){
                 repl = true;
             }else if(strcmp(longopt, "stack-size") == 0){
@@ -284,11 +287,6 @@ int main(int argc, char **argv) {
     evcore_init();  // epoll init
 
     if(argc - optind == 0 || repl){
-        if(check || compile){
-            printf("Could not use --check or --compile when running in REPL mode.\n");
-            printf("If you want to check syntax or compile, please provide script name\n");
-            return 1;
-        }
         printf("LightJS %s with QuickJS-NG %s\n", LJS_VERSION, JS_GetVersion());
         printf("Type \".help\" for usage. for more information, please access github wiki.\n");
 
@@ -331,6 +329,7 @@ int main(int argc, char **argv) {
 
     if(check){
         JSValue ret_val = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        free(buf);
         if(JS_IsException(ret_val)){
             js_dump(app -> ctx, JS_GetException(app -> ctx), stderr);
             printf("The script has syntax errors.\n");
@@ -340,18 +339,11 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
-    
-    if(compile){
-        // -- to impl
-        printf("Sorry, --compile option is not implemented yet.\n");
-        return 0;
-    }
-
-    evcore_set_memory(js_malloc_proxy, runtime);
 
     // parse
     JSValue code = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
     JSValue ret_val = JS_UNDEFINED;
+    free(buf);
     if(JS_IsException(code)){
 print_error:
         JSValue exception = JS_GetException(app -> ctx);
