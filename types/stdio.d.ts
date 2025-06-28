@@ -87,4 +87,6 @@ declare module "fs" {
     export function open(path: string, flags: string, mode?: number, sync: true): SyncPipe;
 
     export function copy(src: string, dest: string): void;
+
+    export function realpath(path: string): string;
 }

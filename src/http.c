@@ -268,9 +268,8 @@ char* LJS_resolve_path(const char* path, const char* _base) {
 
 // parse query string, \0 terminated
 static inline bool url_parse_query(char *query, struct list_head *query_list){
-    if(query == NULL || strlen(query) == 0){
-        return false;
-    }
+    if(query == NULL) return false;
+    if(*query == '\0') return true;
     while(true){
         URL_query* query_obj = malloc2(sizeof(URL_query));
         if(query_obj == NULL){
@@ -898,6 +897,12 @@ static int parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len,
     LHTTPData *data = user_data;
     if (data -> state != HTTP_BODY) return EVCB_RET_DONE ;
     char* line_data = (char*)buffer;
+
+    if(len == 0 && !line_data){
+        // error
+        goto error;
+    }
+
     if (data -> chunked) {
         // chunked length
         STRTRIM(line_data);
@@ -931,6 +936,12 @@ end:
 
 done:
     data -> state = HTTP_DONE;
+    data -> cb(data, NULL, 0, data -> userdata);
+    free2(buffer);
+    return EVCB_RET_DONE;
+
+error:
+    data -> state = HTTP_ERROR;
     data -> cb(data, NULL, 0, data -> userdata);
     free2(buffer);
     return EVCB_RET_DONE;
@@ -1011,6 +1022,10 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
 
     return EVCB_RET_CONTINUE;
 
+// error_is_http:
+//     evfd_write(evfd, (uint8_t*)"HTTP/1.1 400 Bad Request\r\n\r\n", 28, NULL, NULL);
+// error:
+//     evfd_shutdown(evfd);
 error:
     evfd_close(evfd);
 error2:
@@ -1058,12 +1073,16 @@ static inline void write_firstline(int fd, LHTTPData *data){
 
 // read and parse body from socket fd.
 static inline void read_body(LHTTPData *data, HTTP_ParseCallback callback, void *userdata, bool readall){
-    if(data -> state != HTTP_BODY){
-        return;
-    }
+    assert(data -> state == HTTP_BODY);
     data -> cb = callback;
     data -> userdata = userdata;
     data -> __read_all = readall;
+
+    if(data -> content_length == 0 && !data -> chunked){
+        data -> state = HTTP_DONE;
+        data -> cb(data, NULL, 0, data -> userdata);
+        return;
+    }
 
     uint8_t *buffer = malloc2(BUFFER_SIZE);
     if(data -> chunked) evfd_readline(data -> fd, BUFFER_SIZE, buffer, parse_evloop_body_callback, data);
@@ -1144,6 +1163,7 @@ struct readall_promise{
 
     bool tostr;
     bool tojson;
+    bool urlform;
 
     void* addition_data;
 };
@@ -1155,6 +1175,7 @@ static inline struct readall_promise* init_tou8_merge_task(Promise *promise, str
     task -> response = response;
     task -> tostr = false;
     task -> tojson = false;
+    task -> urlform = false;
     task -> addition_data = NULL;
     init_list_head(&task -> u8arrs);
     return task;
@@ -1190,10 +1211,28 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
             res = JS_NewStringLen(ctx, (char*)merged_buf, length);
         }else if(task -> tojson){
             res = JS_ParseJSON(ctx, (char*)merged_buf, length, "<httpstream>.json");
+        }else if(task -> urlform){
+            struct list_head query;
+            init_list_head(&query);
+            if(!url_parse_query((char*)merged_buf, &query)){
+                js_reject(task -> promise, "Invalid url query");
+                free2(merged_buf);
+            }
+
+            struct list_head *cur, *tmp;
+            res = JS_NewObject(ctx);
+            list_for_each_safe(cur, tmp, &query){
+                URL_query* param = list_entry(cur, URL_query, link);
+                JSValue val = JS_NewString(ctx, param -> value);
+                JS_SetPropertyStr(ctx, res, param -> key, val);
+                free2(param -> key);
+                free2(param -> value);
+            }
         }else{
-            res = JS_NewUint8Array(ctx, merged_buf, length, free_js_malloc, NULL, false);
+            res = JS_NewUint8Array(ctx, merged_buf, length -1, free_js_malloc, NULL, false);
         }
         js_resolve(task -> promise, res);
+        JS_FreeValue(ctx, res);
         free2(merged_buf);
         // after this, buffer=NULL will be passed to this again
     }else if(data -> state == HTTP_BODY){
@@ -1436,23 +1475,25 @@ static JSValue js_response_get_locked(JSContext *ctx, JSValueConst this_val) {
     RESPONSE_GET_OPAQUE(response, this_val); \
     if(response -> data -> state != HTTP_BODY) return JS_ThrowTypeError(ctx, "Body is not available"); \
     Promise *promise = js_promise(ctx); \
-    struct readall_promise* data = init_tou8_merge_task(promise, response); \
-    read_body(response -> data, response_merge_cb, data, true);
+    struct readall_promise* data = init_tou8_merge_task(promise, response);
 
 static JSValue js_response_buffer(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     INIT_TOU8_TASK
+    read_body(response -> data, response_merge_cb, data, true);
     return promise -> promise;
 }
 
 static JSValue js_response_text(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     INIT_TOU8_TASK
     data -> tostr = true;
+    read_body(response -> data, response_merge_cb, data, true);
     return promise -> promise;
 }
 
 static JSValue js_response_json(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     INIT_TOU8_TASK
     data -> tojson = true;
+    read_body(response -> data, response_merge_cb, data, true);
     return promise -> promise;
 }
 
@@ -1462,14 +1503,20 @@ static JSValue js_response_formData(JSContext* ctx, JSValueConst this_val, int a
     // get form info
     char* boundary;
     FIND_HEADERS(response -> data, "content-type", value, {
-        char* bound = strstr(value -> value, "boundary=");
-        if(bound){
-            bound += 9;
-            STRTRIM(bound);
-            boundary = bound;
-            goto main;
+        if(memcmp(value -> value, "multipart/form-data", 19) == 0){
+            char* bound = strstr(value -> value, "boundary=");
+            if(bound){
+                bound += 9;
+                STRTRIM(bound);
+                boundary = bound;
+                goto main;
+            }else{
+                goto not_found;   
+            }
+        }else if(memcmp(value -> value, "application/x-www-form-urlencoded", 33) == 0){
+            goto urlform;
         }else{
-            goto not_found;   
+            return LJS_Throw(ctx, "Unsupported content-type %s", NULL, value -> value);
         }
     });
 
@@ -1483,6 +1530,13 @@ main:
     uint8_t* buf = js_malloc(ctx, BUFFER_SIZE);
     evfd_readline(response -> data -> fd, BUFFER_SIZE, buf, callback_formdata_parse, task);
     return promise -> promise;
+
+urlform:{
+    INIT_TOU8_TASK;
+    data -> urlform = true;
+    read_body(response -> data, response_merge_cb, data, true);
+    return promise -> promise;
+}
 }
 
 #define RESPONSE_GET_OPAQUE2(var, this_val) \
@@ -2996,7 +3050,7 @@ struct JSEventStreamData {
 
 // define headers and request in class
 #define DEF_RESPONSE(obj, handler) { \
-    JSValue response_obj = LJS_NewResponse(ctx, &handler -> request, true); \
+    JSValue response_obj = LJS_NewResponse(ctx, &handler -> request, false); \
     JS_SetPropertyStr(ctx, obj, "request", response_obj); \
     JSValue headers_obj = LJS_NewHeaders(ctx, &handler -> response); \
     JS_SetPropertyStr(ctx, obj, "headers", headers_obj); \
@@ -3097,7 +3151,10 @@ static void handler_parse_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, voi
 // write body to client
 static void handler_wbody_cb(EvFD* fd, bool success, void* data){
     struct JSClientHandler* handler = data;
-    if(handler -> sending_data) free2(handler -> sending_data);
+    if(handler -> sending_data){
+        free2(handler -> sending_data);
+        handler -> sending_data = NULL; // fall safe
+    }
     if(!success) return;
 
     if(list_empty(&handler -> chunks)){
@@ -3371,10 +3428,8 @@ static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, 
     size_t len;
     if(JS_IsString(argv[0])){
         data = (void*)JS_ToCStringLen(ctx, &len, argv[0]);
-    }else if(JS_IsArrayBuffer(argv[0])){
+    }else if(JS_IsArrayBuffer(argv[0]) || JS_IsTypedArray(ctx, argv[0])){
         data = JS_GetArrayBuffer(ctx, &len, argv[0]);
-    }else if(JS_GetTypedArrayType(argv[0]) == JS_TYPED_ARRAY_UINT8){
-        data = JS_GetUint8Array(ctx, &len, argv[0]);
     }else{
         return LJS_Throw(ctx, "Invalid argument type, expect string or array buffer", TYPE_DECLARE);
     }
@@ -3405,7 +3460,8 @@ static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, 
         if(handler -> response.state < HTTP_BODY){
             // cache
             chunk_append(ctx, &handler -> chunks, data, len);
-            handler -> response.content_length += len;
+            if(clen == -1) handler -> response.content_length = len;
+            else handler -> response.content_length += len;
         }else if(clen == -1){
             // continue feed data
             uint8_t* data2 = malloc2(len);

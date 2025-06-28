@@ -189,9 +189,7 @@
             <span class="error-code">500</span>
             <span>服务器内部错误 (调试模式)</span>
         </div>
-        <div class="error-message">
-            服务器处理您的请求时发生了错误。以下是详细的调试信息：
-        </div>
+        <div class="error-message" id="emessage"></div>
     </div>
 
     <div class="error-content">
@@ -211,6 +209,7 @@
     <script>
         const errorData = /*{{error}}*/ {};
         const stackTraceEl = document.getElementById('stack-trace');
+        const messageEl = document.getElementById('emessage');
 
         errorData.stack.forEach(frame => {
             const frameEl = document.createElement('div');
@@ -244,6 +243,8 @@
             frameEl.appendChild(contextEl);
             stackTraceEl.appendChild(frameEl);
         });
+
+        messageEl.textContent = errorData.message;
     </script>
 </body>
 

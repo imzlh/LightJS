@@ -334,7 +334,7 @@ static JSValue js_get_self(JSContext* ctx){
     char* entry = app -> script_path;
     JSValue ret = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, ret, "pid", JS_NewInt32(ctx, getpid()));
-    JS_SetPropertyStr(ctx, ret, "argv", JS_NewArrayFrom(ctx, argc, argv));
+    JS_SetPropertyStr(ctx, ret, "args", JS_NewArrayFrom(ctx, argc, argv));
     JS_SetPropertyStr(ctx, ret, "entry", JS_NewString(ctx, entry));
     JS_SetPropertyStr(ctx, ret, "env", JS_NewObjectClass(ctx, js_reactive_environ_class_id));
     
@@ -639,6 +639,18 @@ __attribute__((constructor)) static void init_signal_system(void) {
         .sa_handler = sigchild_handler
     };
     sigaction(SIGCHLD, &sa_child, NULL);
+}
+
+void LJS_destroy_process(JSContext* ctx){
+    struct list_head *cur, *tmp;
+    list_for_each_safe(cur, tmp, &signal_list){
+        struct process_class* obj = list_entry(cur, struct process_class, link);
+        if(obj -> ctx == ctx){
+            JS_FreeValue(ctx, obj -> onclose);
+            list_del(&obj -> link);
+            js_free(ctx, obj);
+        }
+    }
 }
 
 static const JSCFunctionListEntry js_process_proto_funcs[] = {

@@ -210,10 +210,10 @@ static inline void buffer_clear(struct Buffer* buffer) {
  */
 static inline ssize_t buffer_read(struct Buffer* buffer, int fd, uint32_t max_size) {
     uint32_t avail = MIN(buffer_available(buffer), max_size);
-    if (avail == 0) return 0;
 
     uint32_t write_pos = buffer -> end % buffer -> size;
     uint32_t first_chunk = MIN(buffer -> size - write_pos, avail);
+    if(first_chunk == 0) return 0;
     
     // 分两段直接读取
     ssize_t n = read(fd, buffer -> buffer + write_pos, first_chunk);

@@ -94,7 +94,7 @@ if(CMAKE_BUILD_TYPE MATCHES "Debug")
     xcheck_add_c_compiler_flag(-fno-omit-frame-pointer)
     add_compile_definitions(LJS_DEBUG)
     # disable mimalloc for valgrind
-    # set(QJS_BUILD_WITH_MIMALLOC OFF)
+    set(QJS_BUILD_WITH_MIMALLOC OFF)
 else()
     add_compile_definitions(NDEBUG)
 endif()

@@ -88,7 +88,7 @@ globalThis.isEqual = function(value, other) {
 }
 
 if(import.meta.main && !Worker.onmessage){
-    const file = self.argv[0];
+    const file = self.args[0];
     if(!file){
         console.log(self, import.meta);
         throw new Error('Expect an arg to run test');

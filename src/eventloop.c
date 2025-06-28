@@ -198,8 +198,13 @@ static thread_local struct list_head evfd_list;
 }
 
 #ifdef LJS_DEBUG
+void __trace_debug(int events, int direction) {
+    // add trace here
+    return;
+}
 #define TRACE_EVENTS(evfd, add) \
-    printf("event_trace: func=%s, line=%d, fd=%d, add=%d \n", __func__, __LINE__, evfd_getfd(evfd, NULL), add); \
+    printf("event_trace: func=%s, line=%d, fd=%d, add=%d, cevents=%ld \n", __func__, __LINE__, evfd_getfd(evfd, NULL), add, evloop_events); \
+    __trace_debug(evloop_events, add); \
     evloop_events += add;
 #else
 #define TRACE_EVENTS(evfd, add) evloop_events += add;
@@ -249,7 +254,7 @@ __attribute__((constructor)) static void evloop_init() {
     init_list_head(&timer_list);
 }
 
-static void handle_close(int fd, void* _evfd);
+static void handle_close(int fd, EvFD* evfd);
 
 // 内部辅助函数
 #define EPOLL_CTL_FREE -1
@@ -281,6 +286,11 @@ static inline void evfd_ctl(struct EvFD* evfd, int epoll_flags){
     // assign epoll_flags
     evfd_modify_tasks[evfd_modify_tasks_count++] = evfd;
     evfd -> modify_flag = epoll_flags;
+
+    if(epoll_flags == EPOLL_CTL_FREE){
+        // remove from evfd_list
+        list_del(&evfd -> link);
+    }
 }
 
 static inline void evfd_mod(struct EvFD* evfd, bool add, int epoll_flags){
@@ -294,6 +304,10 @@ static inline void evfd_mod_start(){
     for(int i = 0; i < evfd_modify_tasks_count; i++){
         struct EvFD* task = evfd_modify_tasks[i];
         if(task -> modify_flag == EPOLL_CTL_FREE){
+#ifdef LJS_DEBUG
+            printf("evfd_mod_start: free fd=%d\n", task -> fd[0]);
+#endif
+            task -> fd[0] = -1; // fall safe
             free2(task);
         }else{
             struct epoll_event ev = {
@@ -566,9 +580,6 @@ inev_move:
             }else{
                 perror("timerfd read");
             }
-#ifdef LJS_DEBUG
-            printf("timerfd resolved %ld\n", val);
-#endif
             continue;
         }
 
@@ -594,17 +605,18 @@ main:   // while loop
                         evfd, task -> buffer -> buffer, task -> buffer -> size, task -> opaque
                     );
                     goto _continue;
-                } else if(!n) {
+                } else if(-1 == n) {
                     perror("evfd_readsize");
-                    // handle_close(fd, evfd);
+                    TRACE_EVENTS(evfd, +1); handle_close(fd, evfd);
                     goto _break;
                 }
                 goto __break;
 
             case EV_TASK_READLINE:
                 if (n <= 0) {
-                    if (n == 0) evfd -> destroy = true;
-                    // handle_close(fd, evfd);
+                    if (n == 0){
+                        TRACE_EVENTS(evfd, +1); handle_close(fd, evfd);
+                    }
                     goto _break;
                 }
                 
@@ -887,11 +899,6 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
 
         ssize_t n = buffer_write(task -> buffer, fd, UINT32_MAX);
         if (n > 0) {
-
-#ifdef LJS_DEBUG
-            printf("evfd_write: fd=%d, n=%ld, remain=%d\n", fd, n, buffer_used(task -> buffer));
-#endif
-
             if(buffer_is_empty(task -> buffer)){
                 // 全部写入
                 TRACE_EVENTS(evfd, -1);
@@ -901,6 +908,7 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
             }
         } else if(n == -1){
             perror("evfd_write");
+            TRACE_EVENTS(evfd, +1); // compensate for -1 reference
             return handle_close(fd, evfd);
         } else {
             break;  // fd is busy
@@ -997,27 +1005,33 @@ _continue2:
     __handle_closing = false;
 }
 
-static void handle_close(int fd, void* _evfd) {
+static void handle_close(int fd, EvFD* evfd) {
     if(__handle_closing) return;
     __handle_closing = true;
 
 #ifdef LJS_DEBUG
-    printf("handle_close: fd=%d\n", fd);
+    printf("handle_close: fd=%d; ", fd);
 #endif
 
-    EvFD* evfd = (EvFD*)_evfd;
     if(evfd -> destroy) return;
+
+    // free in next loop
+    evfd_ctl(evfd, EPOLL_CTL_FREE);
+    evfd -> destroy = true;
+
+    // remove in epoll
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+    TRACE_EVENTS(evfd, -1);
+
     if(evfd -> task_based){
         __handle_closing = false;
         clear_tasks(evfd, true);
         __handle_closing = true;
-    }
-    else if(evfd -> u.cb.close){ 
+    }else if(evfd -> u.cb.close){ 
         evfd -> u.cb.close(evfd, evfd -> u.cb.close_opaque);
-        TRACE_EVENTS(evfd, -1);
     }
 
-    // 关闭fd
+    // close fd
     if(!evfd -> destroy) switch (evfd -> type){
         case EVFD_NORM:
         case EVFD_TIMER:
@@ -1048,13 +1062,7 @@ static void handle_close(int fd, void* _evfd) {
         break;
     }
     if(evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
-    // free2(evfd);
-    evfd_ctl(evfd, EPOLL_CTL_FREE);
-    evfd -> destroy = true;
 
-    // remove in epoll
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-    TRACE_EVENTS(evfd, -1);
     __handle_closing = false;
 }
 
@@ -1416,6 +1424,11 @@ void evcore_destroy() {
 
     close(epoll_fd);
     epoll_fd = -1;
+
+#ifdef LJS_DEBUG
+    printf("evcore_destroy: exit, remains=%ld\n", evloop_events);
+    // assert(evloop_events == 0);
+#endif
 }
 
 #ifdef LJS_DEBUG
@@ -1492,6 +1505,7 @@ error:
     evfd -> u.cb.write_opaque = write_opaque;
     evfd -> u.cb.close_opaque = close_opaque;
     evfd -> modify_flag = 0;
+    evfd -> epoll_flags = evflag;
 
     return evfd;
 }
@@ -1527,6 +1541,7 @@ EvFD* evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t buf
         task -> cb.close = close_callback;
         task -> opaque = close_opaque;
         list_add(&task -> list, &evfd -> u.task.close_tasks);
+        TRACE_EVENTS(evfd, +1);
     }
 
     // 判断是否为文件IO, aio
@@ -1759,6 +1774,15 @@ bool evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
         callback(evfd, buffer, buf_size, user_data);
         return true;
     }
+
+    if(evfd -> incoming_buffer && list_empty(&evfd -> u.task.read_tasks) && buffer_available(evfd -> incoming_buffer)){
+        // directly return data from buffer
+        uint32_t available = buffer_copyto(evfd -> incoming_buffer, buffer, buf_size);
+        
+        buffer_seek_cur(evfd -> incoming_buffer, available);
+        callback(evfd, buffer, available, user_data);
+        return true;
+    }
     
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
@@ -1851,6 +1875,7 @@ bool evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size,
 }
 
 // onclose
+// Note: passing callback as NULL will clear the callback.
 bool evfd_onclose(EvFD* evfd, EvCloseCallback callback, void* user_data) {
     tassert(!evfd -> destroy);
     struct Task* task = malloc2(sizeof(struct Task));
@@ -1862,6 +1887,7 @@ bool evfd_onclose(EvFD* evfd, EvCloseCallback callback, void* user_data) {
         struct Task* t = list_entry(evfd -> u.task.close_tasks.next, struct Task, list);
         list_del(&t -> list);
         free2(t);
+        TRACE_EVENTS(evfd, -1);
         return true;
     }
 
@@ -1917,6 +1943,10 @@ bool evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvP
 }
 
 static inline void close_stdpipe(EvFD* evfd){
+#ifdef LJS_DEBUG
+    printf("close_stdpipe: %d\n", evfd -> fd[0]);
+#endif
+
     clear_tasks(evfd, true);
     if(evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
     evfd_ctl(evfd, EPOLL_CTL_FREE);
@@ -1925,7 +1955,7 @@ static inline void close_stdpipe(EvFD* evfd){
 
 // 关闭evfd
 bool evfd_close(EvFD* evfd) {
-    tassert(evfd -> type != EVFD_TIMER && evfd -> type != EVFD_INOTIFY);
+    tassert(evfd -> type != EVFD_TIMER && evfd -> type != EVFD_INOTIFY && evfd -> fd[0] >= 0);
     if(evfd -> destroy) return false;
     if(evfd -> fd[0] <= STDERR_FILENO) close_stdpipe(evfd);
     else handle_close(evfd -> fd[0], evfd);
@@ -1946,12 +1976,32 @@ bool evfd_close2(EvFD* evfd) {
     return true;
 }
 
+static void __shutdown_cb(EvFD* evfd, bool success, void* opaque){
+    if(!success){
+        perror("shutdown");
+    }
+    evfd_close(evfd);
+}
+
+// better choice than evfd_close
+// read/write all data from/to fd and close it
 bool evfd_shutdown(EvFD* evfd){
     tassert(!evfd -> destroy);
+
     // force read Note: buffer is required
     if(!evfd -> incoming_buffer) buffer_init(&evfd -> incoming_buffer, NULL, EVFD_BUFSIZE);
     handle_read(evfd -> fd[0], evfd, NULL, NULL);
-    return evfd_close(evfd);
+
+    // wait for all data to be written
+    if(!evfd -> destroy && evfd -> task_based && (
+        !list_empty(&evfd -> u.task.write_tasks) || !list_empty(&evfd -> u.task.read_tasks)
+    )){
+        evfd_wait2(evfd, __shutdown_cb, NULL);
+    }else{
+        evfd_close(evfd);
+    }
+
+    return true;
 }
 
 /**

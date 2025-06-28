@@ -23,6 +23,13 @@ server.callback = async (client, addr) => {
         return;
     }
 
+    if(client.request.method == 'POST'){
+        const res = await client.request.formData();
+        console.log(res);
+        client.status(200).send(JSON.stringify(res)).done(true);
+        return;
+    }
+
     try{
         if(stat(url.path).isDirectory){
             let rurl = url.toString() ;
@@ -41,6 +48,6 @@ server.callback = async (client, addr) => {
 server.run();
 console.log("Server running at http://localhost:8000");
 
-setInterval(() => {
-    console.log(`Connections: ${server.connecions}`);
-}, 10000);
+// setInterval(() => {
+//     console.log(`Connections: ${server.connecions}`);
+// }, 10000);

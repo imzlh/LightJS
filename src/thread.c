@@ -566,6 +566,9 @@ void LJS_destroy_app(App* app) {
     }
 
     if (app -> ctx) {
+        // destroy app
+        LJS_destroy_process(app -> ctx);
+
         JS_FreeContext(app -> ctx);
     }
 

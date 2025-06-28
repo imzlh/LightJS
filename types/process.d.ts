@@ -23,7 +23,7 @@ declare module 'process'{
 
     const self: {
         readonly pid: number,
-        readonly argv: string[],
+        readonly args: string[],
         readonly entry: string,
         cwd: string,
         readonly env: ReactiveEnviron,

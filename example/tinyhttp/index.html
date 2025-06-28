@@ -126,7 +126,8 @@
             position: relative;
         }
         
-        .hero::before {
+        /* image background: URL not working */
+        /* .hero::before {
             content: '';
             position: absolute;
             top: 0;
@@ -135,7 +136,7 @@
             height: 100%;
             background: url('https://source.unsplash.com/random/1920x1080/?design') no-repeat center center/cover;
             opacity: 0.1;
-        }
+        } */
         
         .hero-content {
             position: relative;
@@ -754,7 +755,7 @@
     <section id="about" class="fullpage about">
         <div class="container about-content">
             <div class="about-img">
-                <img src="https://source.unsplash.com/random/600x600/?portrait" alt="李明工作照">
+                <img src="https://cdn.seovx.com/d/?mom=302">
             </div>
             <div class="about-text">
                 <h2 class="section-title">关于我</h2>
@@ -923,7 +924,7 @@
             
             <div class="portfolio-grid">
                 <div class="portfolio-item" data-category="web">
-                    <img src="https://source.unsplash.com/random/600x400/?website,design" alt="项目1" class="portfolio-img">
+                    <img src="https://api.horosama.com/random.php?website,design" alt="项目1" class="portfolio-img">
                     <div class="portfolio-overlay">
                         <h3 class="portfolio-title">电子商务平台</h3>
                         <p class="portfolio-category">网页设计</p>
@@ -931,7 +932,7 @@
                 </div>
                 
                 <div class="portfolio-item" data-category="app">
-                    <img src="https://source.unsplash.com/random/600x400/?app,design" alt="项目2" class="portfolio-img">
+                    <img src="https://api.horosama.com/random.php?app,design" alt="项目2" class="portfolio-img">
                     <div class="portfolio-overlay">
                         <h3 class="portfolio-title">健康追踪应用</h3>
                         <p class="portfolio-category">应用设计</p>
@@ -939,7 +940,7 @@
                 </div>
                 
                 <div class="portfolio-item" data-category="branding">
-                    <img src="https://source.unsplash.com/random/600x400/?branding,design" alt="项目3" class="portfolio-img">
+                    <img src="https://api.horosama.com/random.php?branding,design" alt="项目3" class="portfolio-img">
                     <div class="portfolio-overlay">
                         <h3 class="portfolio-title">科技公司品牌</h3>
                         <p class="portfolio-category">品牌设计</p>
@@ -947,7 +948,7 @@
                 </div>
                 
                 <div class="portfolio-item" data-category="web">
-                    <img src="https://source.unsplash.com/random/600x400/?portfolio,design" alt="项目4" class="portfolio-img">
+                    <img src="https://api.horosama.com/random.php?portfolio,design" alt="项目4" class="portfolio-img">
                     <div class="portfolio-overlay">
                         <h3 class="portfolio-title">个人作品集网站</h3>
                         <p class="portfolio-category">网页设计</p>
@@ -955,7 +956,7 @@
                 </div>
                 
                 <div class="portfolio-item" data-category="app">
-                    <img src="https://source.unsplash.com/random/600x400/?mobile,design" alt="项目5" class="portfolio-img">
+                    <img src="https://api.horosama.com/random.php?mobile,design" alt="项目5" class="portfolio-img">
                     <div class="portfolio-overlay">
                         <h3 class="portfolio-title">旅行计划应用</h3>
                         <p class="portfolio-category">应用设计</p>
@@ -963,7 +964,7 @@
                 </div>
                 
                 <div class="portfolio-item" data-category="branding">
-                    <img src="https://source.unsplash.com/random/600x400/?logo,design" alt="项目6" class="portfolio-img">
+                    <img src="https://api.horosama.com/random.php?logo,design" alt="项目6" class="portfolio-img">
                     <div class="portfolio-overlay">
                         <h3 class="portfolio-title">咖啡店品牌</h3>
                         <p class="portfolio-category">品牌设计</p>
@@ -1012,25 +1013,25 @@
                     </div>
                 </div>
                 
-                <form class="contact-form">
+                <form class="contact-form" method="post" action="/@api/form">
                     <div class="form-group">
                         <label for="name">姓名</label>
-                        <input type="text" id="name" class="form-control" required>
+                        <input type="text" id="name" name="username" class="form-control" required>
                     </div>
                     
                     <div class="form-group">
                         <label for="email">邮箱</label>
-                        <input type="email" id="email" class="form-control" required>
+                        <input type="email" id="email" name="email" class="form-control" required>
                     </div>
                     
                     <div class="form-group">
                         <label for="subject">主题</label>
-                        <input type="text" id="subject" class="form-control" required>
+                        <input type="text" id="subject" name="subject" class="form-control" required>
                     </div>
                     
                     <div class="form-group">
                         <label for="message">留言</label>
-                        <textarea id="message" class="form-control" required></textarea>
+                        <textarea id="message" class="form-control" name="message" required></textarea>
                     </div>
                     
                     <button type="submit" class="submit-btn">发送消息</button>

@@ -3,7 +3,7 @@
  * source: src/http.c
  */
 
-declare function fetch(url: string, options?: {
+type FetchOptions<WebSocket> = {
     method?: string;
     headers?: Record<string, string>;
     keepalive?: boolean;
@@ -11,7 +11,11 @@ declare function fetch(url: string, options?: {
     host?: string;  // 当URL为unix或ip地址时，需要用于指定请求的Host头
     body?: Uint8Array | U8Pipe | string;
     compress?: boolean; // deflate压缩
-}): Promise<import('http').WebSocket | import('http').Response>;
+    websocket?: WebSocket;
+};
+
+declare function fetch(url: string, options?: FetchOptions<false | undefined>): Promise<import('http').Response>;
+declare function fetch(url: string, options: FetchOptions<true>): Promise<import('http').WebSocket>;
 
 interface FormData {
     name: string;
@@ -72,7 +76,9 @@ declare module 'http' {
         get ok(): boolean;
 
         readonly headers: Headers;
-        readonly path: string;  // only for Handler.request
+        readonly path: string;         // only for Handler.request
+        readonly method: string;       // only for Handler.request
+        readonly httpVersion: number;  // only for Handler.request
     }
 
     export class Handler {
@@ -107,6 +113,25 @@ declare module 'http' {
          *  - 务必有body，或者指定`done(true)`，否则会一直等待数据
          *  - 如果没有调用`chunked()`，会使用HTTP/1.0，此时不会长连接
          *  - `reuse()`前，务必确保响应处理完毕(`await handler.end`)
+         * 
+         * @example - 先填body再发送
+         * ```ts
+         * const handler = Handler.from(pipe);
+         * handler.status(200).header('Content-Type', 'text/plain').send('hello').done();
+         * ```
+         * @example - 先发送header再填body
+         * ```ts
+         * const handler = Handler.from(pipe);
+         * handler.status(200).header('Content-Type', 'text/plain').done().send('hello')
+         *  .done(); // 注意done()两次，否则客户端可能一直等待数据
+         * ```
+         * @example - 提前定义长度，到达长度自动done
+         * ```ts
+         * const handler = Handler.from(pipe);
+         * handler.status(200).header('Content-Type', 'text/plain').header('Content-Length', '5').send('hello')
+         * // 此时无需`done()`，客户端会认为已经完成请求
+         * ```
+         * @see {@link Handler.chunked} 启用chunked模式，无需担心上面的限制 
          */
         done(no_body?: boolean): this;
 

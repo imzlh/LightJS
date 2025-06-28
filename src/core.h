@@ -390,6 +390,9 @@ bool LJS_init_xml(JSContext* ctx);
 // crypto
 bool LJS_init_crypto(JSContext *ctx);
 
+// finalizer
+void LJS_destroy_process(JSContext* ctx);
+
 // --------------- HELPER FUNCTIONS ------------------------
 void free_js_malloc(JSRuntime *rt, void *opaque, void *ptr);
 void free_malloc(JSRuntime* rt, void* opaque, void* ptr);
