@@ -319,6 +319,7 @@ bool evfd_clearbuf(EvFD* evfd);
 bool evfd_onclose(EvFD* fd, EvCloseCallback callback, void* user_data);
 bool evfd_finalizer(EvFD* evfd, EvFinalizerCallback callback, void* user_data);
 int evfd_getfd(EvFD* evfd, int* timer_fd);
+bool evfd_seek(EvFD* evfd, int seek_type, off_t pos);
 bool evfd_yield(EvFD* evfd, bool yield_read, bool yield_write);
 bool evfd_consume(EvFD* evfd, bool consume_read, bool consume_write);
 bool evfd_isAIO(EvFD* evfd);

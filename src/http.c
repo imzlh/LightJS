@@ -637,11 +637,11 @@ void LJS_free_http_data(LHTTPData *data){
 
 // check JS args by JSTag
 #define CHECK_ARGS(n, msg, ...){ \
-    if(argc < n) return LJS_Throw(ctx, "Too few arguments, expect %d, got %d", msg, n, argc); \
+    if(argc < n) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Too few arguments, expect %d, got %d", msg, n, argc); \
     int32_t types[] = {  __VA_ARGS__ }; \
     for(int i = 0; i < n; i++)\
         if(JS_VALUE_GET_TAG(argv[i]) != types[i]) \
-            return LJS_Throw(ctx, "Invalid argument type at index %d", msg, i); \
+            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid argument type at index %d", msg, i); \
 }
 
 // Header class
@@ -1031,6 +1031,7 @@ error:
 error2:
     data -> state = HTTP_ERROR;
     free2(_line_data);
+    data -> cb(data, NULL, 0, data -> userdata);
     return EVCB_RET_DONE;
 }
 
@@ -1455,7 +1456,7 @@ end:
 #define RESPONSE_GET_OPAQUE(var, this_val) \
     struct HTTP_Response *var = JS_GetOpaque2(ctx, this_val, response_class_id); \
     if(!var) return JS_EXCEPTION; \
-    if(var -> locked) return LJS_Throw(ctx, "Body is locked", NULL);
+    if(var -> locked) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Body is locked", NULL);
 
 static JSValue js_response_get_body(JSContext *ctx, JSValueConst this_val) {
     RESPONSE_GET_OPAQUE(response, this_val);
@@ -1516,12 +1517,12 @@ static JSValue js_response_formData(JSContext* ctx, JSValueConst this_val, int a
         }else if(memcmp(value -> value, "application/x-www-form-urlencoded", 33) == 0){
             goto urlform;
         }else{
-            return LJS_Throw(ctx, "Unsupported content-type %s", NULL, value -> value);
+            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Unsupported content-type %s", NULL, value -> value);
         }
     });
 
 not_found:
-    return LJS_Throw(ctx, "Invalid or missing content-type. Please ensure boundary is set", NULL);
+    return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid or missing content-type. Please ensure boundary is set", NULL);
 
 main:
     Promise *promise = js_promise(ctx);
@@ -1546,7 +1547,7 @@ urlform:{
 static JSValue js_response_get_method(JSContext *ctx, JSValueConst this_val) {
     RESPONSE_GET_OPAQUE2(response, this_val);
     return response -> data -> method
-        ? JS_NewString(ctx, response -> data -> method)
+         ? JS_NewString(ctx, response -> data -> method)
          : JS_UNDEFINED;
 }
 
@@ -1720,7 +1721,7 @@ static inline char* ws_random_key(){
 
 static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(unlikely(argc == 0))
-        return LJS_Throw(ctx, "Fetch requires at least 1 argument", "fetch(url: string, options?: FetchInit): Promise<Response>");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Fetch requires at least 1 argument", "fetch(url: string, options?: FetchInit): Promise<Response>");
     
     // parse URL
     const char *urlstr = JS_ToCString(ctx, argv[0]);
@@ -1728,13 +1729,13 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     URL_data url = {};
     if(unlikely(!LJS_parse_url(urlstr, &url, NULL) || url.protocol == NULL || url.host == NULL)){
         JS_FreeCString(ctx, urlstr);
-        return LJS_Throw(ctx, "Invalid URL", NULL);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid URL", NULL);
     }
     JS_FreeCString(ctx, urlstr);
     
     if(unlikely(strstr(url.protocol, "http") == NULL && strstr(url.protocol, "ws") == NULL)){
         LJS_free_url(&url);
-        return LJS_Throw(ctx, "Unsupported protocol %s", NULL, url.protocol);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Unsupported protocol %s", NULL, url.protocol);
     }
 
     JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
@@ -1747,7 +1748,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     bool keep_alive = JS_IsBool(jsobj) ? JS_ToBool(ctx, jsobj) : true;
     JS_FreeValue(ctx, jsobj);
     if(unlikely(!keep_alive && websocket))
-        return LJS_Throw(ctx, "WebSocket connection requires keepalive option", NULL);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "WebSocket connection requires keepalive option", NULL);
     if(keep_alive){
         pthread_mutex_lock(&keepalive_mutex);
         struct list_head *cur, *tmp;
@@ -1771,13 +1772,13 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
 #ifdef LJS_MBEDTLS
             fd = LJS_open_ssl_socket(url.host, url.port, BUFFER_SIZE);
 #else
-            return LJS_Throw(ctx, "SSL is not supported", NULL);
+            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "SSL is not supported", NULL);
 #endif
         }else{
             fd = LJS_open_socket("unix", url.host, -1, BUFFER_SIZE);
         }
     }
-    if(unlikely(!fd)) return LJS_Throw(ctx, "Failed to open connection", NULL);
+    if(unlikely(!fd)) return LJS_Throw(ctx, EXCEPTION_IO, "Failed to open connection", NULL);
 
     // bind close event
     Promise *promise = js_promise(ctx);
@@ -2107,10 +2108,10 @@ static JSValue js_ws_send(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     if(!ws) return JS_EXCEPTION;
 
     if(ws -> closed){
-        return LJS_Throw(ctx, "WebSocket is already closed", NULL);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "WebSocket is already closed", NULL);
     }
     if(argc != 1){
-        return LJS_Throw(ctx, "WebSocket.send() requires 1 argument", "WebSocket.send(data: Uint8Array | string): Promise<void>");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "WebSocket.send() requires 1 argument", "WebSocket.send(data: Uint8Array | string): Promise<void>");
     }
 
     uint8_t* data;
@@ -2122,7 +2123,7 @@ static JSValue js_ws_send(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     }else if((data = JS_GetUint8Array(ctx, &len, argv[0])) != NULL){
         opcode = 2;
     }else{
-        return LJS_Throw(ctx, "WebSocket.send() requires a string or Uint8Array argument", "WebSocket.send(data: Uint8Array | string): Promise<void>");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "WebSocket.send() requires a string or Uint8Array argument", "WebSocket.send(data: Uint8Array | string): Promise<void>");
     }
 
     Promise* promise = js_promise(ctx);
@@ -2156,7 +2157,7 @@ static JSValue js_ws_close(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     struct JSWebSocket_T* ws = JS_GetOpaque2(ctx, this_val, ws_class_id);
     if(!ws) return JS_EXCEPTION;
     if(ws -> closed){
-        return LJS_Throw(ctx, "WebSocket is already closed", NULL);
+        return JS_ThrowTypeError(ctx, "WebSocket is already closed");
     }
     ws -> closed = true;
     evfd_close(ws -> fd);
@@ -2175,7 +2176,7 @@ static const JSClassDef js_ws_class_def = {
 };
 
 static JSValue js_ws_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv){
-    return LJS_Throw(ctx, "WebSocket constructor is not implemented, use fetch(ws://) instead", 
+    return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "WebSocket constructor is not implemented, use fetch(ws://) instead", 
         "fetch() returns a Promise<WebSocket> object that is ready to use, easier than WebAPI."
     );
 }
@@ -2233,20 +2234,20 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
         const char *url = JS_ToCString(ctx, argv[0]);
         if(url == NULL || !LJS_parse_url(url, url_struct, NULL)){
             JS_FreeCString(ctx, url);
-            LJS_Throw(ctx, "Invalid URL", NULL);
+            JS_ThrowTypeError(ctx, "Invalid URL");
             goto error;
         }
         JS_FreeCString(ctx, url);
     }else if(argc == 2){
         // parse by base URL(arg#2)
         const char *url = JS_ToCString(ctx, argv[0]);
-        if(!likely(url)) return LJS_Throw(ctx, "Invalid URL", NULL);
+        if(!likely(url)) return JS_ThrowTypeError(ctx, "Invalid URL");
         URL_data base_url = { 0 };
         URL_data* burl = &base_url;
         if(JS_IsObject(argv[1])){
             URL_data *burl = JS_GetOpaque2(ctx, argv[1], js_class_url_id);
             if(burl == NULL){
-                LJS_Throw(ctx, "Invalid base URL", NULL);
+                JS_ThrowTypeError(ctx, "Invalid base URL");
                 goto error;
             }
             // base URL object
@@ -2255,14 +2256,14 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
             // parse base URL string
             const char *base_url_str = JS_ToCString(ctx, argv[1]);
             if(base_url_str == NULL || !LJS_parse_url(base_url_str, &base_url, NULL)){
-                LJS_Throw(ctx, "Invalid base URL", NULL);
+                JS_ThrowTypeError(ctx, "Invalid URL");
                 goto error;
             }
             JS_FreeCString(ctx, base_url_str);
         }
         if(!likely(LJS_parse_url(url, url_struct, burl))){
             JS_FreeCString(ctx, url);
-            LJS_Throw(ctx, "Invalid URL", NULL);
+            JS_ThrowTypeError(ctx, "Invalid base URL");
             goto error;
         }
         JS_FreeCString(ctx, url);
@@ -2302,7 +2303,7 @@ static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst val
     struct JS_URL_struct *js_url_struct = JS_GetOpaque2(ctx, this_val, js_class_url_id); \
     if (!js_url_struct) return JS_EXCEPTION; \
     const char *str = JS_ToCString(ctx, value); \
-    if (!str) return LJS_Throw(ctx, err_msg, NULL); \
+    if (!str) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, err_msg, NULL); \
     js_url_struct -> self -> field = strdup2(str); \
     return JS_UNDEFINED; \
 }
@@ -2312,7 +2313,7 @@ static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst val
     struct JS_URL_struct *js_url_struct = JS_GetOpaque2(ctx, this_val, js_class_url_id); \
     if (!js_url_struct) return JS_EXCEPTION; \
     const char *str = JS_ToCString(ctx, value); \
-    if (!str) return LJS_Throw(ctx, err_msg, NULL); \
+    if (!str) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, err_msg, NULL); \
     free2(js_url_struct -> self -> field); \
     js_url_struct -> self -> field = strdup2(str); \
     JS_FreeCString(ctx, str); \
@@ -2324,7 +2325,7 @@ static JSValue func_name(JSContext *ctx, JSValueConst this_val, JSValueConst val
     struct JS_URL_struct *js_url_struct = JS_GetOpaque2(ctx, this_val, js_class_url_id); \
     if (!js_url_struct) return JS_EXCEPTION; \
     int32_t val; \
-    if (JS_ToInt32(ctx, &val, value) < 0) return LJS_Throw(ctx, err_msg, NULL); \
+    if (JS_ToInt32(ctx, &val, value) < 0) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, err_msg, NULL); \
     if (val < min || val > max) return JS_ThrowRangeError(ctx, #field " out of range"); \
     js_url_struct -> self -> field = val; \
     return JS_UNDEFINED; \
@@ -2356,13 +2357,13 @@ JSValue js_url_addQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     URL_data *url_struct = js_url_struct -> self;
     const char *key = JS_ToCString(ctx, argv[0]);
     if(key == NULL){
-        return LJS_Throw(ctx, "Invalid query key", NULL);
+        return JS_ThrowTypeError(ctx, "Invalid query key");
     }
     const char *value = NULL;
     if(argc == 2){
         value = JS_ToCString(ctx, argv[1]);
         if(value == NULL){
-            return LJS_Throw(ctx, "Invalid query value", NULL);
+            return JS_ThrowTypeError(ctx, "Invalid query value");
         }
     }
 
@@ -2387,12 +2388,12 @@ JSValue js_url_delQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     if(argc == 1){
         key = (char*)JS_ToCString(ctx, argv[0]);
         if(key == NULL){
-            return LJS_Throw(ctx, "Invalid query key", NULL);
+            return JS_ThrowTypeError(ctx, "Invalid query key");
         }
     }else if(argc == 2){
         key = (char*)JS_ToCString(ctx, argv[0]);
         if(-1 == JS_ToUint32(ctx, &del_id, argv[1]) || key == NULL){
-            return LJS_Throw(ctx, "Invalid arguments", NULL);
+            return JS_ThrowTypeError(ctx, "Invalid arguments");
         }
     }else{
         return JS_ThrowTypeError(ctx, "delQuery takes 1 or 2 arguments");
@@ -2546,7 +2547,7 @@ JSValue js_url_setQueryStr(JSContext *ctx, JSValueConst this_val, JSValue value)
     JS_FreeCString(ctx, query);
     if(!url_parse_query(query2, &url_struct -> query)){
         js_free(ctx, query2);
-        return LJS_Throw(ctx, "Invalid query string", NULL);
+        return JS_ThrowTypeError(ctx, "Invalid query string");
     }
     js_free(ctx, query2);
     return JS_UNDEFINED;
@@ -2569,7 +2570,7 @@ static void js_url_finalizer(JSRuntime *rt, JSValue val) {
 
 static JSValue js_url_proto_canParse(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0 || !JS_IsString(argv[0]))
-        return LJS_Throw(ctx, "Invalid arguments", "URL.canParse(url: string, baseURL?: string): boolean\n for more, please see https://developer.mozilla.org/zh-CN/docs/Web/API/URL/canParse_static");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments", "URL.canParse(url: string, baseURL?: string): boolean\n for more, please see https://developer.mozilla.org/zh-CN/docs/Web/API/URL/canParse_static");
 
     // url
     const char *url = JS_ToCString(ctx, argv[0]);
@@ -2637,7 +2638,6 @@ struct CookieJar {
     struct CookiePair *pairs;
     int count;
     int capacity;
-    uint8_t ref_count;
 
     struct CookiePair **modified;
     int mod_count;
@@ -2645,11 +2645,12 @@ struct CookieJar {
 };
 
 // allocate and initialize a new CookieJar
+// owned: CookieJar will take ownership of pairs and modified
+//  freed after class destruction
 void init_cookie_jar(struct CookieJar *jar, int initial_capacity) {
     jar -> pairs = (struct CookiePair *)malloc2(initial_capacity * sizeof(struct CookiePair));
     jar -> count = 0;
     jar -> capacity = initial_capacity;
-    jar -> ref_count = 1;
     jar -> modified = NULL;
     jar -> mod_count = 0;
     jar -> mod_capacity = 0;
@@ -2674,12 +2675,12 @@ static void mark_modified(struct CookieJar *jar, struct CookiePair *pair) {
 // free a cookie jar and its pairs
 // Note: `jar` will not be freed and should free by caller
 void free_cookie_jar(struct CookieJar *jar) {
-    if(jar -> ref_count != 0) return;
     for (int i = 0; i < jar -> count; i++) {
         free2(jar -> pairs[i].name);
         free2(jar -> pairs[i].value);
     }
-    free2(jar -> pairs);
+    if(jar -> count) free2(jar -> pairs);
+    // fail safe
     jar -> count = 0;
     jar -> capacity = 0;
     jar -> mod_count = 0;
@@ -2971,16 +2972,13 @@ static JSValue js_cookies_constructor(JSContext *ctx, JSValueConst this_val, int
     return obj;
 }
 
-static inline void js_cookies_cleanup(JSRuntime *rt, struct CookieJar* jar){
-    free_cookie_jar(jar);
-    js_free_rt(rt, jar);
-}
-
 static void js_cookies_finalizer(JSRuntime *rt, JSValue val){
-    struct CookieJar* cookies = JS_GetOpaque(val, cookie_jar_class_id);
+    struct CookieJar* jar = JS_GetOpaque(val, cookie_jar_class_id);
 
-    cookies -> ref_count --;
-    if(cookies -> ref_count == 0) js_cookies_cleanup(rt, cookies);
+    if(jar){
+        free_cookie_jar(jar);
+        js_free_rt(rt, jar);
+    }
 }
 
 static const JSCFunctionListEntry cookie_jar_funcs[] = {
@@ -3016,6 +3014,7 @@ struct JSClientHandler {
     void* sending_data; // processing
 
     struct CookieJar cookiejar; // note: ref_count is used to manage lifetime of handler
+    JSValue cookiejarObj;   // to keep the object alive
 
     Promise* promise;
 
@@ -3056,6 +3055,10 @@ struct JSEventStreamData {
     JS_SetPropertyStr(ctx, obj, "headers", headers_obj); \
 }
 
+#define FREE_HANDLER_COOKIEJAR(handler) \
+    JS_SetOpaque(handler -> cookiejarObj, NULL); \
+    free_cookie_jar(&handler -> cookiejar);
+
 // Free handler by ref_count
 static void handler_free(JSRuntime* rt, struct JSClientHandler* handler) {
     if(handler -> ref_count -- == 1){
@@ -3071,7 +3074,7 @@ static void handler_free(JSRuntime* rt, struct JSClientHandler* handler) {
 
         LJS_free_http_data(&handler -> request);
         LJS_free_http_data(&handler -> response);
-        free_cookie_jar(&handler -> cookiejar);
+        FREE_HANDLER_COOKIEJAR(handler);
         js_free_rt(rt, handler);
     }
 }
@@ -3083,7 +3086,6 @@ static void handler_close_cb(EvFD* fd, void* data){
     handler -> destroy = true;
     if(handler -> promise){
         js_reject(handler -> promise, "Connection closed");
-        free2(handler);
     }
 
     handler_free(JS_GetRuntime(handler -> ctx), handler);
@@ -3099,7 +3101,6 @@ static void handler_parse_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, voi
     if(error){
         js_reject(async_result -> promise, "Failed to parse request: Invaild request");
         free2(async_result);
-        free2(handler);
         return;
     }else if(!JS_IsUndefined(async_result -> reusing_obj)){
         // reusing object: resolve it directly
@@ -3120,8 +3121,11 @@ static void handler_parse_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, voi
         JSValue cookie_jar = JS_NewObjectClass(ctx, cookie_jar_class_id);
         JS_SetOpaque(cookie_jar, &handler -> cookiejar);
         JS_SetPropertyStr(ctx, obj, "cookies", cookie_jar);
+        handler -> cookiejarObj = cookie_jar;
 
+        // Note: js_resolve will not take ownership of obj
         js_resolve(async_result -> promise, obj);
+        JS_FreeValue(ctx, obj);
 
 #ifdef LJS_DEBUG
         printf("http request: %s %s\n", handler -> request.method, handler -> request.path);
@@ -3133,13 +3137,11 @@ static void handler_parse_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, voi
 
     // parse Cookie header
     if (handler -> cookiejar.capacity > 0) {
-        handler -> cookiejar.ref_count--;
         free_cookie_jar(&handler -> cookiejar);
     }
     FIND_HEADERS(&handler -> request, "cookie", value, {
         if (handler -> cookiejar.count == 0) {
             init_cookie_jar(&handler -> cookiejar, 16);
-            handler -> cookiejar.ref_count++;  // note: avoid free_cookie_jar(), this will trigger SIGSEGV
         }
         parse_cookie_string(&handler -> cookiejar, value -> value);
     })
@@ -3304,10 +3306,10 @@ static inline struct JSClientAsyncResult* init_async_result(struct JSClientHandl
 }
 
 #define LC_BEFORE_HEADER(type) if(unlikely(handler -> response.state >= HTTP_BODY)) \
-    return LJS_Throw(ctx, "Header already sent, cannot " type, \
+    return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Header already sent, cannot " type, \
         "you can `reuse()` the connection if the connection alive and vaild.");
 
-#define CHECK_HANDLER if(unlikely(handler -> destroy)) return LJS_Throw(ctx, "Connection closed or taken over by WebSocket", NULL);
+#define CHECK_HANDLER if(unlikely(handler -> destroy)) return JS_ThrowTypeError(ctx, "Connection closed or taken over by WebSocket");
 
 static JSValue js_handler_status(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     CHECK_ARGS(1, "status(code: number): void", JS_TAG_INT);
@@ -3326,7 +3328,7 @@ static JSValue js_handler_status(JSContext *ctx, JSValueConst this_val, int argc
 
 static JSValue js_handler_header(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0 || !JS_IsString(argv[0])){
-        return LJS_Throw(ctx, "Too few arguments, expect at least 1, got 0", "handler.header(name: string, value?: string): void \n Note: alias to handler.headers.set/delete");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Too few arguments, expect at least 1, got 0", "handler.header(name: string, value?: string): void \n Note: alias to handler.headers.set/delete");
     }
 
     GET_OPAQUE(this_val);
@@ -3363,7 +3365,7 @@ static JSValue js_handler_header(JSContext *ctx, JSValueConst this_val, int argc
             handler -> response.chunked = false;
             goto skip;
         }else{
-            return LJS_Throw(ctx, "Invalid transfer-encoding", 
+            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid transfer-encoding", 
 #ifdef LJS_ZLIB
                 "LightJS only support chunked and deflate transfer-encoding."
 #else
@@ -3416,12 +3418,12 @@ static JSValue js_handler_chunked(JSContext *ctx, JSValueConst this_val, int arg
 static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
 #define TYPE_DECLARE "handler.send(data: string | ArrayBuffer | Uint8Array): void"
     
-    if(argc == 0) return LJS_Throw(ctx, "Too few arguments, expect 1, got 0", TYPE_DECLARE);
+    if(argc == 0) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Too few arguments, expect 1, got 0", TYPE_DECLARE);
     GET_OPAQUE(this_val);
     CHECK_HANDLER;
 
     if(handler -> response.state >= HTTP_DONE){
-        return LJS_Throw(ctx, "Response already finished, cannot send more data.", "you can `reuse()` the connection if the connection alive and vaild.");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Response already finished, cannot send more data.", "you can `reuse()` the connection if the connection alive and vaild.");
     }
 
     uint8_t* data;
@@ -3431,7 +3433,7 @@ static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, 
     }else if(JS_IsArrayBuffer(argv[0]) || JS_IsTypedArray(ctx, argv[0])){
         data = JS_GetArrayBuffer(ctx, &len, argv[0]);
     }else{
-        return LJS_Throw(ctx, "Invalid argument type, expect string or array buffer", TYPE_DECLARE);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid argument type, expect string or array buffer", TYPE_DECLARE);
     }
 
     if(len == 0) goto end;
@@ -3474,7 +3476,7 @@ static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, 
             evfd_write(handler -> response.fd, data2, len, write_then_free, data2);
             handler -> response.content_resolved += len;
         }else{
-            LJS_Throw(ctx, "body already sent completely, cannot send more data.",
+            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "body already sent completely, cannot send more data.",
                 "If you want to send more data, please use chunked transfer-encoding or set larger content-length"
             );
             goto error;
@@ -3530,13 +3532,13 @@ static JSValue js_handler_done(JSContext *ctx, JSValueConst this_val, int argc, 
                 // body satisfy content-length
                 handler -> response.state = HTTP_DONE;
             }else{
-                return LJS_Throw(ctx, "No enought data to send(%ld < %ld)", "header has already been sent before, please use `send()` to feed more data", 
+                return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "No enought data to send(%ld < %ld)", "header has already been sent before, please use `send()` to feed more data", 
                     handler -> response.content_resolved, handler -> response.content_length);
             }
         break;
 
         case HTTP_DONE:
-        return LJS_Throw(ctx, "Response already finished, cannot send more data.", "you can `reuse()` the connection if the connection alive and vaild.");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Response already finished, cannot send more data.", "you can `reuse()` the connection if the connection alive and vaild.");
 
         default:
         abort();    // should not happen
@@ -3562,6 +3564,20 @@ static JSValue js_handler_close(JSContext *ctx, JSValueConst this_val, int argc,
     }
     return JS_UNDEFINED;
 }
+
+// static JSValue js_handler_get_state(JSContext *ctx, JSValueConst this_val){
+//     char* state_str;
+//     GET_OPAQUE(this_val);
+//     switch(handler -> response.state){
+//         case HTTP_INIT: 
+//         case HTTP_FIRST_LINE: state_str = "WAITING"; break;
+//         case HTTP_HEADER: state_str = "WAITING_HEADER"; break;
+//         case HTTP_BODY: state_str = "WAITING_BODY"; break;
+//         case HTTP_DONE: state_str = "DONE"; break;
+//         case HTTP_ERROR: state_str = "ERROR"; break;
+//     }
+//     return JS_NewString(ctx, state_str);
+// }
 
 static JSValue js_handler_reuse(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     GET_OPAQUE(this_val);
@@ -3768,14 +3784,14 @@ main:
 }
 
 static JSValue js_handler_constructor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
-    return LJS_Throw(ctx, "Handler is not constructable", 
+    return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Handler is not constructable", 
         "Handler is not constructable, please use Handler.from(pipe: U8Pipe) instead"
     );
 }
 
 static JSValue js_handler_static_status(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc == 0 || !JS_IsNumber(argv[0])){
-        return LJS_Throw(ctx, "Handler.status() requires one number argument",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Handler.status() requires one number argument",
             "Handler.status(code: number): string"
         );
     }
@@ -3783,7 +3799,7 @@ static JSValue js_handler_static_status(JSContext* ctx, JSValueConst this_val, i
     uint32_t reason = 200;
     JS_ToUint32(ctx, &reason, argv[0]);
     if(reason < 100 || reason > 599){
-        return LJS_Throw(ctx, "Invalid status code %d",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid status code %d",
             "RFC 7231 defines status codes in the range 100-599, please use a valid code",
             reason
         );
@@ -3794,7 +3810,7 @@ static JSValue js_handler_static_status(JSContext* ctx, JSValueConst this_val, i
 
 static JSValue js_handler_static_mimetype(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc == 0 || !JS_IsString(argv[0])){
-        return LJS_Throw(ctx, "Handler.mimetype() requires one string argument",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Handler.mimetype() requires one string argument",
             "Handler.mimetype(fileextention: string): string"
         );
     }
@@ -3810,7 +3826,7 @@ static JSValue js_handler_static_mimetype(JSContext* ctx, JSValueConst this_val,
 static JSValue js_handler_static_from(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc == 0){
 param_err:
-        return LJS_Throw(ctx, "Handler.from() requires at least one argument",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Handler.from() requires at least one argument",
             "Handler.from(pipe: U8Pipe): Promise<Handler>"
         );
     }
@@ -3825,20 +3841,14 @@ param_err:
     // cookiejar
     handler -> cookiejar.capacity = 0;
     handler -> cookiejar.count = 0;
-    handler -> cookiejar.ref_count = 1;
     handler -> cookiejar.mod_count = 0;
     handler -> cookiejar.modified = NULL;
 
     // AsyncResult
-    struct JSClientAsyncResult* async_result = js_malloc(handler -> ctx, sizeof(struct JSClientAsyncResult));
-    if(!async_result) return JS_ThrowOutOfMemory(ctx);
-    async_result -> promise = handler -> promise = js_promise(ctx);
-    async_result -> reusing_obj = JS_UNDEFINED;
-    async_result -> handler = handler;
-    
+    struct JSClientAsyncResult* async_result = init_async_result(handler);
     LJS_parse_from_fd(fd, &handler -> request, true, handler_parse_cb, async_result);
     
-    return handler -> promise -> promise;
+    return async_result -> promise -> promise;
 }
 
 static void handler_finalizer(JSRuntime *rt, JSValue val){
@@ -3855,8 +3865,7 @@ static void handler_finalizer(JSRuntime *rt, JSValue val){
 
     // cookiejar
     if(handler -> cookiejar.capacity > 0){
-        handler -> cookiejar.ref_count --;
-        free_cookie_jar(&handler -> cookiejar);
+        FREE_HANDLER_COOKIEJAR(handler);
     }
 
 end:
@@ -3871,7 +3880,8 @@ static JSCFunctionListEntry handler_proto_funcs[] = {
     JS_CFUNC_DEF("ws", 0, js_handler_ws),
     JS_CFUNC_DEF("status", 1, js_handler_status),
     JS_CFUNC_DEF("chunked", 0, js_handler_chunked),
-    JS_CFUNC_DEF("header", 2, js_handler_header)
+    JS_CFUNC_DEF("header", 2, js_handler_header),
+    // JS_CGETSET_DEF("state", js_handler_get_state, NULL)
 };
 
 static JSCFunctionListEntry handler_static_funcs[] = {

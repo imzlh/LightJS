@@ -149,7 +149,7 @@ static JSValue js_ffi_get_buffer_from_ptr(JSContext *ctx, JSValue this_val, int 
 
     int64_t len;
     if(argc == 0 || -1 == JS_ToInt64Ext(ctx, &len, argv[0])){
-        return LJS_Throw(ctx, "The buffer size is required", "dlopen(...).call(...)(size: number, share?: boolean)");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "The buffer size is required", "dlopen(...).call(...)(size: number, share?: boolean)");
     }
     
     bool share = false;
@@ -169,7 +169,7 @@ static JSValue js_ffi_type_helper_ptr(JSContext *ctx, JSValueConst this_val, int
     if(!name) ret = FFI_TYPE_POINTER;
     else if(strcmp(name, "free") == 0) ret = FFI_TYPE_POINTER | RB_MALLOC;
     else if(strcmp(name, "jsfree") == 0) ret = FFI_TYPE_POINTER | RB_FROM_ARG;
-    else return LJS_Throw(ctx, "Invalid type name", "types.PTR(type?: 'free' | 'jsfree'): FFIType");
+    else return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid type name", "types.PTR(type?: 'free' | 'jsfree'): FFIType");
     return JS_NewInt32(ctx, ret);
 }
 
@@ -180,13 +180,13 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
         if(dlclose(JS_VALUE_GET_PTR(func_data[0])) == 0) 
             return JS_UNDEFINED;
         else
-            return LJS_Throw(ctx, "Failed to close library: %s", NULL, dlerror());
+            return LJS_Throw(ctx, EXCEPTION_INTERNAL, "Failed to close library: %s", NULL, dlerror());
     }
 
     // help message
     int64_t len;
     if(-1 == JS_GetLength(ctx, this_val, &len) || len < 2){
-        return LJS_Throw(ctx, "This arg is invaild. Expect a Array containing at least 2 types",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "This arg is invaild. Expect a Array containing at least 2 types",
             "eg: dlopen(...).call([/* return type */ type.INT, /* function name */ 'fib', type.FLOAT, ...], [a1,...])"
         );
     }
@@ -196,7 +196,7 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
     int32_t ret_type_num;
     if(JS_ToInt32(ctx, &ret_type_num, ret_type) == -1){
         JS_FreeValue(ctx, ret_type);
-        return LJS_Throw(ctx, "The return type(this[0]) is invaild. Expect a number(type.XXX)", NULL);
+        return JS_ThrowTypeError(ctx, "The return type(this[0]) is invaild. Expect a number(type.XXX)");
     }
     JS_FreeValue(ctx, ret_type);
 
@@ -205,13 +205,13 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
     const char *func_name_str = LJS_ToCString(ctx, func_name, NULL);
     if(!func_name_str){
         JS_FreeValue(ctx, func_name);
-        return LJS_Throw(ctx, "The function name(this[1]) is invaild. Expect a string", NULL);
+        return JS_ThrowTypeError(ctx, "The function name(this[1]) is invaild. Expect a string");
     }
     void* func = dlsym(JS_VALUE_GET_PTR(func_data[0]), func_name_str);
     JS_FreeCString(ctx, func_name_str);
     JS_FreeValue(ctx, func_name);
     if(!func){
-        return LJS_Throw(ctx, "Failed to find function: %s", NULL, func_name_str);
+        return LJS_Throw(ctx, EXCEPTION_NOTFOUND, "Failed to find function: %s", NULL, func_name_str);
     }
 
     // init
@@ -228,7 +228,7 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
         int32_t type;
         if(JS_ToInt32(ctx, &type, val) == -1){
             JS_FreeValue(ctx, val);
-            return LJS_Throw(ctx, "The type of this arg is invaild. Expect a number(type.XXX)", NULL);
+            return JS_ThrowTypeError(ctx, "The type of this arg is invaild. Expect a number(type.XXX)");
         }
         JS_FreeValue(ctx, val);
 
@@ -240,7 +240,7 @@ restart_typecheck:
                 case -1: // AUTO
                     type = guess_type(ctx, argv[i]);
                     if(type == -1){
-                        return LJS_Throw(ctx, "Could not infer type from given value(at index: %d)", NULL, i);
+                        return JS_ThrowTypeError(ctx, "Could not infer type from given value(at index: %ld)", i);
                         goto _continue;
                     }
                     goto restart_typecheck;
@@ -368,7 +368,7 @@ restart_typecheck:
 
 _continue: continue;
 error: 
-        LJS_Throw(ctx, "Failed to parse args(at index: %d): invalid type", NULL, i);
+        JS_ThrowTypeError(ctx, "Failed to parse args(at index: %ld): invalid type", i);
         goto cleanup;
     }
 
@@ -392,7 +392,7 @@ error:
         default: if(ret_type_num & FFI_TYPE_POINTER){
             rtype = &ffi_type_pointer;
         }else{
-            LJS_Throw(ctx, "Invalid return type: %d", NULL, ret_type_num);
+            JS_ThrowTypeError(ctx, "Invalid return type: %d", ret_type_num);
             goto cleanup;
         }
     }
@@ -401,14 +401,14 @@ error:
     // start call
     ffi_cif cif;
     if(ffi_prep_cif(&cif, FFI_DEFAULT_ABI, args_len, rtype, arg_types) != FFI_OK){
-        LJS_Throw(ctx, "Failed to prepare cif", NULL);
+        LJS_Throw(ctx, EXCEPTION_INTERNAL, "Failed to prepare cif", NULL);
         goto cleanup;
     }
 
     // jump 
 #ifdef LJS_DEBUG
     if(setjmp(jump_buf)){
-        ret_val = LJS_Throw(ctx, "FFI Error: %s", bt_msg, info);
+        ret_val = LJS_Throw(ctx, EXCEPTION_ERROR, "FFI Error: %s", bt_msg, info);
         free(info);
         free(bt_msg);
         info = bt_msg = NULL;
@@ -463,7 +463,7 @@ cleanup:
 
 static JSValue js_dlopen(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(argc == 0){
-        return LJS_Throw(ctx, "dlopen() requires at least one argument", "dlopen(path: string): string");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "dlopen() requires at least one argument", "dlopen(path: string): string");
     }
 
     const char *path = JS_ToCString(ctx, argv[0]);
@@ -474,12 +474,12 @@ static JSValue js_dlopen(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     // realpath
     char rpath[PATH_MAX];
     if(realpath(path, rpath) == NULL) {
-        return LJS_Throw(ctx, "Failed to resolve path %s: %s", NULL, path, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "Failed to resolve path %s: %s", NULL, path, strerror(errno));
     }
 
     void *handle = dlopen(rpath, RTLD_LAZY | RTLD_GLOBAL);
     if(!handle) {
-        return LJS_Throw(ctx, "Failed to load library: %s", NULL, dlerror());
+        return LJS_Throw(ctx, EXCEPTION_INPUT, "Failed to load library: %s", NULL, dlerror());
     }
 
     JSValue ret = JS_NewCFunctionData(ctx, js_ffi_handle, 0, 0, 1, (JSValueConst[]){

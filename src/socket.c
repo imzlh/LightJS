@@ -84,6 +84,8 @@ int server_handle_accept(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* 
     JSValue on_connection = data -> on_connection;
     JSValue args[2] = { pipe, addr_info };
     JS_Call(data -> ctx, on_connection, JS_UNDEFINED, 2, args);
+    JS_FreeValue(data -> ctx, addr_info);
+    JS_FreeValue(data -> ctx, pipe);
 
     return EVCB_RET_DONE;
 }
@@ -475,7 +477,7 @@ static inline bool async_dns_resolve(const char* dns_server, const char* domain,
  */
 static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(argc < 1 || !JS_IsString(argv[0]) || !JS_IsFunction(ctx, argv[1])) {
-        return LJS_Throw(ctx, "bind: missing or invalid arguments",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "bind: missing or invalid arguments",
             "bind(addr: string, handler: (client: ClientHandler) => void, settings?: Object) => /* close function */ () => void"
         );
     }
@@ -490,6 +492,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
         JS_ThrowTypeError(ctx, "bind: invalid address");
         goto fail1;
     }
+    JS_FreeCString(ctx, addr);
 
     // 绑定地址
     int sockfd = socket_create(bind_addr.protocol);
@@ -498,7 +501,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     JSValue onclose = JS_UNDEFINED;
     if(argc == 3) {
         if(!JS_IsObject(argv[2])) {
-            LJS_Throw(ctx, "bind: tcpsettings must be an object", NULL);
+            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "bind: tcpsettings must be an object", NULL);
             goto fail2;
         }
 
@@ -555,7 +558,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
 
     // start
     if(!socket_listen(sockfd, bind_addr.protocol, bind_addr.host, bind_addr.port, bind_addr.path)){
-        LJS_Throw(ctx, "bind: failed to bind address: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO, "bind: failed to bind address: %s", NULL, strerror(errno));
         goto fail3;
     }
  
@@ -573,7 +576,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     );
 
     if(evfd == NULL){
-        LJS_Throw(ctx, "bind: failed to add to event loop: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO, "bind: failed to add to event loop: %s", NULL, strerror(errno));
         goto fail3;
     }
 
@@ -591,7 +594,7 @@ fail1:
 
 static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0 || !JS_IsString(argv[0]) ) {
-        return LJS_Throw(ctx, "connect: missing or invalid arguments",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "connect: missing or invalid arguments",
             "connect(addr: string, flag?: Object) => U8Pipe"
         );
     }
@@ -608,11 +611,11 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     int sockfd = socket_create(addr.protocol);
     if(sockfd <= 0){
         LJS_free_url(&addr);
-        return LJS_Throw(ctx, "failed to create socket: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to create socket: %s", NULL, strerror(errno));
     }
     socket_connect(sockfd, addr.protocol, addr.host, addr.port, addr.path);
     LJS_free_url(&addr);
-    if(sockfd == -1) return LJS_Throw(ctx, "failed to connect: %s", NULL, strerror(errno));
+    if(sockfd == -1) return LJS_Throw(ctx, EXCEPTION_IO, "failed to connect: %s", NULL, strerror(errno));
 
     // TCP设置
     JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
@@ -701,7 +704,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
 
     return promise -> promise;
 #else
-    return LJS_Throw(ctx, "handshake_ssl: mbedtls not enabled in build",
+    return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: mbedtls not enabled in build",
         "remove `-DLJS_MBEDTLS=off` from cmake build flags to enable"
     );
 #endif
@@ -768,7 +771,7 @@ static void js_handle_dns_error(const char* error_msg, void* user_data) {
 
 static JSValue js_resolve_dns(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0){
-        return LJS_Throw(ctx, "resolve_dns: missing or invalid arguments",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "resolve_dns: missing or invalid arguments",
             "resolve_dns(hostname: string, dns_server?: string) => Promise<Array<RecordItem>>"
         );
     }
@@ -791,7 +794,7 @@ static JSValue js_resolve_dns(JSContext *ctx, JSValueConst this_val, int argc, J
 
 static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0 || !JS_IsObject(argv[0])) {
-        return LJS_Throw(ctx, "cert_add: missing or invalid arguments",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "cert_add: missing or invalid arguments",
             "regCert(name: string, cert: string, key: string) => void"
         );
     }
@@ -832,7 +835,7 @@ static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     
     return JS_UNDEFINED;
 #else
-    return LJS_Throw(ctx, "mbedtls not enabled in build",
+    return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "mbedtls not enabled in build",
         "remove `-DLJS_MBEDTLS=off` from cmake build flags to enable"
     );
 #endif
@@ -840,7 +843,7 @@ static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSVa
 
 static JSValue js_cert_remove(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0 || !JS_IsString(argv[0])) {
-        return LJS_Throw(ctx, "cert_remove: missing or invalid arguments",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "cert_remove: missing or invalid arguments",
             "unregCert(name: string) => void"
         );
     }
@@ -853,7 +856,7 @@ static JSValue js_cert_remove(JSContext *ctx, JSValueConst this_val, int argc, J
     JS_FreeCString(ctx, name_str);
     return JS_NewBool(ctx, ret);
 #else
-    return LJS_Throw(ctx, "mbedtls not enabled in build",
+    return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "mbedtls not enabled in build",
         "remove `-DLJS_MBEDTLS=off` from cmake build flags to enable"
     );
 #endif

@@ -7,19 +7,32 @@
 #include "src/polyfill.h"
 
 #include "src/repl.h"
+#include "src/jspack.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <signal.h>
+#include <unistd.h>
 #include <threads.h>
+#include <sys/stat.h>
+
+// debug purpose
+// #define __LJSC
+
+const char LJSC_FILE_MAGIC[8] = "[[LJSC]]";
 
 static JSRuntime *runtime;
 static App* app;
 bool exiting = false;
 static int exit_code = 0;
+#ifdef __LJSC
+static size_t packed_len = 0;
+static struct PackResult* packed_files = NULL;
+#endif
 
 static inline void run_jobs(){
     int jobs = 0;
@@ -139,9 +152,11 @@ extern void __js_dump_not_resolved_promises();
 int main(int argc, char **argv) {
 
     int optind = 1;
+#ifndef __LJSC
     bool eval_code = false;
     bool repl = false;
     bool check = false;
+#endif
 
     runtime = JS_NewRuntime();
 
@@ -172,16 +187,24 @@ int main(int argc, char **argv) {
             
             if (strcmp(longopt, "help") == 0 || opt == 'h') {
                 printf(
+#ifdef __LJSC
+                    "LightJS Runtime %s - JSPack files evaulation engine\n"
+#else
                     "LightJS %s - A lightweight JavaScript engine\n"
+#endif
                     "Copyright (c) 2025-present iz (https://github.com/imzlh/LightJS)\n"
                     "Usage: \n"
                     "    lightjs [options] [script] [args to script]\n"
                     "Options:\n"
                     "    -h, --help         Print this help message\n"
                     "    -v, --version      Print the version number\n"
+#ifdef __LJSC
+                    "    -b, --bundle       Bundle the specified JSPack file into a single executable\n"
+#else
                     "    -e, --eval         Evaluate the follow argument as JavaScript code\n"
                     "    -c, --check        Check syntax only (no execution)\n"
                     "    -r, --repl         Start a read-eval-print loop\n"
+#endif
                     "        --stack-size   Set the stack size in bytes\n"
                     "        --memory-limit Set the memory limit in bytes\n"
                     "\n",
@@ -219,12 +242,14 @@ int main(int argc, char **argv) {
 
                     "\n" , __DATE__);
                 return 0;
+#ifndef __LJSC
             }else if(strcmp(longopt, "eval") == 0 || opt == 'e'){
                 eval_code = true;
             }else if(strcmp(longopt, "check") == 0 || opt == 'c'){
                 check = true;
             }else if(strcmp(longopt, "repl") == 0 || opt == 'r'){
                 repl = true;
+#endif
             }else if(strcmp(longopt, "stack-size") == 0){
                 if(opt_arg){
                     JS_SetMaxStackSize(runtime, atoi(opt_arg));
@@ -246,10 +271,72 @@ int main(int argc, char **argv) {
         }
     }
 
+#ifdef __LJSC
+    uint8_t* jspack_data;
+    size_t jspack_len;
+    if(optind == argc){
+        // open self
+        int fd = open(argv[0], O_RDONLY);
+        if(-1 == lseek(fd, - sizeof(LJSC_FILE_MAGIC), SEEK_END)) goto not_bundled;
+        char magicbuf[sizeof(LJSC_FILE_MAGIC)];
+        read(fd, magicbuf, sizeof(LJSC_FILE_MAGIC));
+        if(memcmp(magicbuf, LJSC_FILE_MAGIC, sizeof(LJSC_FILE_MAGIC)) != 0)
+            goto not_bundled_finalizer;
+
+        // read length
+        lseek(fd, - sizeof(uint32_t), SEEK_CUR);
+        if(read(fd, &jspack_len, sizeof(uint32_t)) < sizeof(uint32_t))
+            goto not_bundled_finalizer;
+
+        // read data
+        jspack_data = js_malloc_rt(runtime, jspack_len);
+        if(!jspack_data){
+            printf("Failed to allocate memory for JSPack data.\n");
+            return 1;
+        }
+        lseek(fd, - (sizeof(uint32_t) + jspack_len), SEEK_CUR);
+        if(read(fd, jspack_data, jspack_len) < jspack_len)
+            goto not_bundled_finalizer;
+        close(fd);
+
+        // fprintf(stderr, "Error: Not implemented yet.\n");
+        // return 1;
+not_bundled_finalizer:
+        close(fd);
+not_bundled:
+        printf("Error: Missing JSPack file to execute.\n");
+        return 1;
+    }else{
+        // try read file
+        int fd = open(argv[optind], O_RDONLY);
+        if(!fd){
+            printf("Failed to open file \"%s\": %s\n", argv[optind], strerror(errno));
+            return 1;
+        }
+
+        struct stat st;
+        if(-1 == fstat(fd, &st)){
+            printf("Failed to stat file \"%s\": %s\n", argv[optind], strerror(errno));
+            return 1;
+        }
+        jspack_len = st.st_size;
+        jspack_data = js_malloc_rt(runtime, jspack_len);
+        if(!jspack_data){
+            printf("Failed to allocate memory for JSPack data.\n");
+            return 1;
+        }
+        if(read(fd, jspack_data, jspack_len) < jspack_len){
+            printf("Failed to read JSPack data from file.\n");
+            return 1;
+        }
+        close(fd);
+    }
+#else
     if(eval_code && optind == argc){
         printf("Error: Missing argument for -e/--eval\n");
         return 1;
     }
+#endif
 
     // rt init
     LJS_init_runtime(runtime);
@@ -260,6 +347,9 @@ int main(int argc, char **argv) {
 #endif
 
     // app init
+#ifdef __LJSC
+    char* script_path = strdup(argv[optind]);
+#else
     char* script_path;
     const char* raw_name;
     if(eval_code){
@@ -274,6 +364,7 @@ int main(int argc, char **argv) {
         script_path = strdup(raw_name = get_current_dir_name());
         repl = true;
     }
+#endif
     
     app = LJS_create_app(runtime, 
         argc == optind ? 0 : argc - optind -1, argc == optind ? NULL : argv + optind +1, 
@@ -286,6 +377,16 @@ int main(int argc, char **argv) {
     LJS_init_context(app);
     evcore_init();  // epoll init
 
+#ifdef __LJSC
+    packed_files = js_unpack(app -> ctx, jspack_data, strlen((char*)jspack_data), &packed_len);
+    FIND_PACKAGE(packed_files, packed_len, "main.js", code);
+    if(JS_IsUndefined(code)){
+        printf("Failed to find entry point in jspack: main.js\n");
+        return 1;
+    }
+
+    const char* raw_name = script_path;
+#else
     if(argc - optind == 0 || repl){
         printf("LightJS %s with QuickJS-NG %s\n", LJS_VERSION, JS_GetVersion());
         printf("Type \".help\" for usage. for more information, please access github wiki.\n");
@@ -327,6 +428,7 @@ int main(int argc, char **argv) {
         }
     }
 
+
     if(check){
         JSValue ret_val = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
         free(buf);
@@ -342,8 +444,9 @@ int main(int argc, char **argv) {
 
     // parse
     JSValue code = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-    JSValue ret_val = JS_UNDEFINED;
     free(buf);
+#endif
+    JSValue ret_val = JS_UNDEFINED;
     if(JS_IsException(code)){
 print_error:
         JSValue exception = JS_GetException(app -> ctx);
@@ -361,7 +464,9 @@ print_error:
     }
 
     // start!
-run_evloop:
+#ifndef __LJSC
+run_evloop: // note: unused in LJSC cmdline mode
+#endif
     evcore_run(check_promise_resolved, &ret_val);
     // LJS_destroy_app(app); // destroy app will cause SEGFAULT as <argv> is not able to free.
 
@@ -376,7 +481,9 @@ finalize:
     
     LJS_destroy_app(app);
     JS_FreeRuntime(runtime);
+#ifndef __LJSC
     if(!eval_code) free(script_path);
+#endif
     if(exit_code < 0) exit_code = 0;
     return exit_code;
 }

@@ -35,7 +35,7 @@ static JSValue js_syncio_set_block(JSContext *ctx, JSValueConst this_val, JSValu
         flags |= O_NONBLOCK;
 
     if(fcntl(pipe -> fd, F_SETFL, flags) < 0)
-        return LJS_Throw(ctx, "failed to set blocking mode: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to set blocking mode: %s", NULL, strerror(errno));
 
     return JS_UNDEFINED;
 }
@@ -67,14 +67,14 @@ static JSValue js_syncio_write(JSContext *ctx, JSValueConst this_val, int argc, 
     if(!pipe) return JS_EXCEPTION;
 
     if(argc == 0 ){
-        return LJS_Throw(ctx, "missing argument", "SyncPipe.write(data: TypedArray | string): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "missing argument", "SyncPipe.write(data: TypedArray | string): void");
     }
     bool wait_until_sent = false;
     if(argc == 2) wait_until_sent = JS_ToBool(ctx, argv[1]);
 
     size_t size;
     uint8_t* buf = JS_IsString(argv[0])? (uint8_t*)JS_ToCStringLen(ctx, &size, argv[0]) : JS_GetUint8Array(ctx, &size, argv[0]);
-    if(!buf) return LJS_Throw(ctx, "invalid argument", "SyncPipe.write(data: TypedArray | string): void");
+    if(!buf) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid argument", "SyncPipe.write(data: TypedArray | string): void");
 
     uint32_t sent = write(pipe -> fd, buf, size);
     while(sent < size && wait_until_sent){
@@ -97,7 +97,7 @@ static JSValue js_syncio_prealloc(JSContext* ctx, JSValueConst new_target, int a
     if(!pipe) return JS_EXCEPTION;
 
     if(argc <= 2 || !JS_IsNumber(argv[0]))
-        return LJS_Throw(ctx, "invalid arguments", "SyncPipe.prealloc(size: int, flag: preallocFlag): boolean");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "SyncPipe.prealloc(size: int, flag: preallocFlag): boolean");
 
     uint32_t size = 0;
     int flag;
@@ -120,10 +120,10 @@ static JSValue js_syncio_seek(JSContext *ctx, JSValueConst this_val, int argc, J
     int64_t offset;
     int whence;
     if(argc!= 2 || !JS_ToInt64(ctx, &offset, argv[0]) || !JS_ToInt32(ctx, &whence, argv[1]))
-        return LJS_Throw(ctx, "invalid arguments", "SyncPipe.seek(offset: int, whence: int): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "SyncPipe.seek(offset: int, whence: int): void");
 
     if(lseek(pipe -> fd, offset, whence) < 0)
-        return LJS_Throw(ctx, "failed to seek: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to seek: %s", NULL, strerror(errno));
 
     return JS_UNDEFINED;
 }
@@ -134,7 +134,7 @@ static JSValue js_syncio_tell(JSContext *ctx, JSValueConst this_val, int argc, J
 
     off_t pos = lseek(pipe -> fd, 0, SEEK_CUR);
     if(pos < 0)
-        return LJS_Throw(ctx, "failed to tell: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to tell: %s", NULL, strerror(errno));
 
     return JS_NewInt64(ctx, pos);
 }
@@ -145,7 +145,7 @@ static JSValue js_syncio_eof(JSContext *ctx, JSValueConst this_val, int argc, JS
     if(pipe -> size == -1) return JS_FALSE;
     off_t pos = lseek(pipe -> fd, 0, SEEK_CUR);
     if(pos < 0)
-        return LJS_Throw(ctx, "failed to get position: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to get position: %s", NULL, strerror(errno));
     return JS_NewBool(ctx, pos >= pipe -> size);
 }
 
@@ -172,7 +172,7 @@ static void js_syncio_finalizer(JSRuntime *rt, JSValue val){
 static JSValue js_syncio_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv){
     int fd;
     if(argc == 0 || 0 != JS_ToInt32(ctx, &fd, argv[0]))
-        return LJS_Throw(ctx, "invalid arguments", "new stdio.SyncPipe(fd: int): SyncPipe");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "new stdio.SyncPipe(fd: int): SyncPipe");
 
     if(fcntl(fd, F_GETFD) < 0)
         return JS_ThrowReferenceError(ctx, "invalid file descriptor");
@@ -227,7 +227,7 @@ static const JSCFunctionListEntry js_syncpipe_flags[] = {
 // class Inotify
 static thread_local JSClassID js_inotify_class_id;
 
-#define TELL_ERROR return LJS_Throw(ctx, "invaild INotify instance", "did you called Inotify.close() before?");
+#define TELL_ERROR return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild INotify instance", "did you called Inotify.close() before?");
 
 static JSValue js_inotify_watch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     EvFD* fd = JS_GetOpaque(this_val, js_inotify_class_id);
@@ -235,12 +235,12 @@ static JSValue js_inotify_watch(JSContext *ctx, JSValueConst this_val, int argc,
 
     uint32_t flags;
     if(argc < 2 || !JS_IsString(argv[0]) || -1 == JS_ToUint32(ctx, &flags, argv[1]))
-        return LJS_Throw(ctx, "invalid arguments", "Inotify.watch(path: string, flag: number): INWD");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "Inotify.watch(path: string, flag: number): INWD");
 
     const char* path = JS_ToCString(ctx, argv[0]);
     int wd;
     if(!evcore_inotify_watch(fd, path, flags, &wd)){
-        return LJS_Throw(ctx, "failed to add watch: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to add watch: %s", NULL, strerror(errno));
     }
 
     return JS_NewInt32(ctx, wd);
@@ -252,10 +252,10 @@ static JSValue js_inotify_unwatch(JSContext *ctx, JSValueConst this_val, int arg
 
     int wd;
     if(argc < 1 || -1 == JS_ToInt32(ctx, &wd, argv[0]))
-        return LJS_Throw(ctx, "invalid arguments", "Inotify.unwatch(wd: INWD (aka number) ): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "Inotify.unwatch(wd: INWD (aka number) ): void");
 
     if(!evcore_inotify_unwatch(fd, wd)){
-        return LJS_Throw(ctx, "failed to remove watch: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to remove watch: %s", NULL, strerror(errno));
     }
 
     return JS_UNDEFINED;
@@ -266,7 +266,7 @@ static JSValue js_inotify_find(JSContext *ctx, JSValueConst this_val, int argc, 
     if(!fd) TELL_ERROR;
 
     if(argc < 1 || !JS_IsString(argv[0]))
-        return LJS_Throw(ctx, "invalid arguments", "Inotify.find(path: string): INWD | null");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "Inotify.find(path: string): INWD | null");
 
     const char* path = JS_ToCString(ctx, argv[0]);
     int wd = evcore_inotify_find(fd, path);
@@ -299,12 +299,12 @@ void in_callback(EvFD* fd, const char* path, uint32_t evtype, const char* move_t
 
 static JSValue js_inotify_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv){
     if(argc == 0 || !JS_IsFunction(ctx, argv[0])){
-        return LJS_Throw(ctx, "missing argument", "new Inotify(callback: (type: number, path: string, move_to?: string) => void): Inotify");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "missing argument", "new Inotify(callback: (type: number, path: string, move_to?: string) => void): Inotify");
     }
 
     struct JSValueProxy* proxy = LJS_NewJSValueProxy(ctx, argv[0]);
     EvFD* fd = evcore_inotify(in_callback, proxy);
-    if(!fd) return LJS_Throw(ctx, "failed to create inotify instance: %s", NULL, strerror(errno));
+    if(!fd) return LJS_Throw(ctx, EXCEPTION_IO, "failed to create inotify instance: %s", NULL, strerror(errno));
     evfd_set_opaque(fd, proxy);
 
     JSValue class = JS_NewObjectClass(ctx, js_inotify_class_id);
@@ -368,7 +368,7 @@ static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValu
     bool to_str = false;
 
     if(argc == 0 || !JS_IsString(argv[0])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.readSync(filename: string, str?: boolean): string | Uint8Array");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.readSync(filename: string, str?: boolean): string | Uint8Array");
 
     if(argc == 2)
         to_str = JS_ToBool(ctx, argv[1]);
@@ -377,39 +377,32 @@ static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValu
     if (!filename)
         return JS_EXCEPTION;
 
-    FILE* fd = fopen(filename, "r");
-    if (!fd) {
-        LJS_Throw(ctx, "failed to open file: %s", NULL, strerror(errno));
+    int fd = open(filename, O_RDONLY);
+    JS_FreeCString(ctx, filename);
+    if (fd == -1) {
+        LJS_Throw(ctx, EXCEPTION_NOTFOUND, "failed to open file: %s", NULL, strerror(errno));
         return JS_EXCEPTION;
     }
-    if (fseek(fd, 0, SEEK_END) < 0) {
-        fclose(fd);
-        return LJS_Throw(ctx, "not a regular file: %s", NULL, strerror(errno));
-    }
-    long lret = ftell(fd);
-    if (lret < 0 || fseek(fd, 0, SEEK_SET) < 0) {
-        fclose(fd);
-        return LJS_Throw(ctx, "not a regular file", NULL);
-    }
-    if(lret == LONG_MAX){
-        fclose(fd);
-        return LJS_Throw(ctx, "is a directory", NULL);
+    struct stat st;
+    if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        return LJS_Throw(ctx, EXCEPTION_INVAILDF, "not a regular file: %s", NULL, strerror(errno));
     }
 
     // 读取文件内容
-    buf_len = lret;
+    buf_len = st.st_size;
     buf = js_malloc(ctx, buf_len + 1);
     if (!buf) {
-        fclose(fd);
-        return LJS_Throw(ctx, "out of memory", NULL);
+        close(fd);
+        return JS_ThrowOutOfMemory(ctx);
     }
-    if (fread(buf, 1, buf_len, fd) != buf_len) {
+    if (read(fd, buf, buf_len) != buf_len) {
         js_free(ctx, buf);
-        fclose(fd);
-        return LJS_Throw(ctx, "failed to read file: %s", NULL, strerror(errno));
+        close(fd);
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to read file: %s", NULL, strerror(errno));
     }
     buf[buf_len] = '\0';
-    fclose(fd);
+    close(fd);
 
     JSValue ret = to_str
         ? JS_NewStringLen(ctx, (char *)buf, buf_len)
@@ -425,16 +418,18 @@ static JSValue js_stdio_stat(JSContext *ctx, JSValueConst self, int argc, JSValu
     struct stat st;
 
     if(argc != 1 || !JS_IsString(argv[0])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.statSync(filename: string): object");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.statSync(filename: string): object");
 
     filename = JS_ToCStringLen(ctx, &filename_len, argv[0]);
     if (!filename)
         return JS_EXCEPTION;
 
     if (stat(filename, &st) < 0) {
-        LJS_Throw(ctx, "failed to stat file: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO, "failed to stat file: %s", NULL, strerror(errno));
+        JS_FreeCString(ctx, filename);
         return JS_EXCEPTION;
     }
+    JS_FreeCString(ctx, filename);
 
     JSValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "mtime", JS_NewBigInt64(ctx, st.st_mtime * 1000));
@@ -483,7 +478,7 @@ static JSValue js_stdio_write(JSContext *ctx, JSValueConst self, int argc, JSVal
     size_t data_len;
 
     if(argc != 2 || !JS_IsString(argv[0]) || (!JS_IsString(argv[1]) && JS_TYPED_ARRAY_UINT8 != JS_GetTypedArrayType(argv[1])))
-        return LJS_Throw(ctx, "invalid arguments", "stdio.write(filename: string, data: string | Uint8Array): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.write(filename: string, data: string | Uint8Array): void");
 
     filename = JS_ToCStringLen(ctx, &filename_len, argv[0]);
     if (!filename)
@@ -497,16 +492,19 @@ static JSValue js_stdio_write(JSContext *ctx, JSValueConst self, int argc, JSVal
     if (!data)
         return JS_EXCEPTION;
 
-    FILE* fd = fopen(filename, "w");
-    if (!fd) {
-        LJS_Throw(ctx, "failed to open file: %s", NULL, strerror(errno));
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    JS_FreeCString(ctx, filename);
+    if (fd < 0) {
+        LJS_Throw(ctx, EXCEPTION_IO, "failed to open file: %s", NULL, strerror(errno));
         return JS_EXCEPTION;
     }
-    if (fwrite(data, 1, data_len, fd) != data_len) {
-        fclose(fd);
-        return LJS_Throw(ctx, "failed to write file: %s", NULL, strerror(errno));
+    if (write(fd, data, data_len) != data_len) {
+        if(JS_IsString(argv[1])) JS_FreeCString(ctx, (char*)data);
+        close(fd);
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to write file: %s", NULL, strerror(errno));
     }
-    fclose(fd);
+    if(JS_IsString(argv[1])) JS_FreeCString(ctx, (char*)data);
+    close(fd);
 
     return JS_UNDEFINED;
 }
@@ -518,16 +516,18 @@ static JSValue js_stdio_mkdir(JSContext *ctx, JSValueConst self, int argc, JSVal
     int mode = 0755;
 
     if(argc != 1 || !JS_IsString(argv[0])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.mkdir(path: string, mode: int): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.mkdir(path: string, mode: int): void");
 
     path = JS_ToCStringLen(ctx, &path_len, argv[0]);
     if (!path)
         return JS_EXCEPTION;
 
     if (mkdir(path, mode) < 0) {
-        LJS_Throw(ctx, "failed to create directory: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO,  "failed to create directory: %s", NULL, strerror(errno));
+        JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
     }
+    JS_FreeCString(ctx, path);
 
     return JS_UNDEFINED;
 }
@@ -617,7 +617,7 @@ static inline JSValue dirent_type_to_str(JSContext *ctx, unsigned char d_type){
 // unlink
 static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc != 1 || !JS_IsString(argv[0])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.unlink(path: string): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.unlink(path: string): void");
     
     size_t path_len;
     const char *path = JS_ToCStringLen(ctx, &path_len, argv[0]);
@@ -628,7 +628,7 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
     // stat is a dir or file
     struct stat st;
     if (stat(path, &st) < 0) {
-        LJS_Throw(ctx, "failed to stat file: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO, "failed to stat file: %s", NULL, strerror(errno));
         JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
     }
@@ -645,7 +645,7 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
             &dir_list, &dir_list_length, &dir_list_used, 
             true
         )) {
-            LJS_Throw(ctx, "failed to get subfiles in this directory: %s", NULL, strerror(errno));
+            LJS_Throw(ctx, EXCEPTION_IO, "failed to get subfiles in this directory: %s", NULL, strerror(errno));
             js_free(ctx, list);
             js_free(ctx, dir_list);
             JS_FreeCString(ctx, path);
@@ -659,7 +659,7 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
             strcat(sub_path, "/");
             strcat(sub_path, list[i]);
             if (unlink(sub_path) < 0) {
-                LJS_Throw(ctx, "failed to remove file %s: %s", NULL, sub_path, strerror(errno));
+                LJS_Throw(ctx, EXCEPTION_IO, "failed to remove file %s: %s", NULL, sub_path, strerror(errno));
                 js_free(ctx, sub_path);
                 js_free(ctx, list);
                 js_free(ctx, dir_list);
@@ -677,7 +677,7 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
             strcat(sub_path, "/");
             strcat(sub_path, dir_list[i]);
             if (rmdir(sub_path) < 0) {
-                LJS_Throw(ctx, "failed to remove directory: %s", NULL, strerror(errno));
+                LJS_Throw(ctx, EXCEPTION_IO, "failed to remove directory: %s", NULL, strerror(errno));
                 js_free(ctx, sub_path);
                 js_free(ctx, list);
                 js_free(ctx, dir_list);
@@ -690,7 +690,7 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
 
         // delete dir
         if (rmdir(path) < 0) {
-            LJS_Throw(ctx, "failed to remove directory: %s", NULL, strerror(errno));
+            LJS_Throw(ctx, EXCEPTION_IO, "failed to remove directory: %s", NULL, strerror(errno));
             js_free(ctx, list);
             js_free(ctx, dir_list);
             return JS_EXCEPTION;
@@ -698,7 +698,7 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
 
     } else {
         if (unlink(path) < 0) {
-            LJS_Throw(ctx, "failed to remove file: %s", NULL, strerror(errno));
+            LJS_Throw(ctx, EXCEPTION_IO, "failed to remove file: %s", NULL, strerror(errno));
             JS_FreeCString(ctx, path);
             return JS_EXCEPTION;
         }
@@ -711,7 +711,7 @@ static JSValue js_stdio_unlink(JSContext *ctx, JSValueConst self, int argc, JSVa
 // symlink
 static JSValue js_stdio_symlink(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc != 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.symlink(target: string, path: string): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.symlink(target: string, path: string): void");
     
     size_t target_len;
     const char *target = JS_ToCStringLen(ctx, &target_len, argv[0]);
@@ -723,18 +723,21 @@ static JSValue js_stdio_symlink(JSContext *ctx, JSValueConst self, int argc, JSV
     if (!path)
         return JS_EXCEPTION;
 
+    JSValue ret = JS_UNDEFINED;
     if (symlink(target, path) < 0) {
-        LJS_Throw(ctx, "failed to create symlink: %s", NULL, strerror(errno));
-        return JS_EXCEPTION;
+        LJS_Throw(ctx, EXCEPTION_IO, "failed to create symlink: %s", NULL, strerror(errno));
+        ret = JS_EXCEPTION;
     }
 
-    return JS_UNDEFINED;
+    JS_FreeCString(ctx, target);
+    JS_FreeCString(ctx, path);
+    return ret;
 }
 
 // chmod
 static JSValue js_stdio_chmod(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc != 2 || !JS_IsString(argv[0]) || !JS_IsNumber(argv[1])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.chmod(path: string, mode: int): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.chmod(path: string, mode: int): void");
     
     size_t path_len;
     const char *path = JS_ToCStringLen(ctx, &path_len, argv[0]);
@@ -743,20 +746,22 @@ static JSValue js_stdio_chmod(JSContext *ctx, JSValueConst self, int argc, JSVal
 
     uint32_t mode;
     if(-1 == JS_ToUint32(ctx, &mode, argv[1]) || mode > 07777)
-        return LJS_Throw(ctx, "invalid mode", NULL);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid mode", NULL);
 
     if (chmod(path, mode) < 0) {
-        LJS_Throw(ctx, "failed to change file mode: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO, "failed to change file mode: %s", NULL, strerror(errno));
+        JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
     }
 
+    JS_FreeCString(ctx, path);
     return JS_UNDEFINED;
 }
 
 // realpath
 static JSValue js_stdio_realpath(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc != 1 || !JS_IsString(argv[0])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.realpath(path: string): string");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.realpath(path: string): string");
     
     size_t path_len;
     const char *path = JS_ToCStringLen(ctx, &path_len, argv[0]);
@@ -765,10 +770,12 @@ static JSValue js_stdio_realpath(JSContext *ctx, JSValueConst self, int argc, JS
 
     char* real_path = realpath(path, NULL);
     if (!real_path) {
-        LJS_Throw(ctx, "failed to get real path: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO, "failed to get real path: %s", NULL, strerror(errno));
+        JS_FreeCString(ctx, path);
         return JS_EXCEPTION;
     }
 
+    JS_FreeCString(ctx, path);
     JSValue ret = JS_NewString(ctx, real_path);
     js_free(ctx, real_path);
     return ret;
@@ -777,7 +784,7 @@ static JSValue js_stdio_realpath(JSContext *ctx, JSValueConst self, int argc, JS
 // scandir
 static JSValue js_stdio_scandir(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc != 1 || !JS_IsString(argv[0])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.scandir(path: string): array");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.scandir(path: string): array");
     
     size_t path_len;
     const char *path = JS_ToCStringLen(ctx, &path_len, argv[0]);
@@ -787,7 +794,7 @@ static JSValue js_stdio_scandir(JSContext *ctx, JSValueConst self, int argc, JSV
     DIR* dir = opendir(path);
     JS_FreeCString(ctx, path);
     if (!dir) {
-        LJS_Throw(ctx, "failed to open directory: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_NOTFOUND, "failed to open directory: %s", NULL, strerror(errno));
         return JS_EXCEPTION;
     }
 
@@ -813,7 +820,7 @@ static JSValue js_stdio_scandir(JSContext *ctx, JSValueConst self, int argc, JSV
 // rename
 static JSValue js_stdio_rename(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc != 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.rename(oldPath: string, newPath: string): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.rename(oldPath: string, newPath: string): void");
     
     size_t old_path_len;
     const char *old_path = JS_ToCStringLen(ctx, &old_path_len, argv[0]);
@@ -826,7 +833,7 @@ static JSValue js_stdio_rename(JSContext *ctx, JSValueConst self, int argc, JSVa
         return JS_EXCEPTION;
 
     if (rename(old_path, new_path) < 0) {
-        LJS_Throw(ctx, "failed to rename file: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO, "failed to rename file: %s", NULL, strerror(errno));
         return JS_EXCEPTION;
     }
 
@@ -836,7 +843,7 @@ static JSValue js_stdio_rename(JSContext *ctx, JSValueConst self, int argc, JSVa
 // copy: based on async splice
 static JSValue js_stdio_copy(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc != 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.copy(src: string, dst: string): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.copy(src: string, dst: string): void");
     
     size_t src_len;
     const char *src = JS_ToCStringLen(ctx, &src_len, argv[0]);
@@ -871,13 +878,13 @@ static JSValue js_stdio_copy(JSContext *ctx, JSValueConst self, int argc, JSValu
     return JS_UNDEFINED;
 
 oserr:
-    return LJS_Throw(ctx, "failed to copy file: %s", NULL, strerror(errno));
+    return LJS_Throw(ctx, EXCEPTION_IO, "failed to copy file: %s", NULL, strerror(errno));
 }
 
 // open
 static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     if(argc < 2 || !JS_IsString(argv[0]) || !JS_IsString(argv[1])) 
-        return LJS_Throw(ctx, "invalid arguments", "stdio.open(path: string, flags: string, mode?: number, sync?: boolean): Pipe|SyncPipe");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "stdio.open(path: string, flags: string, mode?: number, sync?: boolean): Pipe|SyncPipe");
     
     size_t path_len;
     uint32_t mode = 0666;
@@ -888,7 +895,7 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
     if((argc == 3 && 0 != JS_ToUint32(ctx, &mode, argv[2])) || !path || !flags){
         if(path) JS_FreeCString(ctx, path);
         if(flags) JS_FreeCString(ctx, flags);
-        return LJS_Throw(ctx, "invalid arguments", NULL);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", NULL);
     }
 
     bool sync = false;
@@ -902,7 +909,7 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
         else if(flags[0] == 'a') flag |= O_WRONLY | O_CREAT | O_APPEND;
         else if(flags[0] == 'x') flag |= O_WRONLY | O_CREAT | O_EXCL;
         else {
-            LJS_Throw(ctx, "invalid flag", NULL);
+            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid flag", NULL);
             goto error;
         }
     }
@@ -912,7 +919,7 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
         else if(flags[1] == 's') flag |= O_SYNC;
         else if(flags[1] == '+') flag |= O_RDWR;
         else {
-            LJS_Throw(ctx, "invalid flag", NULL);
+            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid flag", NULL);
             goto error;
         }
 
@@ -923,7 +930,7 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
 
     int fd = open(path, flag, mode);
     if (fd < 0) {
-        LJS_Throw(ctx, "failed to open file: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_NOTFOUND, "failed to open file: %s", NULL, strerror(errno));
         goto error;
     }
 

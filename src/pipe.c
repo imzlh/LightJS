@@ -119,15 +119,15 @@ static void pipe_handle_close(JSRuntime *rt, struct Pipe_T *pipe) {
 
     JS_FreeValueRT(rt, pipe -> pull_func);
     JS_FreeValueRT(rt, pipe -> write_func);
-    JS_FreeValueRT(rt, pipe -> close_func);
 
-    JS_Call(pipe -> ctx, pipe -> close_func, JS_NULL, 0, NULL);
+    JS_Call2(pipe -> ctx, pipe -> close_func, JS_NULL, 0, NULL);
+    JS_FreeValueRT(rt, pipe -> close_func);
     if(JS_IsFunction(pipe -> ctx, pipe -> close_rs)){
-        JS_Call(pipe -> ctx, pipe -> close_rs, JS_NULL, 0, NULL);
+        JS_Call2(pipe -> ctx, pipe -> close_rs, JS_NULL, 0, NULL);
         JS_FreeValueRT(rt, pipe -> close_rs);
     }
     
-    buffer_free(pipe -> read_buf);
+    if(pipe -> read_buf) buffer_free(pipe -> read_buf);
 }
 
 static void pipe_cleanup(JSRuntime *rt, struct Pipe_T* pipe) {
@@ -164,7 +164,7 @@ static JSValue js_pipe_write(JSContext *ctx, JSValueConst this_val, int argc, JS
     CHECK_PIPE_WRITEABLE(pipe);
 
     if(argc == 0)
-        return LJS_Throw(ctx, "Pipe write need 1 argument", "Pipe.write(data: any): boolean");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Pipe write need 1 argument", "Pipe.write(data: any): boolean");
 
     JSValue data = argv[0];
 
@@ -172,7 +172,7 @@ static JSValue js_pipe_write(JSContext *ctx, JSValueConst this_val, int argc, JS
     bool exception;
     JSValue ret = JS_CallSafe(ctx, pipe -> write_func, this_val, 1, (JSValueConst[]){data}, &exception);
     pipe -> write_lock = true;
-    EXCEPTION_THEN_CLOSE(exception, ret, LJS_NewResolvedPromise(ctx, LJS_Throw(ctx, "Pipe write failed", NULL)));
+    EXCEPTION_THEN_CLOSE(exception, ret, LJS_NewResolvedPromise(ctx, JS_ThrowTypeError(ctx, "Pipe write failed")));
     pipe_handle_promise(ctx, data, pipe);
     UNLOCK_AFTER(ret, &pipe -> write_lock);
 
@@ -200,7 +200,7 @@ static const JSCFunctionListEntry Pipe_proto_funcs[] = {
 static JSValue js_pipe_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
     // 解析参数
     if(argc != 2){
-        return LJS_Throw(ctx, "Pipe constructor need 2 arguments", "new Pipe(ctrl: { read(), poll(), close(), start() }, flag: Pipe.READ | Pipe.WRITE)");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Pipe constructor need 2 arguments", "new Pipe(ctrl: { read(), poll(), close(), start() }, flag: Pipe.READ | Pipe.WRITE)");
     }
 
 #define ISFUNC_AND_SET(set, jsvalue) if(JS_IsFunction(ctx, jsvalue)) \
@@ -224,7 +224,7 @@ else \
 
     uint32_t flag = 0;
     if(JS_ToUint32(ctx, &flag, pipe_type) < 0){
-        return LJS_Throw(ctx, "Pipe flag must be a number", "new Pipe(ctrl, flag:Pipe.READ | Pipe.WRITE)");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Pipe flag must be a number", "new Pipe(ctrl, flag:Pipe.READ | Pipe.WRITE)");
     }
 
     // proto
@@ -375,6 +375,7 @@ struct PipeFillJob {
     uint32_t total;
     struct U8Pipe_T* pipe;
     bool once;
+    bool oneline;
 };
 
 static void u8pipe_fill_job(JSContext* ctx, bool is_error, JSValue result, void* opaque){
@@ -396,11 +397,13 @@ static void u8pipe_fill_job(JSContext* ctx, bool is_error, JSValue result, void*
     JS_FreeValue(ctx, result);
 
     uint32_t writed = buffer_push(pipe -> read_buf, data, size);
+    uint32_t export_end = pipe -> read_buf -> end;
 
     if(buffer_is_full(pipe -> read_buf) || job -> once){
+export:
         uint32_t size2;
         uint8_t* res = buffer_sub_export(pipe -> read_buf, 
-            pipe -> read_buf -> start, pipe -> read_buf -> end, &size2);
+            pipe -> read_buf -> start, export_end, &size2);
         buffer_seek(pipe -> read_buf, pipe -> read_buf -> start + size);
         JSValue ret = JS_NewUint8Array(ctx, res, size2, free_js_malloc, NULL, false);
         
@@ -413,7 +416,12 @@ static void u8pipe_fill_job(JSContext* ctx, bool is_error, JSValue result, void*
 done:
         U8PIPE_UNREF(job -> pipe);
         buffer_free(pipe -> read_buf);
+        pipe -> read_buf = NULL;
         js_free(ctx, job);
+    }else if(job -> oneline && (strchr((char*)data, '\n') )){
+        // XXX: add "\r" support for some edge case
+        export_end = ((uintptr_t)strchr((char*)data, '\n')) - ((uintptr_t)data);
+        goto export;
     }else{
         // push
         bool exception;
@@ -427,12 +435,13 @@ done:
     }
 }
 
-static inline bool u8pipe_fill(JSContext* ctx, struct U8Pipe_T* pipe, Promise* promise, uint32_t total, bool once){
+static inline bool u8pipe_fill(JSContext* ctx, struct U8Pipe_T* pipe, Promise* promise, uint32_t total, bool once, bool readline){
     struct PipeFillJob* job = js_malloc(ctx, sizeof(struct PipeFillJob));
     job -> promise = promise;
     job -> total = total;
     job -> pipe = pipe;
     job -> once = once;
+    job -> oneline = readline;
     
     bool exception;
     JSValue data = JS_CallSafe(ctx, pipe -> pipe.pipe -> pull_func, JS_NULL, 0, NULL, &exception);
@@ -491,7 +500,7 @@ static JSValue js_U8Pipe_read(JSContext *ctx, JSValueConst this_val, int argc, J
 
     if(argc == 1){
         if(0 != JS_ToUint32(ctx, &expected_size, argv[0])){
-            return LJS_Throw(ctx, "Expected size must be a number", "U8Pipe.read(expected_size?: number)");
+            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected size must be a number", "U8Pipe.read(expected_size?: number)");
         }
     }
 
@@ -522,8 +531,8 @@ static JSValue js_U8Pipe_read(JSContext *ctx, JSValueConst this_val, int argc, J
     }else{  // U8PIPE
         CHECK_U8PIPE_CLOSED2(pipe, promise);
         u8pipe_ref(pipe);
-        if(!u8pipe_fill(ctx, pipe, promise, expected_size, expected_size == 0))
-            return LJS_Throw(ctx, "Failed to fill buffer", NULL);
+        if(!u8pipe_fill(ctx, pipe, promise, expected_size, expected_size == 0, false))
+            return JS_ThrowTypeError(ctx, "Failed to fill buffer");
     }
 
     return promiseobj;
@@ -550,7 +559,7 @@ static JSValue js_U8Pipe_write(JSContext *ctx, JSValueConst this_val, int argc, 
     uint8_t* buffer;
 
     if(argc == 0)
-        return LJS_Throw(ctx, "U8Pipe write need 1 argument", "U8Pipe.write(data: Uint8Array): Promise<boolean>");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "U8Pipe write need 1 argument", "U8Pipe.write(data: Uint8Array): Promise<boolean>");
 
     buffer = JS_GetUint8Array(ctx, &expected_size, argv[0]);
     if(!buffer) return JS_EXCEPTION;
@@ -571,7 +580,7 @@ static JSValue js_U8Pipe_write(JSContext *ctx, JSValueConst this_val, int argc, 
         pipe -> pipe.pipe -> write_lock = true;
         bool exception;
         JSValue ret = JS_CallSafe(ctx, pipe -> pipe.pipe -> write_func, this_val, 1, (JSValueConst[]){argv[1]}, &exception);
-        EXCEPTION_THEN_CLOSE(exception, ret, LJS_Throw(ctx, "Pipe write failed", NULL));
+        EXCEPTION_THEN_CLOSE(exception, ret, JS_ThrowTypeError(ctx, "Pipe write failed"));
         pipe_handle_promise(ctx, ret, pipe -> pipe.pipe);
         U8PIPE_UNREF(pipe);
         return ret;
@@ -601,7 +610,7 @@ static void sync_promise_proxy(EvFD* fd, bool success, void* opaque){
 static JSValue js_U8Pipe_sync(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     GET_U8PIPE_OPAQUE(pipe, this_val);
     CHECK_U8PIPE_CLOSED(pipe);
-    if(!pipe -> fdpipe) return LJS_Throw(ctx, "U8Pipe.sync() only support for fdpipe", NULL);
+    if(!pipe -> fdpipe) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "U8Pipe.sync() only support for fdpipe", "only U8Pipe for fd has tasklist");
 
     Promise* promise = js_promise(ctx);
     evfd_wait2(pipe -> pipe.fdpipe -> fd, sync_promise_proxy, promise);
@@ -613,9 +622,12 @@ static JSValue js_U8Pipe_readline(JSContext *ctx, JSValueConst this_val, int arg
     CHECK_U8PIPE_READABLE(pipe);
     CHECK_U8PIPE_LOCKED(pipe, true);
 
-    // todo: supoort normal pipe
     if(!pipe -> fdpipe){
-        return LJS_Throw(ctx, "U8Pipe.readline() only support for fdpipe", NULL);
+        struct promise* promise = js_promise(ctx);
+        CHECK_U8PIPE_CLOSED2(pipe, promise);
+        u8pipe_ref(pipe);
+        if(!u8pipe_fill(ctx, pipe, promise, PIPE_BUF, false, true))
+            return JS_ThrowTypeError(ctx, "Failed to fill buffer");
     }
 
     uint32_t expected_size = 16 * 1024;
@@ -831,7 +843,7 @@ end:
 
 static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(argc == 0)
-        return LJS_Throw(ctx, "Expected at least 1 arguments", "U8Pipe.pipeTo(to: U8Pipe, filter?: Function): Promise<boolean>");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected at least 1 arguments", "U8Pipe.pipeTo(to: U8Pipe, filter?: Function): Promise<boolean>");
     GET_U8PIPE_OPAQUE(from, this_val);
     CHECK_U8PIPE_READABLE(from);
     CHECK_U8PIPE_LOCKED(from, true);
@@ -839,7 +851,7 @@ static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc,
     JSValue to = argv[0], filter = argc == 2 ? argv[1] : JS_NULL;
     struct U8Pipe_T* to_data = JS_GetOpaque(to, u8pipe_class_id);
     if(!to_data){
-        return LJS_Throw(ctx, "Expected a U8Pipe object", "U8Pipe.pipeTo(to: U8Pipe, filter?: Function): Promise<boolean>");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a U8Pipe object", "U8Pipe.pipeTo(to: U8Pipe, filter?: Function): Promise<boolean>");
     }
     CHECK_U8PIPE_CLOSED(to_data);
     CHECK_U8PIPE_WRITEABLE(to_data);
@@ -856,7 +868,12 @@ static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc,
         js_resolve(from -> pipe.fdpipe -> close, JS_UNDEFINED);
         JS_FreeValue(ctx, data);
 
-        return LJS_NewResolvedPromise(ctx, JS_UNDEFINED);
+        JSValue prom[2];
+        JSValue ret = JS_NewPromiseCapability(ctx, prom);
+        JS_FreeValue(ctx, prom[1]);
+        JS_Call(ctx, prom[0], JS_NULL, 1, (JSValueConst[]){ JS_NewBool(ctx, true) });
+        JS_FreeValue(ctx, prom[0]);
+        return ret;
     }
 
     // Note: use ref to control lifetime, -- to release
@@ -894,7 +911,7 @@ static JSValue js_U8Pipe_constructor(JSContext *ctx, JSValueConst new_target, in
     // 读取参数
     uint32_t type;
     if(argc == 0 || !JS_IsObject(argv[0])){
-        return LJS_Throw(ctx, "illegal control object", "same as `new Pipe()`");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "illegal control object", "same as `new Pipe()`");
     }
     if(argc >= 2) JS_ToUint32(ctx, &type, argv[1]);
     else{   // auto detect type
@@ -947,18 +964,23 @@ static inline int get_fd_from_pipe(JSContext* ctx, JSValueConst pipe){
 
 static JSValue js_iopipe_setraw(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0)
-        return LJS_Throw(ctx, "Expected a boolean value", "U8Pipe(tty).ttyRaw(set_to_raw: boolean): boolean");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a boolean value", "U8Pipe(tty).ttyRaw(set_to_raw: boolean): boolean");
     
     int fdnum = get_fd_from_pipe(ctx, this_val);
-    if(fdnum == -1) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
-    bool res = isatty(fdnum);
+    if(fdnum == -1) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a U8Pipe object", NULL);
+    int res = isatty(fdnum);
+    
+    if(res == -1){
+iofailed:
+        return JS_FALSE;
+    }
 
     if(JS_ToBool(ctx, argv[0])){
         // set raw mode
         struct termios tty;
 
         memset(&tty, 0, sizeof(tty));
-        tcgetattr(fdnum, &tty);
+        if(tcgetattr(fdnum, &tty) == -1) goto iofailed;
 
         tty.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP
                             |INLCR|IGNCR|ICRNL|IXON);
@@ -969,21 +991,21 @@ static JSValue js_iopipe_setraw(JSContext *ctx, JSValueConst this_val, int argc,
         tty.c_cc[VMIN] = 1;
         tty.c_cc[VTIME] = 0;
 
-        tcsetattr(fdnum, TCSANOW, &tty);
+        if(-1 == tcsetattr(fdnum, TCSANOW, &tty)) goto iofailed;
     }
 
-    return JS_NewBool(ctx, res);
+    return JS_TRUE;
 }
 
 #define GET_FD(this) int fdnum = get_fd_from_pipe(ctx, this_val); \
-    if(fdnum == -1) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+    if(fdnum == -1) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a U8Pipe object", NULL);
 
 static JSValue js_iopipe_get_size(JSContext *ctx, JSValueConst this_val){
     GET_FD(this_val);
 
     struct winsize size;
     if(ioctl(fdnum, TIOCGWINSZ, &size) == -1){
-        return LJS_Throw(ctx, "Failed to get terminal size", NULL);
+        return LJS_Throw(ctx, EXCEPTION_IO, "Failed to get terminal size", NULL);
     }
 
     return JS_NewArrayFrom(ctx, 2, (JSValueConst[]){JS_NewInt32(ctx, size.ws_row), JS_NewInt32(ctx, size.ws_col)});
@@ -1001,7 +1023,7 @@ static JSValue js_iopipe_set_size(JSContext *ctx, JSValueConst this_val, JSValue
     ){
         JS_FreeValue(ctx, jsobj[0]);
         JS_FreeValue(ctx, jsobj[1]);
-        return LJS_Throw(ctx, "expected array of two integers", NULL);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "expected array of two integers", NULL);
     }
     JS_FreeValue(ctx, jsobj[0]);
     JS_FreeValue(ctx, jsobj[1]);
@@ -1010,7 +1032,7 @@ static JSValue js_iopipe_set_size(JSContext *ctx, JSValueConst this_val, JSValue
     size.ws_row = rows;
     size.ws_col = cols;
     if(ioctl(fdnum, TIOCSWINSZ, &size) == -1){
-        return LJS_Throw(ctx, "Failed to set terminal size", NULL);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Failed to set terminal size", NULL);
     }
 
     return JS_TRUE;
@@ -1021,7 +1043,7 @@ static JSValue js_iopipe_get_title(JSContext *ctx, JSValueConst this_val){
 
     char title[1024];
     if(ioctl(fdnum, TIOCGWINSZ, title) == -1){
-        return LJS_Throw(ctx, "Failed to get terminal title", NULL);
+        return LJS_Throw(ctx, EXCEPTION_IO, "Failed to get terminal title", NULL);
     }
 
     return JS_NewString(ctx, title);
@@ -1035,7 +1057,7 @@ static JSValue js_iopipe_set_title(JSContext *ctx, JSValueConst this_val, JSValu
 
     if(ioctl(fdnum, TIOCSWINSZ, title) == -1){
         JS_FreeCString(ctx, title);
-        return LJS_Throw(ctx, "Failed to set terminal title", NULL);
+        return LJS_Throw(ctx, EXCEPTION_IO, "Failed to set terminal title", NULL);
     }
 
     JS_FreeCString(ctx, title);
@@ -1044,25 +1066,25 @@ static JSValue js_iopipe_set_title(JSContext *ctx, JSValueConst this_val, JSValu
 
 static JSValue js_iopipe_istty(JSContext *ctx, JSValueConst this_val){
     int fdnum = get_fd_from_pipe(ctx, this_val);
-    if(fdnum == -1) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+    if(fdnum == -1) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a U8Pipe object", NULL);
 
     return JS_NewBool(ctx, isatty(fdnum));
 }
 
 static JSValue js_iopipe_fflush(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     struct U8Pipe_T* pipe = JS_GetOpaque(this_val, u8pipe_class_id);
-    if(!pipe) return LJS_Throw(ctx, "Expected a U8Pipe object", NULL);
+    if(!pipe) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a U8Pipe object", NULL);
     EvFD* fd = pipe -> pipe.fdpipe -> fd;
     if(evfd_isAIO(fd)) return JS_UNDEFINED; // 不支持异步IO
     int fdnum = evfd_getfd(fd, NULL);
 
     if(isatty(fdnum)){
         if(tcflush(fdnum, TCIOFLUSH) == -1){
-            return LJS_Throw(ctx, "Failed to flush terminal", NULL);
+            return LJS_Throw(ctx, EXCEPTION_IO, "Failed to flush terminal", NULL);
         }
     }else{
         if(fdatasync(fdnum) == -1){
-            return LJS_Throw(ctx, "Failed to flush file", NULL);
+            return LJS_Throw(ctx, EXCEPTION_IO, "Failed to flush file", NULL);
         }
     }
     return JS_UNDEFINED;
@@ -1074,7 +1096,7 @@ static JSValue js_iopipe_fseek(JSContext *ctx, JSValueConst this_val, int argc, 
     CHECK_U8PIPE_READABLE(src);
 
     if(argc!= 1 || !JS_IsNumber(argv[0])){
-        return LJS_Throw(ctx, "Expected a number", "U8Pipe.fseek(offset: number, baseline?: string): void");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a number", "U8Pipe.fseek(offset: number, baseline?: string): void");
     }
 
     uint32_t offset;
@@ -1095,10 +1117,9 @@ static JSValue js_iopipe_fseek(JSContext *ctx, JSValueConst this_val, int argc, 
         JS_FreeCString(ctx, base);
     }
 
-    if(!src -> fdpipe) return LJS_Throw(ctx, "Expected a U8Pipe from fopen", NULL);
-    int fdnum = evfd_getfd(src -> pipe.fdpipe -> fd, NULL);
-    if(lseek(fdnum, offset, seek) == -1){
-        return LJS_Throw(ctx, "Failed to seek: %s", NULL, strerror(errno));
+    if(!src -> fdpipe) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a U8Pipe from fopen", NULL);
+    if(!evfd_seek(src -> pipe.fdpipe -> fd, offset, seek)){
+        return LJS_Throw(ctx, EXCEPTION_IO, "Failed to seek: %s", NULL, strerror(errno));
     }
 
     evfd_clearbuf(src -> pipe.fdpipe -> fd);
@@ -1183,10 +1204,12 @@ static inline JSValue u8pipe_new(JSContext *ctx, bool fdpipe, struct U8Pipe_T *p
         // not locked check
         pipe -> pipe.fdpipe -> data_before_eof = NULL;
         pipe -> pipe.fdpipe -> is_socket = false;
+        pipe -> pipe.fdpipe -> ctx = ctx;
     }else{
         pipe -> pipe.pipe = js_malloc(ctx, sizeof(struct Pipe_T));
         DEF_ONCLOSE(pipe -> pipe.pipe);
         pipe -> pipe.pipe -> closed = false;
+        pipe -> pipe.pipe -> ctx = ctx;
     }
 
     return obj;
@@ -1222,7 +1245,7 @@ JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, 
     
     if (!evfd){
         js_free(ctx, pipe);
-        return LJS_Throw(ctx, "Failed to bind FD: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "Failed to bind FD: %s", NULL, strerror(errno));
     }
 
     JSValue obj = u8pipe_new(ctx, true, pipe);
@@ -1237,7 +1260,6 @@ JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, 
 
     pipe -> pipe.fdpipe -> fd = evfd;
     pipe -> pipe.fdpipe -> flag = flag;
-    pipe -> pipe.fdpipe -> ctx = ctx;
     pipe -> pipe.fdpipe -> closed = false;
     pipe -> pipe.fdpipe -> is_socket = flag & PIPE_SOCKET;
     pipe -> refcount = 2;   // owned by EventLoop and QuickJS

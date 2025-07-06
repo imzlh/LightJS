@@ -42,7 +42,7 @@ static JSValue crypto_sha(JSContext *ctx, JSValueConst this_val,
     size_t len;
 
     if(argc == 0 || !JS_IsUint8Array(ctx, argv[0])){
-        return LJS_Throw(ctx, "Missing argument", "crypto.sha(data: Uint8Array, shalevel?: number): Uint8Array");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Missing argument", "crypto.sha(data: Uint8Array, shalevel?: number): Uint8Array");
     }
     
     GET_BUF(ctx, argv[0], input, len);
@@ -80,7 +80,7 @@ static JSValue crypto_md5(JSContext *ctx, JSValueConst this_val,
     size_t len;
 
     if(argc == 0 || !JS_IsUint8Array(ctx, argv[0])){
-        return LJS_Throw(ctx, "Missing argument", "crypto.md5(data: Uint8Array): Uint8Array");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Missing argument", "crypto.md5(data: Uint8Array): Uint8Array");
     }
     
     GET_BUF(ctx, argv[0], input, len);
@@ -102,7 +102,7 @@ static JSValue crypto_aes(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     const mbedtls_cipher_info_t *cipher_info;
     
     if(argc <= 2 || !JS_IsUint8Array(ctx, argv[0]) || !JS_IsUint8Array(ctx, argv[1]) || !JS_IsUint8Array(ctx, argv[2]))
-        return LJS_Throw(ctx, "Missing argument", "crypto.aes(key: Uint8Array, iv: Uint8Array, data: Uint8Array, bool encrypt = true): Uint8Array");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Missing argument", "crypto.aes(key: Uint8Array, iv: Uint8Array, data: Uint8Array, bool encrypt = true): Uint8Array");
 
     GET_BUF(ctx, argv[0], key, key_len);
     GET_BUF(ctx, argv[1], iv, iv_len);
@@ -155,7 +155,7 @@ static JSValue crypto_hmac(JSContext *ctx, JSValueConst this_val,
     mbedtls_md_type_t md_type;
 
     if(argc <= 2 || !JS_IsString(argv[0]) || !JS_IsUint8Array(ctx, argv[1]) || !JS_IsUint8Array(ctx, argv[2]))
-        return LJS_Throw(ctx, "Missing argument", "crypto.hmac(algtype: string, key: Uint8Array, data: Uint8Array): Uint8Array");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Missing argument", "crypto.hmac(algtype: string, key: Uint8Array, data: Uint8Array): Uint8Array");
     
     GET_BUF(ctx, argv[1], key, key_len);
     GET_BUF(ctx, argv[2], data, data_len);
@@ -195,7 +195,7 @@ fail:
 static JSValue crypto_random(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     if(argc == 0 || !JS_IsNumber(argv[0]))
-        return LJS_Throw(ctx, "Missing argument", "crypto.random(size: number): Uint8Array");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Missing argument", "crypto.random(size: number): Uint8Array");
                                     
     int32_t size;
     if (JS_ToInt32(ctx, &size, argv[0]) == -1 || size <= 0)
@@ -206,7 +206,7 @@ static JSValue crypto_random(JSContext *ctx, JSValueConst this_val,
     
     if (mbedtls_ctr_drbg_random(&ctr_drbg, buf, size) != 0) {
         js_free(ctx, buf);
-        return LJS_Throw(ctx, "RNG failed", NULL);
+        return LJS_Throw(ctx, EXCEPTION_INTERNAL, "RNG failed", NULL);
     }
     
     JSValue ret = JS_NewUint8ArrayCopy(ctx, buf, size);

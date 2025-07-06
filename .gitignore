@@ -1,7 +1,8 @@
 *.cmake
 CMakeCache.txt
 *.a
-ljs
+ljs*
+*.log
 Makefile
 back/
 build/

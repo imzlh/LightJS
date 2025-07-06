@@ -18,7 +18,7 @@ struct js_zlib {
 
 static JSValue js_zlib_zlibformat(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc <= 1 || -1 == JS_GetTypedArrayType(argv[0]) || !JS_IsBool(argv[1])){
-        return LJS_Throw(ctx, "Invalid arguments for zlib", "zlib(data: Uint8Array, decompress: boolean, level?: number): Uint8Array");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments for zlib", "zlib(data: Uint8Array, decompress: boolean, level?: number): Uint8Array");
     }
 
     size_t bufsize;
@@ -28,7 +28,7 @@ static JSValue js_zlib_zlibformat(JSContext *ctx, JSValueConst this_val, int arg
     uint32_t level = Z_DEFAULT_COMPRESSION;
     if(argc > 2){
         if(JS_ToUint32(ctx, &level, argv[2]) == -1 || level > 9){
-            return LJS_Throw(ctx, "Invalid compression level", "deflate(data: Uint8Array, decompress: boolean, level?: number): Uint8Array");
+            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid compression level", "deflate(data: Uint8Array, decompress: boolean, level?: number): Uint8Array");
         }
     }
 
@@ -57,7 +57,7 @@ main:
             goto main;
 
         case Z_ERRNO:
-            return LJS_Throw(ctx, "Failed to compress/decompress data: %s", NULL, strerror(errno));
+            return LJS_Throw(ctx, EXCEPTION_INTERNAL, "Failed to compress/decompress data: %s", NULL, strerror(errno));
 
         case Z_OK:
             break;
@@ -87,7 +87,7 @@ static void zlib_free_proxy(void* opaque, void* ptr){
 
 static JSValue js_zlib_inflate(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc <= 1 || -1 == JS_GetTypedArrayType(argv[0]) || !JS_IsBool(argv[1])){
-        return LJS_Throw(ctx, "Invalid arguments for deflate", "deflate(data: Uint8Array, decompress: boolean, level?: number): Uint8Array");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments for deflate", "deflate(data: Uint8Array, decompress: boolean, level?: number): Uint8Array");
     }
 
     size_t bufsize;
@@ -97,7 +97,7 @@ static JSValue js_zlib_inflate(JSContext *ctx, JSValueConst this_val, int argc, 
     uint32_t level = Z_DEFAULT_COMPRESSION;
     if(argc > 2){
         if(JS_ToUint32(ctx, &level, argv[2]) == -1 || level > 9){
-            return LJS_Throw(ctx, "Invalid compression level", "deflate(data: Uint8Array, decompress: boolean, level?: number): Uint8Array");
+            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid compression level", "deflate(data: Uint8Array, decompress: boolean, level?: number): Uint8Array");
         }
     }
 
@@ -108,7 +108,7 @@ static JSValue js_zlib_inflate(JSContext *ctx, JSValueConst this_val, int argc, 
         (decompress && -1 == inflateInit(&zstream)) ||
         (!decompress && -1 == deflateInit(&zstream, level))
     ){
-        return LJS_Throw(ctx, "Failed to initialize zlib", NULL, Z_ERRNO);
+        return LJS_Throw(ctx, EXCEPTION_INTERNAL, "Failed to initialize zlib", NULL, Z_ERRNO);
     }
 
     zstream.next_in = buf;
@@ -140,7 +140,7 @@ main_loop:
             return ret;
 
         case Z_DATA_ERROR:
-            LJS_Throw(ctx, "Invalid data format", NULL);
+            LJS_Throw(ctx, EXCEPTION_INPUT, "Invalid data format", NULL);
             goto error;
 
         case Z_MEM_ERROR:
@@ -295,7 +295,7 @@ static JSValue js_zlib_deflate_stream(JSContext *ctx, JSValueConst this_val, int
     return stream;
 
 invaild_args:
-    return LJS_Throw(ctx, "Invalid arguments", "inflateStream(decompress: boolean, level?: number): Uint8Array");
+    return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments", "inflateStream(decompress: boolean, level?: number): Uint8Array");
 }
 #endif
 

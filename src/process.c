@@ -202,12 +202,12 @@ static JSValue js_process_exit(JSContext* ctx, JSValueConst this_val, int argc, 
     return JS_Throw(ctx, ie);
 }
 
-typedef struct {
+struct signal_data{
     JSValue handler;
     JSContext* ctx;
     int sig;
     struct list_head list;
-} signal_data;
+};
 
 
 static struct list_head signal_list;
@@ -218,7 +218,7 @@ static void js_signal_handler(int sig){
     pthread_rwlock_rdlock(&signal_lock);
     struct list_head *el, *el1;
     list_for_each_safe(el, el1, &signal_list){
-        signal_data* data = list_entry(el, signal_data, list);
+        struct signal_data* data = list_entry(el, struct signal_data, list);
         if(data -> sig == sig){
             App* app = (App*)JS_GetContextOpaque(data -> ctx);
             if(app -> thread == pthread_self()){
@@ -250,20 +250,20 @@ static struct sigaction default_sa = {
 
 static JSValue js_set_signal(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if (argc < 2 || !JS_IsFunction(ctx, argv[1]) || !JS_IsNumber(argv[0])) {
-        return LJS_Throw(ctx, "Invalid arguments", "Process.signal(signal: number, handler: () => any)");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments", "Process.signal(signal: number, handler: () => any)");
     }
     uint32_t sig;
     if(-1 == JS_ToUint32(ctx, &sig, argv[0])) return JS_EXCEPTION;
 
     // push to signal list
-    signal_data* data = js_malloc(ctx, sizeof(signal_data));
+    struct signal_data* data = js_malloc(ctx, sizeof(struct signal_data));
     data -> handler = JS_DupValue(ctx, argv[1]);
     data -> ctx = ctx;
     data -> sig = sig;
 
     if(-1 == sigaction(sig, &default_sa, NULL)) {
         free(data);
-        return LJS_Throw(ctx, "Set signal handler failed: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Set signal handler failed: %s", NULL, strerror(errno));
     }
 
     pthread_rwlock_wrlock(&signal_lock);
@@ -275,7 +275,7 @@ static JSValue js_set_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
 
 static JSValue js_del_signal(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if (argc!= 1) {
-        return LJS_Throw(ctx, "Invalid arguments", "Process.removeSignal(callback: Function, signal?: number): boolean");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments", "Process.removeSignal(callback: Function, signal?: number): boolean");
     }
     uint32_t sig = -1;
     if(argc == 2) JS_ToUint32(ctx, &sig, argv[1]);
@@ -285,7 +285,7 @@ static JSValue js_del_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
     pthread_rwlock_wrlock(&signal_lock);
     struct list_head* el, *el1;
     list_for_each_safe(el, el1, &signal_list){
-        signal_data* data = list_entry(el, signal_data, list);
+        struct signal_data* data = list_entry(el, struct signal_data, list);
         if(data -> sig == sig || sig == -1){
             if(
                 // 完全相同函数
@@ -315,14 +315,14 @@ static JSValue js_cwd(JSContext* ctx, JSValueConst this_val, int argc, JSValueCo
     }else{
         const char* path = JS_ToCString(ctx, argv[0]);
         if(chdir(path)!= 0)
-            return LJS_Throw(ctx, "Failed to change cwd to %s: %s", NULL, path, strerror(errno));
+            return LJS_Throw(ctx, EXCEPTION_IO, "Failed to change cwd to %s: %s", NULL, path, strerror(errno));
         JS_FreeCString(ctx, path);
         return JS_UNDEFINED;
     }
 }
 
 static JSValue js_sleep(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
-    if(argc!= 1) return LJS_Throw(ctx, "Invalid arguments", "Process.sleep(ms: number): void");
+    if(argc!= 1) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments", "Process.sleep(ms: number): void");
     int32_t ms;
     if(-1 == JS_ToInt32(ctx, &ms, argv[0])) return JS_EXCEPTION;
     usleep(ms * 1000);
@@ -373,7 +373,7 @@ static JSValue js_process_kill(JSContext *ctx, JSValueConst this_val, int argc, 
     int32_t sig = SIGTERM;
     if(argc > 0){
         if(-1 == JS_ToInt32(ctx, &sig, argv[0])){
-            return LJS_Throw(ctx, "Invalid signal", "Process.kill(signal: number)");
+            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid signal", "Process.kill(signal: number)");
         }
     }
     if(kill(obj -> pid, sig) == -1){
@@ -418,7 +418,7 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
 
     // 转换args
     if(argc < 1){
-        LJS_Throw(ctx, "Expect at least one argument", "new Process(command: string, options?: {env?: Record<string, string>, inheritPipe?: boolean, cwd?: string})");
+        LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expect at least one argument", "new Process(command: string, options?: {env?: Record<string, string>, inheritPipe?: boolean, cwd?: string})");
         goto fail;
     }
 
@@ -427,7 +427,7 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     bool inherit = JS_ToBool(ctx, jsobj = JS_GetPropertyStr(ctx, opts, "inheritPipe"));
     JS_FreeValue(ctx, jsobj);
     if(inherit && !LJS_IsMainContext(ctx)){
-        LJS_Throw(ctx, "inherit-pipe Process can only be created in main thread", 
+        LJS_Throw(ctx, EXCEPTION_TYPEERROR, "inherit-pipe Process can only be created in main thread", 
             "To avoid race condition for STDIN/STDOUT/STDERR, inherit-pipe Process cannot be created in worker thread"
         );
         goto fail;
@@ -436,7 +436,7 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     JSValue args = argv[0];
     int64_t len;
     if(!JS_IsArray(args) || -1 == JS_GetLength(ctx, args, &len) || len < 1){
-        LJS_Throw(ctx, "Invalid arguments: Expected an array of at least one string(executable path)", NULL);
+        LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments: Expected an array of at least one string(executable path)", NULL);
         goto fail;
     }
     char** _argv = malloc((len +1) * sizeof(char*));
@@ -460,7 +460,7 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     // 创建pty
     int master_fd, slave_fd;
     if (openpty(&master_fd, &slave_fd, NULL, NULL, NULL) == -1) {
-        LJS_Throw(ctx, "Failed to create pty: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO, "Failed to create pty: %s", NULL, strerror(errno));
         goto fail;
     }
 
@@ -476,7 +476,7 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     // 创建进程
     pid_t pid = fork();
     if (pid == -1) {
-        LJS_Throw(ctx, "Failed to create process: %s", NULL, strerror(errno));
+        LJS_Throw(ctx, EXCEPTION_IO, "Failed to create process: %s", NULL, strerror(errno));
         list_del(&obj -> link);
         close(master_fd);
         goto fail;
@@ -580,11 +580,11 @@ fail:
 
 static JSValue js_process_static_kill(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     int pid, signal = SIGILL;
-    if(argc == 0) return LJS_Throw(ctx, "Invalid arguments", "Process.kill(pid: number, signal?: number): void");
+    if(argc == 0) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments", "Process.kill(pid: number, signal?: number): void");
     if(argc >= 2) JS_ToInt32(ctx, &signal, argv[1]);
     if(-1 == JS_ToInt32(ctx, &pid, argv[0])) return JS_EXCEPTION;
     if(kill(pid, signal) == -1){
-        return LJS_Throw(ctx, "Failed to kill process: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_IO, "Failed to kill process: %s", NULL, strerror(errno));
     }
     return JS_UNDEFINED;
 }
@@ -644,10 +644,10 @@ __attribute__((constructor)) static void init_signal_system(void) {
 void LJS_destroy_process(JSContext* ctx){
     struct list_head *cur, *tmp;
     list_for_each_safe(cur, tmp, &signal_list){
-        struct process_class* obj = list_entry(cur, struct process_class, link);
+        struct signal_data* obj = list_entry(cur, struct signal_data, list);
         if(obj -> ctx == ctx){
-            JS_FreeValue(ctx, obj -> onclose);
-            list_del(&obj -> link);
+            JS_FreeValue(ctx, obj -> handler);
+            list_del(&obj -> list);
             js_free(ctx, obj);
         }
     }
@@ -693,8 +693,9 @@ static const JSClassDef js_process_class = {
 static JSValue js_get_sysinfo(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     struct sysinfo info;
     if(sysinfo(&info) == -1){
-        return LJS_Throw(ctx, "Failed to get system information: %s", NULL, strerror(errno));
+        return JS_NULL;
     }
+    
     JSValue obj = JS_NewObject(ctx);
     JSValue memory_obj = JS_NewObject(ctx);
     JSValue cpu_obj = JS_NewObject(ctx);

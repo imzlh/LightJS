@@ -12,15 +12,39 @@ static inline const char* LJS_ToCString(JSContext *ctx, JSValueConst val, size_t
     return JS_ToCStringLen(ctx, psize, val);
 }
 
+typedef enum {
+    EXCEPTION_ERROR,
+    EXCEPTION_TYPEERROR,
+    EXCEPTION_IO,
+    EXCEPTION_NOTFOUND,
+    EXCEPTION_INPUT,
+    EXCEPTION_INVAILDF,
+    EXCEPTION_INTERNAL,
+
+    __EXCEPTION_COUNT
+} ExceptionType;
+
+static const char* __exception_type_str[] = {
+    "Error",
+    "TypeError",
+    "IOException",
+    "NotFoundException",
+    "InvaildFileException",
+    "InputError",
+    "InternalError",
+};
+
 /**
  * 抛出一个错误，带有帮助信息
  * @param ctx 运行时上下文
  * @param msg 错误信息
  * @param help 帮助信息
  */
-static inline JSValue LJS_Throw(JSContext *ctx, const char *msg, const char *help, ...) {
+static inline JSValue LJS_Throw(JSContext *ctx, ExceptionType type, const char *msg, const char *help, ...) {
     va_list args;
     JSValue error_obj = JS_NewError(ctx);
+
+    
 
     // Allocate the error message
     size_t msg_len = strlen(msg) * 3;
@@ -34,11 +58,12 @@ static inline JSValue LJS_Throw(JSContext *ctx, const char *msg, const char *hel
     vsnprintf(msg2, msg_len, msg, args);
     va_end(args);
 
-    JS_DefinePropertyValueStr(ctx, error_obj, "message", JS_NewString(ctx, msg2), JS_PROP_C_W_E);
+    JS_DefinePropertyValue(ctx, error_obj, JS_ATOM_name, JS_NewString(ctx, __exception_type_str[type]), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+    JS_DefinePropertyValue(ctx, error_obj, JS_ATOM_message, JS_NewString(ctx, msg2), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     js_free(ctx, msg2);
 
     if (help) {
-        JS_DefinePropertyValueStr(ctx, error_obj, "help", JS_NewString(ctx, help), JS_PROP_C_W_E);
+        JS_DefinePropertyValueStr(ctx, error_obj, "help", JS_NewString(ctx, help), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     }
     return JS_Throw(ctx, error_obj);
 }
@@ -58,7 +83,7 @@ static inline JSValue LJS_ThrowWithError(JSContext *ctx, const char *msg, const 
         type_str = (char*)JS_ToCString(ctx, type);
     }
     snprintf(error_str, 1024, "%s: %s", type_str, message_str);
-    JS_Throw(ctx, LJS_Throw(ctx, error_str, help));
+    JS_Throw(ctx, LJS_Throw(ctx, EXCEPTION_ERROR, error_str, help));
     js_free(ctx, error_str);
     JS_FreeValue(ctx, error);
     JS_FreeValue(ctx, message);
@@ -159,4 +184,8 @@ static inline bool JS_IsInternalError(JSContext* ctx, JSValueConst val){
     const char* name = LJS_ToCString(ctx, JS_GetProperty(ctx, val, JS_ATOM_name), NULL);
     if(!name || strcmp(name, "InternalError") != 0) return false;
     return true;
+}
+
+static inline void JS_Call2(JSContext* ctx, JSValueConst func, JSValueConst this_obj, int argc, JSValueConst* argv){
+    JS_FreeValue(ctx, JS_Call(ctx, func, this_obj, argc, argv));
 }

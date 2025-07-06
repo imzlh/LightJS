@@ -197,14 +197,13 @@ macro(add_static_if_needed target)
 endmacro()
 
 file(GLOB ljs_core src/*.c)
-set(ljs_sources
+set(qjs_sources
     engine/cutils.c
     engine/libbf.c
     engine/libregexp.c
     engine/libunicode.c
     engine/quickjs.c
     engine/xsum.c # add in QuickJS-NG v0.9.1
-    ${ljs_core}
 )
 
 list(APPEND ljs_defines _GNU_SOURCE)
@@ -272,31 +271,35 @@ if(EXPAT_LIBRARIES)
     list(APPEND ljs_libs expat)
 endif()
 
-add_library(ljs ${ljs_sources})
+# -- build libs ------
+# libqjs
+add_library(qjs ${qjs_sources})
+target_compile_definitions(qjs PRIVATE ${ljs_defines})
+target_include_directories(qjs PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(qjs PUBLIC ${ljs_libs})
+
+# libqjsc
+list(APPEND qjsc_defines ${ljs_defines})
+list(APPEND qjsc_defines "QJS_DISABLE_PARSER")
+add_library(qjsc ${qjs_sources})
+target_compile_definitions(qjsc PRIVATE ${qjsc_defines})
+target_include_directories(qjsc PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+target_link_libraries(qjsc PUBLIC ${ljs_libs})
+
+# LightJS Core
+add_library(ljs ${ljs_core})
 target_compile_definitions(ljs PRIVATE ${ljs_defines})
 target_include_directories(ljs PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 target_link_libraries(ljs PUBLIC ${ljs_libs})
-
-if(EMSCRIPTEN)
-    add_executable(ljs_wasm ${ljs_sources})
-    target_link_options(ljs_wasm PRIVATE
-        # in emscripten 3.x, this will be set to 16k which is too small for quickjs. #write sth. to force github rebuild
-        -sSTACK_SIZE=2097152 # let it be 2m = 2 * 1024 * 1024 = 2097152, otherwise, stack overflow may be occured at bootstrap
-        -sNO_INVOKE_RUN
-        -sNO_EXIT_RUNTIME
-        -sMODULARIZE # do not mess the global
-        -sEXPORT_ES6 # export js file to morden es module
-        -sEXPORT_NAME=getQuickJs # give a name
-        -sTEXTDECODER=1 # it will be 2 if we use -Oz, and that will cause js -> c string convertion fail
-        -sNO_DEFAULT_TO_CXX # this project is pure c project, no need for c plus plus handle
-        -sEXPORTED_RUNTIME_METHODS=ccall,cwrap
-    )
-    target_compile_definitions(ljs_wasm PRIVATE ${ljs_defines})
-    target_link_libraries(ljs_wasm m)
-endif()
 
 # LightJS CLI
 #
@@ -311,7 +314,7 @@ set_target_properties(ljs_exe PROPERTIES
     OUTPUT_NAME "ljs"
 )
 target_compile_definitions(ljs_exe PRIVATE ${ljs_defines})
-target_link_libraries(ljs_exe ljs)
+target_link_libraries(ljs_exe ljs qjs)
 if(NOT WIN32)
     set_target_properties(ljs_exe PROPERTIES ENABLE_EXPORTS TRUE)
 endif()
@@ -323,6 +326,24 @@ if(QJS_BUILD_WITH_MIMALLOC OR QJS_BUILD_WITH_STATIC_MIMALLOC)
     else()
         target_link_libraries(ljs_exe mimalloc)
     endif()
+endif()
+
+# LightJS OpCode Runtime
+#
+
+list(APPEND ljsc_defines ${ljs_defines})
+list(APPEND ljsc_defines "__LJSC")
+add_static_if_needed(ljsc_exe)
+add_executable(ljsc_exe
+    main.c
+)
+set_target_properties(ljsc_exe PROPERTIES
+    OUTPUT_NAME "ljsc"
+)
+target_compile_definitions(ljsc_exe PRIVATE ${ljsc_defines})
+target_link_libraries(ljsc_exe ljs qjsc)
+if(NOT WIN32)
+    set_target_properties(ljsc_exe PROPERTIES ENABLE_EXPORTS TRUE)
 endif()
 
 # Install target
@@ -341,6 +362,7 @@ if(NOT IOS)
     )
     install(FILES src/core.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     install(TARGETS ljs_exe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS ljsc_exe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(TARGETS ljs EXPORT ljsConfig
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

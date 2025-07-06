@@ -25,11 +25,39 @@ declare module 'process'{
         readonly pid: number,
         readonly args: string[],
         readonly entry: string,
+
+        /**
+         * 当前工作目录<br>
+         * 可以通过设置cwd属性修改，相当于chdir命令
+         */
         cwd: string,
+
+        /**
+         * 环境变量对象<br>
+         * 可以直接通过读写值修改，多个Worker间可以安全共享
+         */
         readonly env: ReactiveEnviron,
+
+        /**
+         * ParentProcessIDentifier<br>
+         * 父进程ID
+         */
         readonly ppid: number,
 
+        /**
+         * 设置一个信号处理函数<br>
+         * 线程安全，当信号处理时强制中断当前执行
+         * @param sig 信号ID，通过`signal.SIGXXX`获取
+         * @param callback 信号处理函数
+         */
         signal: (sig: number, callback: () => void) => void,
+
+        /**
+         * 移除一个信号处理函数
+         * @param callback 信号处理函数
+         * @param sig 信号ID，通过`signal.SIGXXX`获取，不指定则移除所有信号处理函数
+         * @returns 是否移除成功
+         */
         removeSignal: (callback: () => void, sig?: number) => boolean
     }
 

@@ -11,9 +11,10 @@
             "program": "${workspaceFolder}/build/ljs",
             "preLaunchTask": "CMake: 生成",
             // "args": [],
-            // "args": ["--memory-limit=64m", "test", "pipe"],
+            "args": ["--memory-limit=64m", "test", "socket"],
             // "args": ["--memory-limit=64m", "lib/lrepl.js"],
-            "args": ["--memory-limit=64m", "${file}"],
+            // "args": ["--memory-limit=64m", "${file}"],
+            // "args": ["lib/lbundler.js", "lib"],
             // "args": ["-e", "import 'process'"],
             // "stopAtEntry": true,
             "cwd": "${workspaceFolder}",
@@ -32,7 +33,31 @@
                     "ignoreFailures": true
                 }
             ]
+        },{
+            "name": "(gdb) 启动ljsc",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/ljsc",
+            "preLaunchTask": "CMake: 生成",
+            // "args": [],
+            "args": ["--memory-limit=64m"],
+            // "stopAtEntry": true,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "将反汇编风格设置为 Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ]
         }
-
     ]
 }

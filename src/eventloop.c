@@ -203,11 +203,13 @@ void __trace_debug(int events, int direction) {
     return;
 }
 #define TRACE_EVENTS(evfd, add) \
-    printf("event_trace: func=%s, line=%d, fd=%d, add=%d, cevents=%ld \n", __func__, __LINE__, evfd_getfd(evfd, NULL), add, evloop_events); \
-    __trace_debug(evloop_events, add); \
-    evloop_events += add;
+    if((evfd) -> fd[0] > STDERR_FILENO) { \
+        printf("event_trace: func=%s, line=%d, fd=%d, add=%d, cevents=%ld \n", __func__, __LINE__, evfd_getfd(evfd, NULL), add, evloop_events); \
+        __trace_debug(evloop_events, add); \
+        evloop_events += add; \
+    }
 #else
-#define TRACE_EVENTS(evfd, add) evloop_events += add;
+#define TRACE_EVENTS(evfd, add) if((evfd) -> fd[0] > STDERR_FILENO) evloop_events += add;
 #endif
 
 // linux_kernel aio syscall
@@ -1582,12 +1584,10 @@ error:
         goto error;
     }
 
-    if(fd > STDERR_FILENO){
 #ifdef LJS_DEBUG
-        printf("new evfd fd:%d, aio:%d, bufsize:%d, r:%d, w:%d\n", fd, use_aio, bufsize, readable, writeable);
+    printf("new evfd fd:%d, aio:%d, bufsize:%d, r:%d, w:%d\n", fd, use_aio, bufsize, readable, writeable);
 #endif
-        TRACE_EVENTS(evfd, +1);
-    }
+    TRACE_EVENTS(evfd, +1);
 
     return evfd;
 }
@@ -2421,6 +2421,31 @@ int evfd_getfd(EvFD* evfd, int* timer_fd) {
         if(timer_fd)*timer_fd = -1;
         return evfd -> fd[0];
     }
+}
+
+bool evfd_seek(EvFD* evfd, int seek_type, off_t pos){
+    tassert(!evfd -> destroy && evfd -> type == EVFD_AIO && evfd -> task_based);
+
+    switch (seek_type){
+        case SEEK_CUR:
+            evfd -> u.task.offset += pos;
+        break;
+
+        case SEEK_END:
+            // Note: seek from end requires fstat which is not async
+            errno = ENOTSUP;
+            return false;
+            // evfd -> u.task.offset = 
+
+        case SEEK_SET:
+            evfd -> u.task.offset = pos;
+        break;
+
+        default:
+            abort();
+    }
+
+    return true;
 }
 
 bool evfd_isAIO(EvFD* evfd) {

@@ -1,4 +1,6 @@
 /**
+ * 注意：使用`vm`模块很危险，不要轻易使用，除非你知道自己在做什么。<br>
+ * 不正确的使用会导致QuickJS崩溃，甚至导致进程崩溃。<br>
  * source: src/global.c
  */
 
@@ -8,10 +10,48 @@ declare module 'vm' {
     export function load(code: Uint8Array): any;
     export function compile(code: string, module_name?: string): Uint8Array;
 
+    export class Module {
+        constructor();
+        get pointer(): number;
+        dump(): Uint8Array;
+    }
+
+    /**
+     * 封包成jspack，需要ModuleRef<br>
+     * 危险：`ArrayBuffer`需要来自于`vm.compileModule`，否则可能会导致崩溃
+     * @param obj 模块路径与内容的映射
+     */
+    export function pack(obj: Record<string, Module>): Uint8Array;
+
+    /**
+     * 解包jspack，返回模块路径与内容（二进制）的映射<br>
+     * 不可以直接`vm.load()`，但可以传递给sandbox让sandbox执行<br>
+     * 危险：不要修改返回的ArrayBuffer，否则传递给Sandbox可能会导致崩溃
+     * @example - 使用sandbox模块
+     * ```ts
+     * const mod = unpack(buf);
+     * const sb = new Sandbox({ loader(name){
+     *     if(name in mod){
+     *         return mod[name];
+     *     } else {
+     *         throw new Error(`Module ${name} not found`);
+     *     }
+     * } });
+     * await sb.eval('(await import("mod1")).foo()');
+     * @param buf 
+     */
+    export function unpack(buf: Uint8Array): Record<string, ArrayBuffer>;
+
     export class Sandbox {
         constructor(opts?: {
-            loader?: (input: string) => string;
-            init: Array<IModule>;
+            /**
+             * 注意：谨慎返回ArrayBuffer，不正确的内容将导致崩溃
+             * @param input 
+             * @returns 
+             */
+            loader?: (this: void, input: string) => string | Module;
+            format?: (this: void, modulename: string) => string
+            // init: Array<IModule>;
         })
     
         /**
@@ -56,6 +96,8 @@ declare module 'vm' {
          * @param args 
          */
         call(fn: Function, thisArg: any, args: Array<any>): any;
+
+        loadModule(code: string, module_name: string): Module;
     
         get context(): typeof globalThis;
     }

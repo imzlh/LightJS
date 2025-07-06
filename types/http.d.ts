@@ -157,9 +157,10 @@ declare module 'http' {
          */
         header(key: string, value: string): this;
 
-        end: Promise<void>;
-        request: Response;
+        readonly end: Promise<void>;
+        // readonly state: "WAITING" | "WAITING_BODY" | "WAITING_HEADER" | "DONE" | "ERROR";
 
-        headers: Headers;
+        readonly request: Response;
+        readonly headers: Headers;
     }
 }

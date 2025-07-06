@@ -55,10 +55,10 @@ static inline const char* getBlank(int depth) {
     return blank + offset;
 }
 
-static thread_local JSValue global_object[2];
+static const int invisible_object[] = { JS_CLASS_OBJECT, JS_CLASS_MAP };
 
 // forward declaration
-void print_jsvalue(JSContext *ctx, JSValueConst val, int depth, JSValue visited[], FILE* target_fd) ;
+static inline void print_jsvalue(JSContext *ctx, JSValueConst val, JSValueConst prototype_of, int depth, JSValue visited[], FILE* target_fd);
 
 static inline bool check_circular(JSContext *ctx, JSValue val, JSValue visited[], int depth) {
     if(depth == 64) return true; // max depth
@@ -206,7 +206,7 @@ static void print_jspromise(JSContext* ctx, JSValue val, int depth, JSValue visi
 
     if (state != JS_PROMISE_PENDING) {
         JSValue res = JS_PromiseResult(ctx, val);
-        print_jsvalue(ctx, res, depth + 1, visited, target_fd);
+        print_jsvalue(ctx, res, JS_UNDEFINED, depth + 1, visited, target_fd);
         JS_FreeValue(ctx, res);
     }
 }
@@ -247,10 +247,8 @@ static void print_jsbuffer(JSContext* ctx, JSValue val, int depth, FILE* target_
     }
 }
 
-/**
- * 打印 JSValue 值
- */
-void print_jsvalue(JSContext *ctx, JSValueConst val, int depth, JSValue visited[], FILE* target_fd) {
+// print JSValue like node.js/deno
+static void print_jsvalue(JSContext *ctx, JSValueConst val, JSValueConst prototype_of, int depth, JSValue visited[], FILE* target_fd) {
     if(depth == 64){        // max depth
         fputs(ANSI_RED "..." ANSI_RESET, target_fd);
         return;
@@ -347,7 +345,7 @@ main:
             goto end;
         }
 
-        if(depth >= MAX_DEPTH || length > MAX_OBJECT_PROP_LEN){
+        if(depth >= MAX_DEPTH){
             fprintf(target_fd, ANSI_RED "ArrayLike(%ld)" ANSI_RESET, length); // 保留格式化输出
             goto end;
         }
@@ -366,10 +364,15 @@ main:
                 fprintf(target_fd, "\n%s", indent);
             if(i != 0) fprintf(target_fd, ", ");
             JSValue element = JS_GetPropertyUint32(ctx, val, i);
-            print_jsvalue(ctx, element, depth + 1, visited, target_fd);
+            print_jsvalue(ctx, element, JS_UNDEFINED, depth + 1, visited, target_fd);
             JS_FreeValue(ctx, element);
+
+            if(i == MAX_OBJECT_PROP_LEN){
+                fprintf(target_fd, "\n%s...", indent);
+                break;
+            }
         }
-        if(length > 8) printf("\n%s", getBlank(depth +1));
+        if(wrap_display) printf("\n%s", getBlank(depth) +1);
         fputs(ANSI_GREEN " ]" ANSI_RESET, target_fd);
 
     end:
@@ -456,6 +459,7 @@ obj_restart:
         fputs(ANSI_GREEN " { " ANSI_RESET, target_fd);
         const char* indent = getBlank(depth + 1);
 
+        JSValue getter_this = JS_IsUndefined(prototype_of) ? val : prototype_of;
         for (int i = 0; i < len; i++) {
             JSPropertyDescriptor desc;
             if (-1 == JS_GetOwnProperty(ctx, &desc, val, props[i].atom)) {
@@ -482,19 +486,19 @@ obj_restart:
                 }
                 if(!JS_IsUndefined(desc.getter)){
                     fprintf(target_fd, ANSI_GREEN "get" ANSI_RESET);
-                    JSValue getres = JS_Call(ctx, desc.getter, val, 0, NULL);
+                    JSValue getres = JS_Call(ctx, desc.getter, getter_this, 0, NULL);
 
                     if(JS_IsException(getres)){
                         JS_ResetUncatchableError(ctx);
                     }else{
                         fprintf(target_fd, "() => ");
-                        print_jsvalue(ctx, getres, depth + 1, visited, target_fd);
+                        print_jsvalue(ctx, getres, JS_UNDEFINED, depth + 1, visited, target_fd);
                         JS_FreeValue(ctx, getres);
                     }
                     JS_FreeValue(ctx, desc.getter);
                 }
             }else{
-                print_jsvalue(ctx, desc.value, depth + 1, visited, target_fd);
+                print_jsvalue(ctx, desc.value, JS_UNDEFINED, depth + 1, visited, target_fd);
                 JS_FreeValue(ctx, desc.value);
             }
             
@@ -508,18 +512,19 @@ obj_restart:
         JSValue proto = JS_GetPrototype(ctx, val);
         // Not globalThis.Object and globalThis.Map
         if(!JS_IsUndefined(proto) && !JS_IsNull(proto) && !JS_IsException(proto)){
-            for(int i = 0; i < countof(global_object); i++){
-                if(JS_IsSameValue(ctx, proto, global_object[i])){
+            for(int i = 0; i < countof(invisible_object); i++){
+                if(JS_GetClassID(proto) == invisible_object[i]){
                     goto skip_proto;
                 }
             }
 
             fprintf(target_fd, ",\n%s" ANSI_MAGENTA ANSI_BOLD "__proto__" ANSI_RESET ": ", indent);
-            print_jsvalue(ctx, proto, depth + 1, visited, target_fd);
+            print_jsvalue(ctx, proto, val, depth + 1, visited, target_fd);
         }
-        JS_FreeValue(ctx, proto);
 
 skip_proto:
+        JS_FreeValue(ctx, proto);
+        
         if(wrap_display) {
             fprintf(target_fd, "\n%s", indent + 4);
         } else {
@@ -549,7 +554,7 @@ static inline void printval_internal(JSContext *ctx, int argc, JSValueConst *arg
     }
     for(int i = 0; i < argc; i++){
         JSValue val = argv[i];    
-        print_jsvalue(ctx, val, 0, visited, target_fd);
+        print_jsvalue(ctx, val, JS_UNDEFINED, 0, visited, target_fd);
         if(JS_IsObject(val)) fputc(' ', target_fd);
         if(wrap) fputc('\n', target_fd);
         else fputc(' ', target_fd);
@@ -559,7 +564,7 @@ static inline void printval_internal(JSContext *ctx, int argc, JSValueConst *arg
 
 void js_dump(JSContext *ctx, JSValueConst val, FILE* target_fd){
     static JSValue visited[64];
-    print_jsvalue(ctx, val, 0, visited, target_fd);
+    print_jsvalue(ctx, val, JS_UNDEFINED, 0, visited, target_fd);
 }
 
 // console.log 实现
@@ -596,7 +601,7 @@ static JSValue js_console_debug(JSContext *ctx, JSValueConst this_val, int argc,
 // console.assert 实现
 static JSValue js_console_assert(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(argc < 2){
-        return LJS_Throw(ctx, "Assertion failed: at least 2 arguments required, but only %d present", 
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Assertion failed: at least 2 arguments required, but only %d present", 
                 "console.assert(condition: any, ...)"
             , argc);
     }
@@ -639,14 +644,5 @@ bool LJS_init_console(JSContext *ctx) {
     JS_DefinePropertyValueStr(ctx, global, "console", console, JS_PROP_C_W_E);
     JS_FreeValue(ctx, global);
 
-    // cache global object that should hide its prototype chain
-    JSValue go = JS_GetGlobalObject(ctx);
-    global_object[0] = JS_GetProperty(ctx, go, JS_ATOM_Object);
-    global_object[1] = JS_GetProperty(ctx, go, JS_ATOM_Map);
-    JS_FreeValue(ctx, go);
-    // Note: will never freed until ctx released
-    for (int i = 0; i < countof(global_object); i++) {
-        JS_FreeValue(ctx, global_object[i]);
-    }
     return true;
 }
