@@ -246,7 +246,7 @@ error:
     js_free(ctx, stream);
 
 finally:
-    return stream -> poll_promise -> promise;
+    return js_get_promise(stream -> poll_promise);
 }
 
 static JSValue stream_write(JSContext* ctx, void* ptr, JSValueConst data){
@@ -256,7 +256,7 @@ static JSValue stream_write(JSContext* ctx, void* ptr, JSValueConst data){
     if(stream -> write_promise) abort();  // pipe should not be written again before previous write is resolved
     stream -> write_promise = js_promise(ctx);
 
-    return stream -> write_promise -> promise;
+    return js_get_promise(stream -> write_promise);
 }
 
 static JSValue stream_close(JSContext* ctx, void* ptr, JSValueConst data){

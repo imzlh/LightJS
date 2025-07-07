@@ -139,7 +139,7 @@ var content = new Sandbox();
  * @param {string} data 
  */
 function writeToStdout(data){
-    const d = encodeStr(data);
+    const d = encodeStr(String(data));
     stdout.write(d);
 }
 
@@ -649,8 +649,9 @@ function control_c() {
     //     _exit(0);
     // } else {
     //     writeToStdout("\n(Press Ctrl-C again to quit)\n");
-    writeToStdout("^C\n");
-        readline_print_prompt();
+    writeToStdout(colors.red + " ^C" + colors.none + "\n");
+    reset();
+    readline_print_prompt();
     // }
 }
 
@@ -1675,6 +1676,7 @@ function help() {
         ".light  " + sel(styles == themes.light) + "select light color theme\n" +
         ".clear   clear the terminal\n" +
         ".load    load source code from a file\n" +
+        ".import  async import a module and save it globally\n" +
         ".quit    exit\n");
 }
 
@@ -1687,7 +1689,11 @@ function load(s) {
         s += ".js";
     try {
         const data = read(s, true);
-        content.eval(data);
+        content.eval(data, {
+            main: true,
+            url: `file://${s}`,
+            name: s
+        });
     } catch (e) {
         writeToStdout(`${e}\n`);
     }
@@ -1727,6 +1733,10 @@ var directives = Object.setPrototypeOf(/** @type {Record<string, (p: string) => 
     "light": () => { styles = themes.light; },
     "clear": () => { writeToStdout("\x1b[H\x1b[J") },
     "quit": () => { _exit(0); },
+    "import": (s) => { 
+        content.eval(`globalThis['${s.split('/').at(-1)}'] = await import('${s}');\n`, {})
+            .catch((/** @type {any} */ e) => { print_eval_error(e); })
+    }
 }), null);
 
 function cmd_readline_start() {
@@ -1766,6 +1776,7 @@ function handle_cmd(expr) {
         return false;
     }
     mexpr = "";
+    eval_and_print(expr);
 
     return true;
 }
@@ -1796,7 +1807,6 @@ function eval_and_print(expr) {
  * @param {any} result 
  */
 function print_eval_result(result) {
-    result = result.value;
     eval_time = Date.now() - eval_start_time;
     print(result);
     /* set the last result */
@@ -2146,9 +2156,8 @@ load_config();
 load_history();
 termInit();
 cmd_readline_start();
-(async function(){
-    while(true){
-        const data = await stdin.read(1);
-        data && handle_byte(data[0]);
-    }
-})();
+
+while(true){
+    const data = await stdin.read();
+    data && data.forEach(c => handle_byte(c));
+}

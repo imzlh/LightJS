@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#pragma once
+
 // ignore non-string values and return NULL
 static inline const char* LJS_ToCString(JSContext *ctx, JSValueConst val, size_t* psize){
     if(!JS_IsString(val)) return NULL;  // different from JS_ToCString

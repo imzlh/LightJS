@@ -12,7 +12,7 @@ type IAddr = {
 type CloseFunction = () => void;
 
 declare module 'socket'{
-    export const bind: (addr: string, handler: (client: U8Pipe, addr: IAddr) => void, settings?: {
+    export const bind: (addr: string, handler: (client: IOPipe, addr: IAddr) => void, settings?: {
         reuseaddr?: boolean,
         backlog?: number,
         bufferSize?: number,
@@ -27,7 +27,7 @@ declare module 'socket'{
         bufferSize?: number,
         timeout?: number,
         // nodelay?: boolean
-    }) => U8Pipe;
+    }) => IOPipe;
 
     export const upgradeTLS: (client: U8Pipe, settings: {
         server?: boolean,

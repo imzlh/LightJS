@@ -184,7 +184,7 @@ static JSClassDef js_re_class_def = {
 };
 
 static JSValue js_process_exit(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
-    uint32_t exit_code = 0;
+    uint32_t exit_code = 0; 
     if (argc == 1) {
         if(-1 == JS_ToUint32(ctx, &exit_code, argv[0]) || exit_code > 255){
             return JS_ThrowTypeError(ctx, "invalid exit code");
@@ -229,7 +229,7 @@ static void js_signal_handler(int sig){
                     if(JS_IsInternalError(data -> ctx, err))
                         exiting = true;
                     else
-                        js_dump(data -> ctx, err, stderr);
+                        js_dump(data -> ctx, err, pstderr);
                     JS_FreeValue(data -> ctx, err);
                 }else{
                     JS_FreeValue(data -> ctx, ret);
@@ -562,7 +562,7 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
         evfd_pipeTo(pstdin, evfd, NULL, NULL, NULL, NULL);
         evfd_pipeTo(evfd, pstdout, NULL, NULL, NULL, NULL);
     }else{
-        JSValue pipe = LJS_NewFDPipe(ctx, master_fd, PIPE_READ | PIPE_WRITE, PIPE_BUF, &evfd);
+        JSValue pipe = LJS_NewFDPipe(ctx, master_fd, PIPE_READ | PIPE_WRITE, PIPE_BUF, true, &evfd);
         JS_SetPropertyStr(ctx, class_obj, "pipe", pipe);
     }
     obj -> evfd = evfd;
@@ -641,18 +641,6 @@ __attribute__((constructor)) static void init_signal_system(void) {
     sigaction(SIGCHLD, &sa_child, NULL);
 }
 
-void LJS_destroy_process(JSContext* ctx){
-    struct list_head *cur, *tmp;
-    list_for_each_safe(cur, tmp, &signal_list){
-        struct signal_data* obj = list_entry(cur, struct signal_data, list);
-        if(obj -> ctx == ctx){
-            JS_FreeValue(ctx, obj -> handler);
-            list_del(&obj -> list);
-            js_free(ctx, obj);
-        }
-    }
-}
-
 static const JSCFunctionListEntry js_process_proto_funcs[] = {
     JS_CFUNC_DEF("kill", 1, js_process_kill),
     JS_CGETSET_DEF("code", js_process_get_return_code, NULL),
@@ -695,7 +683,7 @@ static JSValue js_get_sysinfo(JSContext* ctx, JSValueConst this_val, int argc, J
     if(sysinfo(&info) == -1){
         return JS_NULL;
     }
-    
+
     JSValue obj = JS_NewObject(ctx);
     JSValue memory_obj = JS_NewObject(ctx);
     JSValue cpu_obj = JS_NewObject(ctx);
@@ -740,6 +728,7 @@ static JSValue js_get_sysinfo(JSContext* ctx, JSValueConst this_val, int argc, J
 }
 
 EvFD *pstdin, *pstdout, *pstderr;
+static JSValue stdin_p, stdout_p, stderr_p;
 static int js_process_init(JSContext* ctx, JSModuleDef* m){
     JS_SetModuleExport(ctx, m, "self", js_get_self(ctx));
     JS_SetModuleExport(ctx, m, "exit", JS_NewCFunction(ctx, js_process_exit, "exit", 1));
@@ -770,12 +759,10 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
 
     // stdin, stdout, stderr
     if(LJS_IsMainContext(ctx)){
-        JSValue stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, PIPE_BUF, &pstdin),
-            stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, PIPE_BUF, &pstdout),
-            stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, PIPE_BUF, &pstderr);
-        JS_SetModuleExport(ctx, m, "stdin", stdin_p);
-        JS_SetModuleExport(ctx, m, "stdout", stdout_p);
-        JS_SetModuleExport(ctx, m, "stderr", stderr_p);
+        if(pstdin) JS_SetModuleExport(ctx, m, "stdin", stdin_p);
+        if(pstdout) JS_SetModuleExport(ctx, m, "stdout", stdout_p);
+        if(pstderr) JS_SetModuleExport(ctx, m, "stderr", stderr_p);
+        stdin_p = stdout_p = stderr_p = JS_UNDEFINED;
     }
 
     // sleep
@@ -826,6 +813,13 @@ bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv
     JS_AddModuleExport(ctx, m, "stdout");
     JS_AddModuleExport(ctx, m, "stderr");
 
+    // init stdpipe
+    if(LJS_IsMainContext(ctx)){
+        stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, PIPE_BUF, true, &pstdin);
+        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, PIPE_BUF, true, &pstdout);
+        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, PIPE_BUF, true, &pstderr);
+    }
+
     // vm
     JS_AddModuleExport(ctx, m, "sysinfo");
 
@@ -833,4 +827,20 @@ bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv
     JS_AddModuleExport(ctx, m, "sleep");
 
     return true;
+}
+
+void __js_destroy_process(JSContext* ctx){
+    struct list_head *cur, *tmp;
+    list_for_each_safe(cur, tmp, &signal_list){
+        struct signal_data* obj = list_entry(cur, struct signal_data, list);
+        if(obj -> ctx == ctx){
+            JS_FreeValue(ctx, obj -> handler);
+            list_del(&obj -> list);
+            js_free(ctx, obj);
+        }
+    }
+
+    if(!JS_IsUndefined(stdin_p)) JS_FreeValue(ctx, stdin_p);
+    if(!JS_IsUndefined(stdout_p)) JS_FreeValue(ctx, stdout_p);
+    if(!JS_IsUndefined(stderr_p)) JS_FreeValue(ctx, stderr_p);
 }

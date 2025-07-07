@@ -5,6 +5,9 @@
 
 #include <sys/inotify.h>
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdarg.h>
 
 // once include
 #pragma once
@@ -156,12 +159,6 @@ struct LHTTPData {
     js_free(ctx, header -> value); \
     js_free(ctx, header);
 
-#define DEL_HEADER2(header) \
-    list_del(&header -> link); \
-    free2(header -> key); \
-    free2(header -> value); \
-    free2(header);
-
 typedef enum{
     EV_REMOVE_READ  = 0b001,
     EV_REMOVE_WRITE = 0b010,
@@ -193,9 +190,6 @@ typedef struct {
     // in worker thread, define app
     struct Worker_Props* worker;
     struct list_head link;
-    
-    // sandbox(Apps)
-    struct list_head sandbox;
 
     char* script_path;
     char** argv;
@@ -207,6 +201,7 @@ typedef struct {
 
     // thread
     pthread_t thread;
+    atomic_bool busy;
 } App;
 
 typedef struct SignalEvent {
@@ -268,7 +263,7 @@ typedef void (*DnsErrorCallback)(const char* error_msg, void* user_data);
 void js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data);
 
 // console
-void js_dump(JSContext *ctx, JSValueConst val, FILE* target_fd);
+void js_dump(JSContext *ctx, JSValueConst val, EvFD* target_fd);
 void js_handle_promise_reject(
     JSContext *ctx, JSValue promise,
     JSValue reason,
@@ -284,13 +279,13 @@ bool LJS_init_pipe(JSContext *ctx);
 bool LJS_init_http(JSContext *ctx);
 bool LJS_init_module(JSContext *ctx);
 void LJS_init_runtime(JSRuntime* rt);
-bool LJS_init_stdio(JSContext *ctx);
+bool LJS_init_fs(JSContext *ctx);
 bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv);
 bool LJS_init_socket(JSContext* ctx);
 void LJS_init_timer(JSContext* ctx);
 
 // Core I/O Pipe
-JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, EvFD** ref);
+JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, bool iopipe, EvFD** ref);
 JSValue LJS_NewU8Pipe(JSContext *ctx, uint32_t flag, uint32_t buf_size, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
 JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
 EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj);
@@ -325,6 +320,7 @@ bool evfd_consume(EvFD* evfd, bool consume_read, bool consume_write);
 bool evfd_isAIO(EvFD* evfd);
 void* evfd_get_opaque(EvFD* evfd);
 void evfd_set_opaque(EvFD* evfd, void* opaque);
+bool evfd_syncexec(EvFD* pipe);
 #ifdef LJS_MBEDTLS
 bool evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, bool is_client, int preset, EvSSLHandshakeCallback handshake_cb, void* user_data);
 void evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
@@ -369,8 +365,8 @@ JSValue LJS_NewWebSocket(JSContext *ctx, EvFD* fd, bool enable_mask);
 uint8_t *LJS_tryGetJSFile(uint32_t *pbuf_len, char **filename);
 
 // threads
-void LJS_destroy_app(App* app);
-App* LJS_create_app(
+void LJS_DestroyApp(App* app);
+App* LJS_NewApp(
     JSRuntime* rt,
     uint32_t argc, char** argv,
     bool worker, bool module, char* script_path,
@@ -392,7 +388,7 @@ bool LJS_init_xml(JSContext* ctx);
 bool LJS_init_crypto(JSContext *ctx);
 
 // finalizer
-void LJS_destroy_process(JSContext* ctx);
+void __js_destroy_process(JSContext* ctx);
 
 // --------------- HELPER FUNCTIONS ------------------------
 void free_js_malloc(JSRuntime *rt, void *opaque, void *ptr);
@@ -401,19 +397,7 @@ void base64_decode(const char *input, size_t len, uint8_t *output, size_t *outpu
 void base64_decode(const char *input, size_t len, uint8_t *output, size_t *output_len);
 void base64_encode(const uint8_t *input, size_t len, char *output);
 
-typedef struct promise{
-    JSContext* ctx;
-    JSValue resolve;
-    JSValue reject;
-    JSValue promise;
-
-#ifdef LJS_DEBUG
-    const char* created;
-    const char* resolved;
-
-    struct list_head link;
-#endif
-} Promise;
+typedef struct promise Promise;
 
 Promise* __js_promise(JSContext *ctx, const char* __debug__);
 void __js_resolve(struct promise* proxy, JSValue value, const char* __debug__);
@@ -426,6 +410,8 @@ void __js_reject2(struct promise* proxy, JSValue value, const char* __debug__);
 #define js_resolve(proxy, value) __js_resolve(proxy, value, __FILE__ ":" TOSTRING((__LINE__)))
 #define js_reject(proxy, msg) __js_reject(proxy, msg, __FILE__ ":" TOSTRING(__LINE__))
 #define js_reject2(proxy, value) __js_reject2(proxy, value, __FILE__ ":" STRINGIFY(__LINE__))
+JSValue js_get_promise(Promise* promise);
+JSContext* js_get_promise_context(struct promise* proxy);
 
 JSValue JS_CallSafe(JSContext *ctx, JSValueConst func_obj, JSValueConst this_val, int argc, JSValueConst *argv, bool* is_exception);
 #define JS_CallOrHandle(ctx, func_obj, this_val, argc, argv) if(!JS_IsUninitialized(JS_CallSafe(ctx, func_obj, this_val, argc, argv, NULL))
@@ -445,3 +431,50 @@ static inline void* strndup2(const char* str, size_t n){
 static inline void* strdup2(const char* str){
     return strndup2(str, strlen(str));
 }
+
+#ifdef __GNUC__
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#endif
+
+#ifndef MAX_OUTPUT_LEN
+#define MAX_OUTPUT_LEN 1024
+#endif
+
+static void __write_cb(EvFD* evfd, bool success, void* opaque){
+    free2(opaque);
+}
+
+__attribute__((format(printf, 2, 3)))
+static inline int __fprintf(EvFD* fd, const char* fmt, ...){
+    char* buf = malloc2(MAX_OUTPUT_LEN);
+    if(!buf) return -1;
+    va_list args;
+    va_start(args, fmt);
+    int olen = snprintf(buf, MAX_OUTPUT_LEN, fmt, args);
+    va_end(args);
+
+    if(olen == -1){
+        free(buf);
+        return -1;
+    }
+    
+    evfd_write(fd, (uint8_t*)buf, olen, __write_cb, buf);
+    return olen;
+}
+
+static inline int __fputs(const char* str, EvFD* fd){
+    char* str2 = strdup2(str);
+    if(!str2) return -1;
+    evfd_write(fd, (uint8_t*)str2, strlen(str), __write_cb, str2);
+    return 0;
+}
+
+static inline int __fputc(char chr, EvFD* fd){
+    uint8_t* str = (void*)strndup2((char*)&chr, 1);
+    evfd_write(fd, str, 1, __write_cb, str);
+    return 0;
+}
+
+#ifdef __GNUC__
+#pragma GCC diagnostic error "-Wformat-nonliteral"
+#endif

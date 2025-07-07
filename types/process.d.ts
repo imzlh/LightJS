@@ -16,7 +16,7 @@ declare module 'process'{
         readonly alive: boolean;
         readonly pid: number;
         readonly code: number;
-        readonly pipe: P extends true? undefined : U8Pipe; // undefined if interitPipe
+        readonly pipe: P extends true? undefined : IOPipe; // undefined if interitPipe
 
         readonly onclose: Promise<void>;
     }
@@ -122,9 +122,9 @@ declare module 'process'{
         readonly process: number
     }
 
-    export const stdin: U8Pipe;
-    export const stdout: U8Pipe;
-    export const stderr: U8Pipe;
+    export const stdin: IOPipe;
+    export const stdout: IOPipe;
+    export const stderr: IOPipe;
 
     export function sleep(ms: number): void;
 }

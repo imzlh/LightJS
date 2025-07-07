@@ -43,18 +43,18 @@ static inline void run_jobs(){
         int res = 1;
         JSRuntime* rt = JS_GetRuntime(app -> ctx);
         JSContext* ectx;
-        while(res){
-            res = JS_ExecutePendingJob(rt, &ectx);
+        while(likely(res = JS_ExecutePendingJob(rt, &ectx))){
+            jobs ++;
             if(res < 0){    // error
                 JSValue exception = JS_GetException(ectx);
                 if(unlikely(JS_IsInternalError(app -> ctx, exception))){
                     exiting = true;
-                }else{
-                    js_dump(ectx, exception, stderr);
                 }
+                // tracked by promise_tracker
+                // }else{
+                //     js_dump(ectx, exception, stderr);
+                // }
                 JS_FreeValue(ectx, exception);
-            } else if(res > 0) {
-                jobs++;
             }
         }
 #ifdef LJS_DEBUG
@@ -80,10 +80,13 @@ static bool check_promise_resolved(void* opaque){
             JS_ToInt32(app -> ctx, &exit_code, ecode);
             JS_FreeValue(app -> ctx, ecode);
             exiting = true;
-        }else{
-            js_dump(app -> ctx, result, stderr);
-            JS_FreeValue(app -> ctx, result);
         }
+        // Note: promise_tracker already reported.
+        // }else{
+        //     js_dump(app -> ctx, result, stderr);
+        //     JS_FreeValue(app -> ctx, result);
+        // }
+        JS_FreeValue(app -> ctx, result);
         goto ret_true;
     }else{  // TIMING
         run_jobs();
@@ -341,7 +344,7 @@ not_bundled:
     // rt init
     LJS_init_runtime(runtime);
 #ifdef LJS_DEBUG
-    JS_SetDumpFlags(runtime, JS_DUMP_LEAKS | JS_DUMP_PROMISE | JS_DUMP_OBJECTS | JS_DUMP_SHAPES);
+    JS_SetDumpFlags(runtime, JS_DUMP_LEAKS | JS_DUMP_OBJECTS | JS_DUMP_SHAPES);
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 #endif
@@ -366,7 +369,7 @@ not_bundled:
     }
 #endif
     
-    app = LJS_create_app(runtime, 
+    app = LJS_NewApp(runtime, 
         argc == optind ? 0 : argc - optind -1, argc == optind ? NULL : argv + optind +1, 
         false, true, script_path, NULL
     );
@@ -374,8 +377,8 @@ not_bundled:
         printf("Failed to create app.\nMake sure you have enough memory.\n");
         return 1;
     }
-    LJS_init_context(app);
     evcore_init();  // epoll init
+    LJS_init_context(app);
 
 #ifdef __LJSC
     packed_files = js_unpack(app -> ctx, jspack_data, strlen((char*)jspack_data), &packed_len);
@@ -393,7 +396,7 @@ not_bundled:
 
         JSValue buf = JS_ReadObject(app -> ctx, code_repl, sizeof(code_repl), JS_READ_OBJ_BYTECODE);
         JSValue val = JS_EvalFunction(app -> ctx, buf);
-        if(JS_IsException(val)) js_dump(app -> ctx, JS_GetException(app -> ctx), stderr);
+        if(JS_IsException(val)) js_dump(app -> ctx, JS_GetException(app -> ctx), pstderr);
 
         goto run_evloop;
     }
@@ -433,7 +436,8 @@ not_bundled:
         JSValue ret_val = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
         free(buf);
         if(JS_IsException(ret_val)){
-            js_dump(app -> ctx, JS_GetException(app -> ctx), stderr);
+            js_dump(app -> ctx, JS_GetException(app -> ctx), pstderr);
+            evfd_syncexec(pstderr);
             printf("The script has syntax errors.\n");
             return 1;
         }else{
@@ -450,7 +454,8 @@ not_bundled:
     if(JS_IsException(code)){
 print_error:
         JSValue exception = JS_GetException(app -> ctx);
-        js_dump(app -> ctx, exception, stderr);
+        js_dump(app -> ctx, exception, pstderr);
+        evfd_syncexec(pstderr);
         JS_FreeValue(app -> ctx, exception);
         exit_code = 1;
         goto finalize;
@@ -476,10 +481,9 @@ finalize:
     evcore_destroy();
     run_jobs();
     JS_FreeValue(app -> ctx, ret_val);
-    JS_RunGC(runtime);
     __js_dump_not_resolved_promises();
     
-    LJS_destroy_app(app);
+    LJS_DestroyApp(app);
     JS_FreeRuntime(runtime);
 #ifndef __LJSC
     if(!eval_code) free(script_path);

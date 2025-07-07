@@ -418,6 +418,7 @@ static inline void worker_exit(App* app, int code, const char* message){
     worker_free_app(app);
     evcore_destroy();
     JS_FreeRuntime(rt);
+    app -> busy = false;
 
     // exit thread
     pthread_exit((void*)error);
@@ -450,14 +451,14 @@ static inline void push_message(App* from, App* to, struct list_head* list, JSVa
 }
 
 
-App* LJS_create_app(
+App* LJS_NewApp(
     JSRuntime* rt,
     uint32_t argc, char** argv,
     bool worker, bool module, char* script_path,
     App* parent
 ){
     if(!script_path) return NULL;
-    JSContext* ctx = JS_NewContextRaw(rt);
+    JSContext* ctx = JS_NewContext(rt);
     if(!ctx) return NULL;
     App* app = (App*)malloc(sizeof(App));
     app -> ctx = ctx;
@@ -468,6 +469,7 @@ App* LJS_create_app(
     app -> module_loader = JS_UNDEFINED;
     app -> module_format = JS_UNDEFINED;
     app -> worker = NULL;
+    app -> busy = false;
     app -> thread = pthread_self();
 
     init_list_head(&app -> workers);
@@ -511,7 +513,7 @@ App* LJS_create_app(
     return app;
 
 failed:
-    LJS_destroy_app(app);
+    LJS_DestroyApp(app);
     return NULL;
 }
 
@@ -523,10 +525,10 @@ static inline void msglist_clear(JSContext* ctx, struct list_head* list){
     }
 }
 
-void LJS_destroy_app(App* app) {
+void LJS_DestroyApp(App* app) {
     if (!app) return;
 
-    if (app -> worker) {
+     if (app -> worker) {
         struct Worker_Props* wel = app -> worker;
         // 关闭eventfd文件描述符
         evfd_close2(wel -> efd_worker2main.worker);
@@ -579,7 +581,7 @@ void LJS_destroy_app(App* app) {
 
     if (app -> ctx) {
         // destroy app
-        LJS_destroy_process(app -> ctx);
+        __js_destroy_process(app -> ctx);
 
         JS_FreeContext(app -> ctx);
     }
@@ -598,7 +600,7 @@ void LJS_destroy_app(App* app) {
 }
 
 static inline void worker_free_app(App* app){
-    LJS_destroy_app(app);
+    LJS_DestroyApp(app);
 
     free(app -> script_path);
     if (app -> argv) {
@@ -722,8 +724,36 @@ static void main_close_callback(EvFD* fd, void* user_data){
     evfd_close(app -> worker -> efd_main2worker.main);
 }
 
+static void worker_run_jobs(App* app){
+    int jobs = 0;
+    JSRuntime* rt = JS_GetRuntime(app -> ctx);
+
+    do{
+        jobs = js_run_promise_jobs();  // thread-local jobs
+
+        int res = 1;
+        JSContext* ectx;
+        while(likely(res = JS_ExecutePendingJob(rt, &ectx))){
+            jobs ++;
+            if(res < 0){    // error
+                JSValue exception = JS_GetException(ectx);
+                if(unlikely(JS_IsInternalError(ectx, exception))){
+                    app -> worker -> exiting = true;
+                }
+                JS_FreeValue(ectx, exception);
+            }
+        }
+#ifdef LJS_DEBUG
+        printf("run jobs: %d\n", jobs);
+#endif
+    }while(jobs);
+}
+
 static bool worker_check_abort(void* opaque){
     App* app = (App*)opaque;
+    app -> busy = true;
+    worker_run_jobs(app);
+    app -> busy = false;
     if(app -> worker -> exiting) return true;
     return false;
 }
@@ -763,7 +793,7 @@ static void worker_main_loop(App* app, JSValue func){
     JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
     if(JS_IsException(ret)){
         JSValue error = JS_GetException(ctx);
-        js_dump(ctx, error, stderr);
+        js_dump(ctx, error, pstderr);
 
         const char* message = JS_ToCString(ctx, error);
         char* space = malloc(strlen(message) + 39);
@@ -797,41 +827,25 @@ void LJS_init_runtime(JSRuntime* rt){
 //     return false;
 // }
 
-void LJS_init_context(App* app){
-    JSContext* ctx = app -> ctx;
-
-    // 基础JS语法
-    JS_AddIntrinsicBaseObjects(ctx);
-    JS_AddIntrinsicDate(ctx);
-    JS_AddIntrinsicEval(ctx);
-    JS_AddIntrinsicRegExp(ctx);
-    JS_AddIntrinsicJSON(ctx);
-    JS_AddIntrinsicProxy(ctx);
-    JS_AddIntrinsicMapSet(ctx);
-    JS_AddIntrinsicTypedArrays(ctx);
-    JS_AddIntrinsicPromise(ctx);
-    JS_AddIntrinsicBigInt(ctx);
-    JS_AddIntrinsicWeakRef(ctx);
-    JS_AddPerformance(ctx);
+void LJS_init_context(App* app) {
+    JSContext* ctx = app->ctx;
+    LJS_init_pipe(ctx);
+    LJS_init_socket(ctx);
+    LJS_init_process(ctx, app->argc, app->argv);
     LJS_init_thread(ctx);
-    if(!app -> worker){
-        LJS_init_pipe(ctx);
-        LJS_init_socket(ctx);
-        LJS_init_process(ctx, app -> argc, app -> argv);
 
-        LJS_init_stdio(ctx);
-        LJS_init_http(ctx);
+    LJS_init_fs(ctx);
+    LJS_init_http(ctx);
 
-        LJS_init_compress(ctx);
-        LJS_init_console(ctx);
-        LJS_init_global_helper(ctx);
-        LJS_init_module(ctx);
-        LJS_init_timer(ctx);    // delay
-        LJS_init_ffi(ctx);
-        LJS_init_vm(ctx);
-        LJS_init_xml(ctx);
-        LJS_init_crypto(ctx);
-    }
+    LJS_init_compress(ctx);
+    LJS_init_console(ctx);
+    LJS_init_global_helper(ctx);
+    LJS_init_module(ctx);
+    LJS_init_timer(ctx);    // delay
+    LJS_init_ffi(ctx);
+    LJS_init_vm(ctx);
+    LJS_init_xml(ctx);
+    LJS_init_crypto(ctx);
 }
 
 void js_set_import_meta(JSContext* ctx, JSValue func, const char* modname, bool main){
@@ -865,6 +879,7 @@ static void* worker_entry(void* arg){
     uint8_t flag = JS_EVAL_FLAG_COMPILE_ONLY;
     if(app -> module) flag |= JS_EVAL_TYPE_MODULE;
     else flag |= JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC;
+    app -> busy = true;
     JSValue func = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, flag);
     free(buf);
 
@@ -889,7 +904,7 @@ App* LJS_NewWorker(App* parent, char* script_path){
     pthread_t thread;
 
     JSRuntime* rt = JS_NewRuntime();
-    App* app = LJS_create_app(
+    App* app = LJS_NewApp(
         rt, 
         parent -> argc, parent -> argv,
         true, false, script_path, parent
@@ -971,12 +986,18 @@ static JSValue js_worker_get_ondestroy(JSContext* ctx, JSValueConst this_val){
     return JS_DupValue(ctx, app -> worker -> destroy_cb);
 }
 
+static JSValue js_worker_get_busy(JSContext* ctx, JSValueConst this_val){
+    GET_APP(app);
+
+    return JS_NewBool(ctx, app -> busy);
+}
 
 static JSCFunctionListEntry js_worker_props[] = {
     JS_CGETSET_DEF("onmessage", js_worker_get_onmessage, js_worker_set_onmessage),
     JS_CGETSET_DEF("ondestroy", js_worker_get_ondestroy, js_worker_set_ondestroy),
     JS_CFUNC_DEF("terminate", 0, js_worker_close),
     JS_CFUNC_DEF("postMessage", 1, js_worker_send),
+    JS_CGETSET_DEF("busy", js_worker_get_busy, NULL),
     JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Worker", JS_PROP_CONFIGURABLE),
 };
 
@@ -1692,7 +1713,11 @@ static JSValue js_sandbox_eval(JSContext* ctx, JSValueConst this_val, int argc, 
     if(JS_IsException(func)){
         return JS_EXCEPTION;
     }
+    app -> busy = true;
     JSValue ret = JS_EvalFunction(app -> ctx, func);
+    if(JS_IsInternalError(ctx, ret))
+        LJS_DestroyApp(app);
+    app -> busy = false;
     return ret;
 #endif
 }
@@ -1713,7 +1738,11 @@ static JSValue js_sandbox_call(JSContext* ctx, JSValueConst this_val, int argc, 
     JSValue* args = argc >= 3 ? argv + 2 : NULL;
 
     JS_UpdateStackTop(JS_GetRuntime(app -> ctx));
+    app -> busy = true;
     JSValue ret = JS_Call(app -> ctx, func, this_arg, arg_count, args);
+    if(JS_IsInternalError(ctx, ret))
+        LJS_DestroyApp(app);
+    app -> busy = false;
     return ret;
 }
 
@@ -1747,19 +1776,13 @@ fail:
 static JSValue js_sandbox_get_context(JSContext* ctx, JSValueConst this_val){
     App* app = (App*)JS_GetOpaque(this_val, js_sandbox_class_id);
     if(!app) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "this value invalid", NULL);
-    return JS_GetGlobalObject(ctx);
-}
-
-static JSValue sandbox_func_proxy(JSContext* _ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic, JSValue* func_data){
-    JSContext* ctx = JS_VALUE_GET_PTR(func_data[0]);
-    JSValue real_func = func_data[magic];
-    return JS_Call(ctx, real_func, this_val, argc, argv);
+    return JS_GetGlobalObject(app -> ctx);
 }
 
 static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
     JSValue obj = JS_NewObjectClass(ctx, js_sandbox_class_id);
 
-    App* app = LJS_create_app(JS_GetRuntime(ctx), 0, NULL, false, true, "<inmemory>", NULL);
+    App* app = LJS_NewApp(JS_GetRuntime(ctx), 0, NULL, false, true, "<inmemory>", NULL);
     // char* init_apps[32];
     // uint8_t init_apps_len = 0;
     if(argc >= 1 && JS_IsObject(argv[0])){
@@ -1781,23 +1804,13 @@ static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, i
 
         // module loader
         JSValue loader = JS_GetPropertyStr(ctx, argv[0], "loader");
-        if(JS_IsFunction(ctx, loader)){
-            app -> module_loader = JS_NewCFunctionData(
-                app -> ctx, sandbox_func_proxy, 1, 1,
-                1, (JSValue[]){ JS_MKPTR(JS_TAG_INT, app -> ctx), loader }
-            );
-        }
-        JS_FreeValue(ctx, loader);
+        if(JS_IsFunction(ctx, loader))
+            app -> module_loader = loader;
 
         // module format
         JSValue format = JS_GetPropertyStr(ctx, argv[0], "format");
-        if(JS_IsFunction(ctx, format)){
-            app -> module_format = JS_NewCFunctionData(
-                app -> ctx, sandbox_func_proxy, 1, 1,
-                1, (JSValue[]){ JS_MKPTR(JS_TAG_INT, app -> ctx), format }
-            );
-        }
-        JS_FreeValue(ctx, format);
+        if(JS_IsFunction(ctx, format))
+            app -> module_format = format;
     }
     
     LJS_init_context(app);
@@ -1807,8 +1820,13 @@ static JSValue js_sandbox_constructor(JSContext* ctx, JSValueConst new_target, i
 
 static void js_sandbox_finalizer(JSRuntime* rt, JSValue val){
     App* app = (App*)JS_GetOpaque(val, js_sandbox_class_id);
-    if(!app) return;
-    LJS_destroy_app(app);
+    if(app -> busy){
+        // force exit sandbox
+        // then the event would be processed by caller
+        JS_ThrowInternalError(app -> ctx, " ");
+    }else{
+        LJS_DestroyApp(app);
+    }
 }
 
 static JSCFunctionListEntry js_sandbox_funcs[] = {
@@ -1935,7 +1953,7 @@ bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback 
 //     assert(is_error);
 //     JSValue promise = ((struct JSValueProxy*)opaque) -> val;
 //     if(!JS_PromiseIsHandled(ctx, promise)){
-//         fprintf(stderr, "Uncaught (in promise) ");
+//         __fprintf(stderr, "Uncaught (in promise) ");
 //         js_dump(ctx, reason, stderr);
 //     }
 // }
@@ -1947,7 +1965,7 @@ void js_handle_promise_reject(
     JSValue reason,
     bool is_handled, void *opaque
 ){
-    if (!is_handled && !catch_error){
+    if (!is_handled && !catch_error && !JS_IsInternalError(ctx, reason)){
         // force next_tick
         // struct Promise_data* data = (struct Promise_data*)malloc2(sizeof(struct Promise_data));
         // data -> promise = JS_DupValue(ctx, promise);
@@ -1955,8 +1973,8 @@ void js_handle_promise_reject(
         // data -> callback = handle_promise;
         // data -> opaque = LJS_NewJSValueProxy(ctx, promise);
         // list_add_tail(&data -> list, &promise_jobs);
-        fprintf(stderr, "Uncaught (in promise) ");
-        js_dump(ctx, reason, stderr);
+        __fprintf(pstderr, "Uncaught (in promise) ");
+        js_dump(ctx, reason, pstderr);
         // JS_FreeValue(ctx, reason);
     }
 }
@@ -1975,13 +1993,27 @@ JSValue JS_CallSafe(JSContext *ctx, JSValueConst func_obj, JSValueConst this_val
         if(is_exception) *is_exception = false;
     }
     catch_error = false;
-    return ret;
+    return JS_DupValue(ctx, ret);
 }
 
 void* js_malloc_proxy(size_t size, void* opaque){
     JSRuntime* rt = opaque;
     return js_malloc_rt(rt, size);
 }
+
+struct promise{
+    JSContext* ctx;
+    JSValue resolve;
+    JSValue reject;
+    JSValue promise;
+
+#ifdef LJS_DEBUG
+    const char* created;
+    const char* resolved;
+
+    struct list_head link;
+#endif
+};
 
 #ifdef LJS_DEBUG
 static thread_local struct list_head promise_debug_jobs;
@@ -2033,8 +2065,7 @@ static inline void free_promise(struct promise* proxy){
     assert(NULL != proxy -> ctx);   // error: already free
     JS_FreeValue(proxy -> ctx, proxy -> resolve);
     JS_FreeValue(proxy -> ctx, proxy -> reject);
-    // WARN: 此处应该由用户决策，所有权是否转移到JS层？
-    // JS_FreeValue(proxy -> ctx, proxy -> promise);
+    JS_FreeValue(proxy -> ctx, proxy -> promise);
 
 #ifdef LJS_DEBUG
     list_del(&proxy -> link);
@@ -2080,6 +2111,14 @@ void __js_reject2(struct promise* proxy, JSValue value, const char* __debug__){
 #endif
 
     free_promise(proxy);
+}
+
+JSValue js_get_promise(struct promise* proxy){
+    return JS_DupValue(proxy -> ctx, proxy -> promise);
+}
+
+JSContext* js_get_promise_context(struct promise* proxy){
+    return proxy -> ctx;
 }
 
 // memory

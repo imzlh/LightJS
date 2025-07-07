@@ -947,7 +947,7 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
         piped -> size = fstat(fd, &st) == 0 ? st.st_size : -1;
         return pipe;
     }else{
-        return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, PIPE_BUF, NULL);
+        return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, PIPE_BUF, false, NULL);
     }
 
     error:{
@@ -1004,7 +1004,7 @@ static int js_mod_stdio_init(JSContext *ctx, JSModuleDef *m) {
     return 0;
 }
 
-bool LJS_init_stdio(JSContext *ctx){
+bool LJS_init_fs(JSContext *ctx){
     JSModuleDef *m = JS_NewCModule(ctx, "fs", js_mod_stdio_init);
     if (!m) return false;
     JS_AddModuleExportList(ctx, m, js_stdio_funcs, countof(js_stdio_funcs));

@@ -61,6 +61,12 @@
     }\
     STRTRIM(name);
 
+#define DEL_HEADER2(header) \
+    list_del(&header -> link); \
+    free2(header -> key); \
+    free2(header -> value); \
+    free2(header);
+
 // trim the start of a length-specified string
 #define TRIM_START(var2, line, _len) \
     char* var2 = line; \
@@ -1132,13 +1138,13 @@ static void callback_tou8(LHTTPData *data, uint8_t *buffer, uint32_t len, void *
     Promise *promise = userdata;
     if(NULL == buffer){
         if(data -> state == HTTP_ERROR)
-            JS_Call(promise -> ctx, promise -> reject, JS_NewError(promise -> ctx), 0, NULL);
+            js_reject(promise, "Failed to receive data");
         else
-            JS_Call(promise -> ctx, promise -> resolve, JS_NULL, 0, NULL);
+            js_resolve(promise, JS_UNDEFINED);
     }else{
-        JS_Call(promise -> ctx, promise -> resolve, 
-            JS_NewUint8Array(promise -> ctx, buffer, len, free_js_malloc, NULL, false),    
-        0, NULL);
+        js_resolve(promise,
+            JS_NewUint8Array(js_get_promise_context(promise), buffer, len, free_js_malloc, NULL, false)
+        );
     }
 }
 
@@ -1147,7 +1153,7 @@ static JSValue response_poll(JSContext* ctx, void* ptr, JSValue __){
     Promise *promise = js_promise(ctx);
     struct HTTP_Response *response = ptr;
     read_body(response -> data, callback_tou8, promise, false);
-    return promise -> promise;
+    return js_get_promise(promise);
 }
 
 struct buf_link {
@@ -1192,7 +1198,7 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
         int length = task -> response -> data -> content_length
             ? task -> response -> data -> content_length
             : task -> response -> data -> content_resolved;
-        JSContext* ctx = task -> promise -> ctx;
+        JSContext* ctx = js_get_promise_context(task -> promise);
         uint8_t* merged_buf = js_malloc(ctx, length +1);
         size_t copy_len = 0;
 
@@ -1305,7 +1311,7 @@ static inline struct formdata_addition_data* init_formdata_parse_task(Promise *p
 static int callback_formdata_parse(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* userdata){
     struct readall_promise *task = userdata;
     struct formdata_addition_data *fd_task = task -> addition_data;
-    JSContext *ctx = task -> promise -> ctx;
+    JSContext *ctx = js_get_promise_context(task -> promise);
     fd_task -> readed += read_size;
 
     // blank line: end of header
@@ -1433,7 +1439,7 @@ end_callback:
     }
 
     JS_SetLength(ctx, array, i);
-    JS_Call(ctx, task -> promise -> resolve, JS_UNDEFINED, 1, (JSValue[]){ array });
+    js_resolve(task -> promise, array);
     goto end;
 
 end_cleanup:
@@ -1481,21 +1487,21 @@ static JSValue js_response_get_locked(JSContext *ctx, JSValueConst this_val) {
 static JSValue js_response_buffer(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     INIT_TOU8_TASK
     read_body(response -> data, response_merge_cb, data, true);
-    return promise -> promise;
+    return js_get_promise(promise);
 }
 
 static JSValue js_response_text(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     INIT_TOU8_TASK
     data -> tostr = true;
     read_body(response -> data, response_merge_cb, data, true);
-    return promise -> promise;
+    return js_get_promise(promise);
 }
 
 static JSValue js_response_json(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     INIT_TOU8_TASK
     data -> tojson = true;
     read_body(response -> data, response_merge_cb, data, true);
-    return promise -> promise;
+    return js_get_promise(promise);
 }
 
 static JSValue js_response_formData(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
@@ -1530,13 +1536,13 @@ main:
     task -> boundary = boundary;
     uint8_t* buf = js_malloc(ctx, BUFFER_SIZE);
     evfd_readline(response -> data -> fd, BUFFER_SIZE, buf, callback_formdata_parse, task);
-    return promise -> promise;
+    return js_get_promise(promise);
 
 urlform:{
     INIT_TOU8_TASK;
     data -> urlform = true;
     read_body(response -> data, response_merge_cb, data, true);
-    return promise -> promise;
+    return js_get_promise(promise);
 }
 }
 
@@ -1645,7 +1651,14 @@ struct FetchResult {
 void fetch_resolve(LHTTPData *data, uint8_t *buffer, uint32_t len, void* ptr){
     struct FetchResult *fr = ptr;
     Promise* promise = fr -> promise;
-    JSContext *ctx = promise -> ctx;
+    JSContext *ctx = js_get_promise_context(promise);
+
+    // closed connection
+    if(!buffer && len == 0){
+        // will be rejected in fetch_close_cb
+        return;
+    }
+
     JSValue obj = LJS_NewResponse(ctx, data, true);
     js_resolve(promise, obj);
     // del onclose callback
@@ -1665,7 +1678,7 @@ void fetch_resolve(LHTTPData *data, uint8_t *buffer, uint32_t len, void* ptr){
 // fetch: return WebSocket object
 void ws_resolve(LHTTPData *data, uint8_t *buffer, uint32_t len, void* ptr){
     Promise *promise = ptr;
-    JSContext *ctx = promise -> ctx;
+    JSContext *ctx = js_get_promise_context(promise);
     JSValue obj = LJS_NewWebSocket(ctx, data -> fd, data -> is_client);
     js_resolve(promise, obj);
     // del onclose callback
@@ -1775,7 +1788,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
             return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "SSL is not supported", NULL);
 #endif
         }else{
-            fd = LJS_open_socket("unix", url.host, -1, BUFFER_SIZE);
+            fd = LJS_open_socket(url.protocol, url.host, url.port, BUFFER_SIZE);
         }
     }
     if(unlikely(!fd)) return LJS_Throw(ctx, EXCEPTION_IO, "Failed to open connection", NULL);
@@ -1902,7 +1915,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     LJS_parse_from_fd(fd, data, false, websocket ? ws_resolve : fetch_resolve, websocket ? (void*)promise : (void*)fr);
     LJS_free_url(&url);
     JS_FreeValue(ctx, obj);
-    return promise -> promise;
+    return js_get_promise(promise);
 }
 
 // --------------------- JAVASCRIPT WebSocket API -------------------
@@ -2132,7 +2145,7 @@ static JSValue js_ws_send(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     build_ws_frame(&ws -> wbuffer, true, opcode, data, len, ws -> enable_mask);
     if(JS_IsString(argv[0])) JS_FreeCString(ctx, (void*)data);
     evfd_consume(ws -> fd, false, true);
-    return promise -> promise;
+    return js_get_promise(promise);;
 }
 
 static JSValue js_ws_set_onmessage(JSContext *ctx, JSValueConst this_val, JSValueConst value){
@@ -3045,7 +3058,7 @@ struct JSEventStreamData {
     
 // define "end" field in class
 #define DEF_END_PROMISE(obj, handler) handler -> promise = js_promise(ctx); \
-    JS_SetPropertyStr(ctx, obj, "end", handler -> promise -> promise);
+    JS_SetPropertyStr(ctx, obj, "end", js_get_promise(handler -> promise));
 
 // define headers and request in class
 #define DEF_RESPONSE(obj, handler) { \
@@ -3558,7 +3571,7 @@ static JSValue js_handler_close(JSContext *ctx, JSValueConst this_val, int argc,
     GET_OPAQUE(this_val); 
     CHECK_HANDLER;
     if(handler -> response.state < HTTP_DONE && !list_empty(&handler -> chunks)){
-        LJS_enqueue_promise_job(ctx, handler -> promise -> promise, handler_close2_cb, handler);
+        LJS_enqueue_promise_job(ctx, js_get_promise(handler -> promise), handler_close2_cb, handler);
     }else{
         evfd_close(handler -> response.fd);
     }
@@ -3598,7 +3611,7 @@ static JSValue js_handler_reuse(JSContext* ctx, JSValueConst this_val, int argc,
     async_result -> reusing_obj = this_val;
     LJS_parse_from_fd(handler -> response.fd, &handler -> request, true, handler_parse_cb, async_result);
     handler -> response.state = HTTP_INIT;
-    return async_result -> promise -> promise;
+    return js_get_promise(async_result -> promise);
 }
 
 #ifndef LJS_MBEDTLS         // polyfill for mbedtls SHA
@@ -3848,7 +3861,7 @@ param_err:
     struct JSClientAsyncResult* async_result = init_async_result(handler);
     LJS_parse_from_fd(fd, &handler -> request, true, handler_parse_cb, async_result);
     
-    return async_result -> promise -> promise;
+    return js_get_promise(async_result -> promise);
 }
 
 static void handler_finalizer(JSRuntime *rt, JSValue val){

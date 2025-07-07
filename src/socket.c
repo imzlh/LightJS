@@ -78,7 +78,7 @@ int server_handle_accept(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* 
     }
 
     // 转换为Pipe
-    JSValue pipe = LJS_NewFDPipe(data -> ctx, client_fd, PIPE_READ | PIPE_WRITE, data -> bufsize, NULL);
+    JSValue pipe = LJS_NewFDPipe(data -> ctx, client_fd, PIPE_READ | PIPE_WRITE, data -> bufsize, false, NULL);
 
     // 调用on_connection回调
     JSValue on_connection = data -> on_connection;
@@ -634,7 +634,7 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     JS_FreeValue(ctx, jsobj);
     JS_FreeValue(ctx, obj);
 
-    JSValue pipe = LJS_NewFDPipe(ctx, sockfd, PIPE_READ | PIPE_WRITE | PIPE_SOCKET, buffer_size, NULL);
+    JSValue pipe = LJS_NewFDPipe(ctx, sockfd, PIPE_READ | PIPE_WRITE | PIPE_SOCKET, buffer_size, false, NULL);
     return pipe;
 }
 
@@ -712,7 +712,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
 
 void js_handle_dns_resolve(int total_records, dns_record** records, void* user_data) {
     Promise* promise = (Promise*)user_data;
-    JSContext* ctx = promise -> ctx;
+    JSContext* ctx = js_get_promise_context(promise);
     JSValue arr = JS_NewArray(ctx);
     for(int i = 0; i < total_records; i++){
         dns_record* record = records[i];
@@ -789,7 +789,7 @@ static JSValue js_resolve_dns(JSContext *ctx, JSValueConst this_val, int argc, J
 
     Promise* promise = js_promise(ctx);
     async_dns_resolve(dns_server, domain, js_handle_dns_resolve, js_handle_dns_error, promise);
-    return promise -> promise;
+    return js_get_promise(promise);
 }
 
 static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){

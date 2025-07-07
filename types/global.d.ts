@@ -156,7 +156,9 @@ declare class U8Pipe {
     sync(): Promise<void>;
     readonly closed: boolean;
     readonly onclose: Promise<void>;
+}
 
+declare class IOPipe extends U8Pipe {
     // features for tty
     ttyRaw(raw: boolean): boolean;
     set ttySize(size: [number, number]);

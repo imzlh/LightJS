@@ -24,6 +24,7 @@ fi
 
 # 设置编译器，默认为gcc
 CC=${CC:-gcc}
+BUILDINS="../src/eventloop.c"
 
 # 定义源文件和目标文件名
 cd test
@@ -40,7 +41,7 @@ then
     BINARY_FILE=$(echo $RANDOM | md5sum | head -c 10)
 
     # 编译命令
-    $CC -o $BINARY_FILE "$1.c" ../libljs.a -ggdb -O0
+    $CC -o $BINARY_FILE "$1.c" $BUILDINS -DLJS_DEBUG -ggdb -O0
 
     # 检查编译是否成功
     if [ $? -ne 0 ]; then

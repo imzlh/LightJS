@@ -82,7 +82,7 @@ declare module "fs" {
 
     export function stat(path: string): Stat;
 
-    export function open(path: string, flags: OpenFlag, mode?: number, sync?: false): U8Pipe;
+    export function open(path: string, flags: OpenFlag, mode?: number, sync?: false): IOPipe;
     // @ts-ignore
     export function open(path: string, flags: string, mode?: number, sync: true): SyncPipe;
 
