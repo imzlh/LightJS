@@ -727,7 +727,7 @@ static JSValue js_get_sysinfo(JSContext* ctx, JSValueConst this_val, int argc, J
     return obj;
 }
 
-EvFD *pstdin, *pstdout, *pstderr;
+EvFD *pstdin, *pstdout, *pstderr = NULL;
 static JSValue stdin_p, stdout_p, stderr_p;
 static int js_process_init(JSContext* ctx, JSModuleDef* m){
     JS_SetModuleExport(ctx, m, "self", js_get_self(ctx));
@@ -818,6 +818,7 @@ bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv
         stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, PIPE_BUF, true, &pstdin);
         stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, PIPE_BUF, true, &pstdout);
         stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, PIPE_BUF, true, &pstderr);
+        if(!pstderr) pstderr = pstdout;
     }
 
     // vm

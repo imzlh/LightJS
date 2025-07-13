@@ -8,7 +8,11 @@ declare module 'vm' {
     export function gc(): void;
     export function dump(obj: any, strip?: boolean): Uint8Array;
     export function load(code: Uint8Array): any;
-    export function compile(code: string, module_name?: string): Uint8Array;
+    export function compile(code: string, opts: {
+        module?: boolean,
+        filename?: string,
+        strip?: boolean
+    }): Uint8Array;
 
     export class Module {
         constructor();
@@ -102,5 +106,20 @@ declare module 'vm' {
         get context(): typeof globalThis;
     }
 
+    /**
+     * 设置事件通知器，用于接收VM的事件通知
+     * @param callback 
+     */
     export function setEventNotifier(callback: (event: string, data: any) => void): void;
+
+    /**
+     * (不安全，请小心使用)设置VM底层选项，可能会导致崩溃
+     * @param opts 
+     */
+    export function setVMOptions(opts: Partial<{
+        enablePromiseReport: boolean,
+        memoryLimit: bigint,
+        stackLimit: number,
+        codeExecutionTimeout: number,
+    }>): void;
 }

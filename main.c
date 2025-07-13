@@ -343,11 +343,6 @@ not_bundled:
 
     // rt init
     LJS_init_runtime(runtime);
-#ifdef LJS_DEBUG
-    JS_SetDumpFlags(runtime, JS_DUMP_LEAKS | JS_DUMP_OBJECTS | JS_DUMP_SHAPES);
-    setbuf(stdout, NULL);
-    setbuf(stderr, NULL);
-#endif
 
     // app init
 #ifdef __LJSC

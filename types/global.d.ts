@@ -29,17 +29,25 @@ declare function encodeStr(str: string): Uint8Array;
 declare function decodeStr(data: Uint8Array): string;
 
 declare class Worker {
-    // Note: static methods are only available in Worker threads
     static postMessage: (data: any) => void;
-    // @ts-ignore
-    static onmessage: (data: any) => void;  // setter getter
+    static onmessage: (data: any) => void;
     static exit: (code: number, reason?: string) => void;
+    
+    /**
+     * 是否为Worker线程<br>
+     * 注意：只有在Worker线程中，Worker.postMessage/onmessage/exit()方法才可用
+     */
+    static isWorker: boolean;
 
-    constructor(url: string, module?: boolean);
+    constructor(url: string, opts?: {
+        module?: boolean,
+        ontick?: () => void
+    });
     onmessage: (data: any) => void;  // setter getter
     onclose: () => any;  // setter getter
     postMessage(data: any): void;
     terminate(): void;
+    interrupt(after_sec?: number): void;
 }
 
 /**
@@ -176,11 +184,30 @@ declare class IOPipe extends U8Pipe {
 }
 
 interface ImportMeta {
+    /**
+     * 模块名称，如`import "module"`，则名称为"module"
+     */
     name: string;
-    url: string;    // note: 如果是文件，为绝对路径，不带"file://"前缀(LJS URL class也可解析此类)
+
+    /**
+     * note: 如果是文件，为绝对路径，不带"file://"前缀(LJS URL class也可解析此类)<br>
+     */
+    url: string;
+    
+    /**
+     * 文件夹绝对路径
+     */
     filename: string;
+
+    /**
+     * 文件名
+     */
     dirname: string;
-    main: boolean;   // note: 检查 Worker.onmessage 以分辨是Worker还是主线程
+
+    /**
+     * note: 检查 Worker.onmessage 以分辨是Worker还是主线程
+     */
+    main: boolean;
 }
 
 // performance

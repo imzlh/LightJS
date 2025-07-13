@@ -1883,15 +1883,17 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
         memcpy(data2, data, data_len);
         evfd_write(fd, data2, data_len, write_then_free, data2);
         if(JS_IsString(body)) JS_FreeCString(ctx, (char*) data);
-    }else{
+    }else if(JS_IsObject(body)){
         // pipeTo chunked
         EvFD* body_fd = LJS_GetPipeFD(ctx, body);
         if(!body_fd) {
             // content 0
-            evfd_write(fd, (uint8_t*) "Content-Length: 0\r\n\r\n", 26, NULL, NULL);
+            evfd_write(fd, (uint8_t*) "Content-Length: 0\r\n\r\n", 21, NULL, NULL);
         }else{
             evfd_pipeTo(fd, body_fd, body_chunked_filter, NULL, NULL, NULL);
         }
+    }else{
+        evfd_write(fd, (uint8_t*) "Content-Length: 0\r\n\r\n", 21, NULL, NULL);
     }
     JS_FreeValue(ctx, body);
 

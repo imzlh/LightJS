@@ -26,7 +26,11 @@
 
 import { exit, self, signals, stdin, stdout } from 'process';
 import { read, write } from 'fs';
-import { Sandbox } from 'vm';
+import { Sandbox, setVMOptions } from 'vm';
+
+setVMOptions({
+    enablePromiseReport: false
+});
 
 /**
  * @type {Record<string, string>}
@@ -168,21 +172,21 @@ function sigint_handler() {
  * 
  * @param {number} c 
  */
-function handle_byte(c) {
+async function handle_byte(c) {
     if (!utf8) {
-        handle_char(c);
+        await handle_char(c);
     } else if (utf8_state !== 0 && (c >= 0x80 && c < 0xc0)) {
         utf8_val = (utf8_val << 6) | (c & 0x3F);
         utf8_state--;
         if (utf8_state === 0) {
-            handle_char(utf8_val);
+            await handle_char(utf8_val);
         }
     } else if (c >= 0xc0 && c < 0xf8) {
         utf8_state = 1 + Number(c >= 0xe0) + Number(c >= 0xf0);
         utf8_val = c & ((1 << (6 - utf8_state)) - 1);
     } else {
         utf8_state = 0;
-        handle_char(c);
+        await handle_char(c);
     }
 }
 
@@ -949,7 +953,7 @@ function readline_start(defstr, cb) {
  * 
  * @param {number} c1 
  */
-function handle_char(c1) {
+async function handle_char(c1) {
     var c;
     c = String.fromCodePoint(c1);
     switch (readline_state) {
@@ -958,7 +962,7 @@ function handle_char(c1) {
                 readline_keys = c;
                 readline_state = 1;
             } else {
-                handle_key(c);
+                await handle_key(c);
             }
             break;
         case 1: /* '^[ */
@@ -968,20 +972,20 @@ function handle_char(c1) {
             } else if (c == 'O') {
                 readline_state = 3;
             } else {
-                handle_key(readline_keys);
+                await handle_key(readline_keys);
                 readline_state = 0;
             }
             break;
         case 2: /* '^[[' - CSI */
             readline_keys += c;
             if (!(c == ';' || (c >= '0' && c <= '9'))) {
-                handle_key(readline_keys);
+                await handle_key(readline_keys);
                 readline_state = 0;
             }
             break;
         case 3: /* '^[O' - ESC2 */
             readline_keys += c;
-            handle_key(readline_keys);
+            await handle_key(readline_keys);
             readline_state = 0;
             break;
     }
@@ -992,7 +996,7 @@ function handle_char(c1) {
  * @param {string} keys 
  * @returns 
  */
-function handle_key(keys) {
+async function handle_key(keys) {
     var fun;
 
     if (quote_flag) {
@@ -1003,10 +1007,10 @@ function handle_key(keys) {
         this_fun = fun;
         switch (fun(keys)) {
             case -1:
-                readline_cb(cmd);
+                await readline_cb(cmd);
                 return;
             case -2:
-                readline_cb(null);
+                await readline_cb(null);
                 return;
             case -3:
                 /* uninstall a Ctrl-C signal handler */
@@ -1087,541 +1091,12 @@ function bigint_to_string(a, radix) {
     return s + "n";
 }
 
-var util = {};
-/**
- * 
- * @param {any} val 
- * @param {boolean | Object} show_hidden 
- * @param {number} max_depth 
- * @param {boolean} use_colors 
- * @returns 
- */
-util.inspect = function (val, show_hidden, max_depth = 1, use_colors = true) {
-    /** @type {Record<string, any>} */ var options = {};
-    if (typeof show_hidden === 'object' && show_hidden !== null) {
-        options = show_hidden;
-        show_hidden = options.showHidden;
-        max_depth = options.depth;
-        use_colors = options.colors;
-    }
-    /**
-     * 
-     * @template T
-     * @param {any} opt 
-     * @param {T} def 
-     * @returns {T | number}
-     */
-    function set(opt, def) {
-        return (typeof opt === 'undefined') ? def : (opt === null) ? Infinity : opt;
-    }
-    if (typeof show_hidden !== 'boolean')
-        show_hidden = false;
-    max_depth = set(max_depth, 2);
-    // @ts-ignore
-    use_colors = set(use_colors, true);
-    var breakLength = set(options.breakLength, Math.min(term_width, 80));
-    var maxArrayLength = set(options.maxArrayLength, 100);
-    var maxObjectLength = set(options.maxObjectLength, maxArrayLength + 10);
-    var maxStringLength = set(options.maxStringLength, 78);
-    var refs = [{}];    /* list of circular references */
-    /** @type {string[]} */ var stack = [];     /* stack of pending objects */
-    /** @type {string[]} */ var tokens = [];    /* list of generated tokens */
-    /** @type {string[]} */ var output = [];    /* list of output fragments */
-    var last_style = 'none';
-
-    /**
-     * 
-     * @param {string} s 
-     * @returns 
-     */
-    function quote_str(s) {
-        if (s.includes("'"))
-            return JSON.stringify(s);
-        s = JSON.stringify(s).slice(1, -1).replaceAll('\\"', '"');
-        return `'${s}'`;
-    }
-    /**
-     * 
-     * @param {string} s 
-     */
-    function push_token(s) {
-        tokens.push("" + s);
-    }
-    /**
-     * 
-     * @param {string} s 
-     */
-    function append_token(s) {
-        tokens[tokens.length - 1] += s;
-    }
-    /**
-     * 
-     * @param {any} o 
-     */
-    function class_tag(o) {
-        // get the class id of an object
-        // works for boxed objects, Math, JSON, globalThis...
-        return Object.prototype.toString.call(o).slice(8, -1);
-    }
-
-    /**
-     * 
-     * @param {any} a 
-     * @param {number} level 
-     * @returns 
-     */
-    function print_rec(a, level) {
-        var n, n0, i, k, keys, key, type, isarray, noindex, nokeys, brace, sep;
-
-        switch (type = typeof (a)) {
-            case "undefined":
-            case "boolean":
-                push_token(a);
-                break;
-            case "number":
-                push_token(number_to_string(a, hex_mode ? 16 : 10));
-                break;
-            case "bigint":
-                push_token(bigint_to_string(a, hex_mode ? 16 : 10));
-                break;
-            case "string":
-                if (a.length > maxStringLength)
-                    a = a.substring(0, maxStringLength) + "...";
-                push_token(quote_str(a));
-                break;
-            case "symbol":
-                push_token(String(a));
-                break;
-            case "object":
-            case "function":
-                if (a === null) {
-                    push_token(a);
-                    break;
-                }
-                if ((n = refs.indexOf(a)) >= 0) {
-                    push_token(`[Circular *${n}]`);
-                    break;
-                }
-                if ((n = stack.indexOf(a)) >= 0) {
-                    push_token(`[Circular *${refs.length}]`);
-                    refs.push(stack[n]);
-                    break;
-                }
-                var obj_index = tokens.length;
-                var tag = class_tag(a);
-                stack.push(a);
-                // XXX: should have Proxy instances
-                if (a instanceof Date) {
-                    push_token(`Date ${JSON.stringify(a.toDateString())}`);
-                } else if (a instanceof RegExp) {
-                    push_token(a.toString());
-                } else if (a instanceof Boolean || a instanceof Number || a instanceof BigInt) {
-                    push_token(`[${tag}: ${a}]`);
-                } else if (a instanceof String) {
-                    push_token(`[${tag}: ${quote_str(/** @type {string} */ (a))}]`);
-                    len = a.length;
-                    noindex = 1;
-                } else if (Array.isArray(a)) {
-                    push_token("[");
-                    isarray = 1;
-                } else if (tag.includes('Array') && a instanceof Uint8Array) {
-                    push_token(`${tag}(${a.length}) [`);
-                    isarray = 1;
-                } else if (type === 'function') {
-                    if (a.name)
-                        push_token(`[Function: ${a.name}]`);
-                    else
-                        push_token(`[Function (anonymous)]`);
-                } else {
-                    var cons = (a.constructor && a.constructor.name) || 'Object';
-                    if (tag !== 'Object') {
-                        push_token(`${cons} [${tag}] {`);
-                    } else if (a.__proto__ === null) {
-                        push_token(`[${cons}: null prototype] {`);
-                    } else if (cons !== 'Object') {
-                        push_token(`${cons} {`);
-                    } else {
-                        push_token("{");
-                    }
-                    brace = "}";
-                }
-                keys = null;
-                n = 0;
-                n0 = 0;
-                k = 0;
-                if (isarray) {
-                    brace = "]";
-                    var len = a.length;
-                    if (level > max_depth && len) {
-                        push_token("...");
-                        push_token(brace);
-                        return;
-                    }
-                    for (i = 0; i < len; i++) {
-                        k++;
-                        if (i in a) {
-                            print_rec(a[i], level + 1);
-                        } else {
-                            var start = i;
-                            while (i + 1 < len && !((i + 1) in a))
-                                i++;
-                            if (i > start)
-                                push_token(`<${i - start + 1} empty items>`);
-                            else
-                                push_token("<empty>");
-                        }
-                        if (k >= maxArrayLength && len - k > 5) {
-                            push_token(`... ${len - k} more items`);
-                            break;
-                        }
-                    }
-                    noindex = 1;
-                    /* avoid using Object.keys for large arrays */
-                    if (i !== len && len > 1000)
-                        nokeys = 1;
-                }
-                if (!nokeys) {
-                    keys = show_hidden ? Object.getOwnPropertyNames(a) : Object.keys(a);
-                    n = keys.length;
-                }
-                if (noindex && keys) {
-                    /* skip all index properties */
-                    for (; n0 < n; n0++) {
-                        i = +keys[n0];
-                        if (i !== (i >>> 0) || i >= len)
-                            break;
-                    }
-                }
-                if (n0 < n && keys) {
-                    if (!brace) {
-                        append_token(" {");
-                        brace = "}";
-                    }
-                    if (level > max_depth && n0 < n) {
-                        push_token("...");
-                        push_token(brace);
-                        return;
-                    }
-                    for (i = n0; i < n; i++) {
-                        let key = keys[i];
-                        var desc = Object.getOwnPropertyDescriptor(a, key);
-                        if (!desc)
-                            continue;
-                        if (!desc.enumerable)
-                            push_token(`[${String(key)}]`);
-                        else
-                            // @ts-ignore i can't understand the following line
-                            if (+key === (key >>> 0) || key.match(/^[a-zA-Z_$][0-9a-zA-Z_$]*/))
-                                push_token(key);
-                            else
-                                push_token(quote_str(key));
-                        push_token(":");
-                        if ('value' in desc) {
-                            print_rec(desc.value, level + 1);
-                        } else {
-                            var fields = [];
-                            if (desc.get)
-                                fields.push("Getter");
-                            if (desc.set)
-                                fields.push("Setter");
-                            push_token(`[${fields.join('/')}]`);
-                        }
-                        k++;
-                        if (k > maxObjectLength && n - k > 5) {
-                            push_token(`... ${n - k} more properties`);
-                            break;
-                        }
-                    }
-                }
-                if (brace)
-                    push_token(brace);
-                stack.pop();
-                if ((i = refs.indexOf(a)) > 0)
-                    tokens[obj_index] = `<ref *${i}> ${tokens[obj_index]}`;
-                break;
-            default:
-                push_token(String(a));
-                break;
-        }
-    };
-    /**
-     * 
-     * @param {string} s 
-     * @param {string} style 
-     */
-    function output_str(s, style = 'none') {
-        if (use_colors) {
-            if (last_style !== style) {
-                output.push(colors.none);
-                last_style = style;
-            }
-            if (style) {
-                var color = colors[styles[style]];
-                if (color)
-                    output.push(color);
-            }
-        }
-        output.push(s);
-    }
-    /**
-     * 
-     * @param {string} s 
-     */
-    function output_propname(s) {
-        if (s[0] >= '0' && s[0] <= '9')
-            output_str(s, 'number');
-        else
-            output_str(s, 'propname');
-        output_str(": ");
-    }
-    /**
-     * 
-     * @param {string} s 
-     * @returns 
-     */
-    function output_pretty(s) {
-        if (!use_colors) {
-            output_str(s);
-            return;
-        }
-        while (s.length > 0) {
-            var style = 'none';
-            var chunk = s;
-            var len = 0;
-            var m = null;
-            switch (s[0]) {
-                case '"':
-                    style = 'string';
-                    m = s.match(/^"([^\\"]|\\.)*"/);
-                    break;
-                case '\'':
-                    style = 'string';
-                    m = s.match(/^'([^\\']|\\.)*'/);
-                    break;
-                case '/':
-                    style = 'regexp';
-                    break;
-                case '<':
-                    m = s.match(/^\<[^\>]+\>/);
-                    if (m)
-                        style = 'annotation';
-                    break;
-                case '[':
-                    m = s.match(/^\[[^\]]+\]/);
-                    if (m) {
-                        style = 'annotation';
-                        break;
-                    }
-                /* fall thru */
-                case ']':
-                case '}':
-                case ',':
-                case ' ':
-                    style = 'other';
-                    len = 1;
-                    break;
-                case '.':
-                    style = 'annotation';
-                    break;
-                case '0': case '1': case '2': case '3': case '4':
-                case '5': case '6': case '7': case '8': case '9':
-                    style = 'number';
-                    m = s.match(/^[0-9a-z_]+[.]?[0-9a-z_]*[eEpP]?[+-]?[0-9]*/);
-                    break;
-                case '-':
-                    len = 1;
-                    break;
-                default:
-                    if (is_block(s))
-                        len = s.length - 1;
-                    if (s.startsWith('Date'))
-                        style = 'date';
-                    else if (s.startsWith('Symbol'))
-                        style = 'symbol';
-                    else if (s === 'Infinity' || s === 'NaN')
-                        style = 'keyword';
-                    else if (s === 'true' || s === 'false')
-                        style = 'boolean';
-                    else if (s === 'null')
-                        style = 'null';
-                    else if (s === 'undefined')
-                        style = 'undefined';
-                    break;
-            }
-            if (m)
-                len = m[0].length;
-            if (len > 0)
-                chunk = s.slice(0, len);
-            output_str(chunk, style);
-            s = s.slice(chunk.length);
-        }
-    }
-    /**
-     * 
-     * @param {string} s 
-     * @returns 
-     */
-    function is_block(s) {
-        var c = s[s.length - 1];
-        return c === '[' || c === '{';
-    }
-    /**
-     * 
-     * @param {number} i 
-     * @returns 
-     */
-    function block_width(i) {
-        var w = tokens[i].length;
-        if (tokens[i + 1] === ":") {
-            i += 2;
-            w += 2 + tokens[i].length;
-        }
-        var width = w;
-        if (is_block(tokens[i])) {
-            var seplen = 1;
-            while (++i < tokens.length) {
-                width += seplen;
-                var s = tokens[i];
-                if (s === ']' || s === '}')
-                    break;
-                [i, w] = block_width(i);
-                width += w;
-                seplen = 2;
-            }
-        }
-        return [i, width];
-    }
-    /**
-     * 
-     * @param {number} i 
-     * @param {number} last 
-     */
-    function output_single(i, last) {
-        var sep = "";
-        while (i <= last) {
-            var s = tokens[i++];
-            if (s === ']' || s === '}') {
-                if (sep.length > 1)
-                    output_str(" ");
-            } else {
-                output_str(sep);
-                if (tokens[i] === ":") {
-                    output_propname(s);
-                    i++;
-                    s = tokens[i++];
-                }
-            }
-            output_pretty(s);
-            sep = is_block(s) ? " " : ", ";
-        }
-    }
-    /**
-     * 
-     * @param {string} s 
-     * @param {number} count 
-     */
-    function output_spaces(s, count) {
-        if (count > 0)
-            s += " ".repeat(count);
-        output_str(s);
-    }
-    /**
-     * 
-     * @param {number} indent 
-     * @param {number} from 
-     * @returns 
-     */
-    function output_indent(indent, from) {
-        var avail_width = breakLength - indent - 2;
-        var [last, width] = block_width(from);
-        if (width <= avail_width) {
-            output_single(from, last);
-            return [last, width];
-        }
-        if (tokens[from + 1] === ":") {
-            output_propname(tokens[from]);
-            from += 2;
-        }
-        output_pretty(tokens[from]);
-        if (!is_block(tokens[from])) {
-            return [from, width];
-        }
-        indent += 2;
-        avail_width -= 2;
-        var sep = "";
-        var first = from + 1;
-        var i, w;
-        if (tokens[from].endsWith('[')) {
-            /* array: try multiple columns for indexed values */
-            var k = 0, col, cols;
-            var tab = [];
-            for (i = first; i < last; i++) {
-                if (tokens[i][0] === '.' || tokens[i + 1] === ':')
-                    break;
-                [i, w] = block_width(i);
-                tab[k++] = w;
-            }
-            /**
-             * @type {Array<number>}
-             */
-            var colwidth = [];
-            for (cols = Math.min(avail_width / 3, tab.length, 16); cols > 1; cols--) {
-                colwidth = [];
-                col = 0;
-                for (k = 0; k < tab.length; k++) {
-                    colwidth[col] = Math.max(colwidth[col] || 0, tab[k] + 2);
-                    col = (col + 1) % cols;
-                }
-                w = 0;
-                for (col = 0; col < cols; col++) {
-                    w += colwidth[col];
-                }
-                if (w <= avail_width)
-                    break;
-            }
-            if (cols > 1) {
-                w = 0;
-                col = cols - 1;
-                for (i = first; i < last; i++) {
-                    if (tokens[i][0] === '.' || tokens[i + 1] === ':')
-                        break;
-                    w += sep.length;
-                    output_str(sep);
-                    sep = ",";
-                    if (col === cols - 1) {
-                        output_spaces("\n", indent);
-                        col = 0;
-                    } else {
-                        output_spaces("", colwidth[col++] - w);
-                    }
-                    [i, w] = output_indent(indent, i);
-                }
-                first = i;
-            }
-        }
-        for (i = first; i < last; i++) {
-            output_str(sep);
-            sep = ",";
-            output_spaces("\n", indent);
-            [i, w] = output_indent(indent, i);
-        }
-        output_spaces("\n", indent -= 2);
-        output_pretty(tokens[last]);
-        return [last, breakLength];
-    }
-    print_rec(val, 0);
-    output_indent(0, 0);
-    output_str("");
-    return output.join("");
-};
-
 /**
  * 
  * @param {string} val 
  */
 function print(val) {
-    writeToStdout(util.inspect(val, { depth: show_depth, colors: show_colors, showHidden: show_hidden }));
-    writeToStdout("\n");
+    console.log(val);
 }
 
 /* return true if the string was a directive */
@@ -1630,7 +1105,7 @@ function print(val) {
  * @param {string} a 
  * @returns 
  */
-function handle_directive(a) {
+async function handle_directive(a) {
     if (a === "?") {
         help();
         return true;
@@ -1655,7 +1130,7 @@ function handle_directive(a) {
         }
     }
     if (fun && partial < 2) {
-        fun(a.substring(pos).trim());
+        await fun(a.substring(pos).trim());
     } else {
         writeToStdout(`Unknown directive: ${cmd}\n`);
     }
@@ -1733,10 +1208,9 @@ var directives = Object.setPrototypeOf(/** @type {Record<string, (p: string) => 
     "light": () => { styles = themes.light; },
     "clear": () => { writeToStdout("\x1b[H\x1b[J") },
     "quit": () => { _exit(0); },
-    "import": (s) => { 
+    "import": (s) =>
         content.eval(`globalThis['${s.split('/').at(-1)}'] = await import('${s}');\n`, {})
             .catch((/** @type {any} */ e) => { print_eval_error(e); })
-    }
 }), null);
 
 function cmd_readline_start() {
@@ -1747,8 +1221,8 @@ function cmd_readline_start() {
  * 
  * @param {string} expr 
  */
-function readline_handle_cmd(expr) {
-    if (!handle_cmd(expr)) {
+async function readline_handle_cmd(expr) {
+    if (!await handle_cmd(expr)) {
         cmd_readline_start();
     }
 }
@@ -1759,13 +1233,13 @@ function readline_handle_cmd(expr) {
  * @param {string} expr 
  * @returns 
  */
-function handle_cmd(expr) {
+async function handle_cmd(expr) {
     if (!expr)
         return false;
     if (mexpr) {
         expr = mexpr + '\n' + expr;
     } else {
-        if (handle_directive(expr))
+        if (await handle_directive(expr))
             return false;
     }
     var colorstate = colorize_js(expr);
@@ -1776,7 +1250,7 @@ function handle_cmd(expr) {
         return false;
     }
     mexpr = "";
-    eval_and_print(expr);
+    await eval_and_print(expr);
 
     return true;
 }
@@ -1785,7 +1259,7 @@ function handle_cmd(expr) {
  * 
  * @param {string} expr 
  */
-function eval_and_print(expr) {
+async function eval_and_print(expr) {
     var result;
 
     if (use_strict)
@@ -1793,10 +1267,8 @@ function eval_and_print(expr) {
     eval_start_time = Date.now();
     /* eval as a script */
     try{
-        const res = content.eval(expr);
-        (res instanceof Promise) 
-            ? res.then(print_eval_result, print_eval_error)
-            : print_eval_result(res);
+        const res = await content.eval(expr);
+        print_eval_result(res);
     }catch(e){
         print_eval_error(e);
     }
@@ -1808,7 +1280,7 @@ function eval_and_print(expr) {
  */
 function print_eval_result(result) {
     eval_time = Date.now() - eval_start_time;
-    print(result);
+    print(result.value);
     /* set the last result */
     // @ts-ignore
     globalThis._ = result;
@@ -2159,5 +1631,5 @@ cmd_readline_start();
 
 while(true){
     const data = await stdin.read();
-    data && data.forEach(c => handle_byte(c));
+    data && await Promise.all(Array.from(data).map(c => handle_byte(c)));
 }

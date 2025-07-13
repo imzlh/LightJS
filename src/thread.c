@@ -11,7 +11,6 @@
 #include <pthread.h>
 #include <signal.h>
 #include <threads.h>
-#include <sys/eventfd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,12 +19,15 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <semaphore.h>
 #include <sys/epoll.h>
 #include <sys/stat.h>
+#include <sys/eventfd.h>
 
 #define BUFFER_SIZE 64 * 1024
 
 static thread_local JSRuntime* g_runtime = NULL;
+static thread_local bool catch_error = false; 
 
 // predef 
 static inline JSModuleDef* module_getdef2(JSContext* ctx, JSValueConst this_val);
@@ -383,15 +385,11 @@ struct WorkerMessage {
     JSValue arg;
 };
 
-typedef void (*WorkerCallback)(App* app, JSValueConst data);
-struct WorkerPipe{
-    EvFD* main;
-    EvFD* worker;
-    int fd;
-};
 struct Worker_Props{
-    struct WorkerPipe efd_worker2main;
-    struct WorkerPipe efd_main2worker;
+    EvFD* efd_worker2main;
+    int fd_worker2main;
+    EvFD* efd_main2worker;
+    int fd_main2worker;
 
     JSValue worker_msgcb;// for worker thread
     JSValue main_msgcb;  // for main thread
@@ -399,47 +397,62 @@ struct Worker_Props{
     Worker_Error* error; // for main thread
 
     // write queue, in worker for main thread and worker thread
-    struct list_head main_msg;
-    struct list_head worker_msg;
-    uint64_t msg_id;    // for eventfd
+    struct list_head main_msg;      // main thread message(worker to main)
+    struct list_head worker_msg;    // worker thread message(main to worker)
     pthread_mutex_t lock;
 
     App* parent;
-    bool exiting;   // pthread_join is pending
+    bool exiting;           // pthread_join is pending
+    sem_t destroy_sem;      // in main thread, wait for worker thread to exit
 };
 
+static void worker_run_jobs(App* app){
+    int jobs = 0;
+    JSRuntime* rt = JS_GetRuntime(app -> ctx);
+
+    do{
+        jobs = js_run_promise_jobs();  // thread-local jobs
+
+        int res = 1;
+        JSContext* ectx;
+        while(likely(res = JS_ExecutePendingJob(rt, &ectx))){
+            jobs ++;
+            if(res < 0){    // error
+                JSValue exception = JS_GetException(ectx);
+                if(unlikely(JS_IsInternalError(ectx, exception))){
+                    app -> worker -> exiting = true;
+                }
+                JS_FreeValue(ectx, exception);
+            }
+        }
+#ifdef LJS_DEBUG
+        printf("run jobs: %d\n", jobs);
+#endif
+    }while(jobs);
+}
+
 // Note: in worker thread
+__attribute__((noreturn))
 static inline void worker_exit(App* app, int code, const char* message){
     Worker_Error* error = (Worker_Error*)malloc(sizeof(Worker_Error));
     error -> message = (char*)message;
     error -> code = code;
 
     JSRuntime* rt = JS_GetRuntime(app -> ctx);
-    worker_free_app(app);
     evcore_destroy();
+    worker_run_jobs(app);
     JS_FreeRuntime(rt);
     app -> busy = false;
 
     // exit thread
+    sem_post(&app -> worker -> destroy_sem);
     pthread_exit((void*)error);
 }
 
 static inline void push_message(App* from, App* to, struct list_head* list, JSValue arg){
     // clone arg
-    size_t size;
-    void* data = JS_WriteObject(from -> ctx, &size, arg, 
-        JS_WRITE_OBJ_BYTECODE | JS_WRITE_OBJ_REFERENCE | JS_WRITE_OBJ_SAB
-    );
-    if (!data) return;
-
-    JSValue obj = JS_ReadObject(to -> ctx, data, size, 
-        JS_READ_OBJ_BYTECODE | JS_READ_OBJ_REFERENCE | JS_READ_OBJ_SAB
-    );
-    free(data);
-    
-    if (JS_IsException(obj)) {
-        return;
-    }
+    JSValue obj = JS_CopyValue(from -> ctx, to -> ctx, arg);
+    if(JS_IsException(obj)) return;
 
     struct WorkerMessage* msg = malloc(sizeof(struct WorkerMessage));
     msg -> arg = obj;
@@ -448,6 +461,13 @@ static inline void push_message(App* from, App* to, struct list_head* list, JSVa
     init_list_head(&msg -> list);
     list_add_tail(list, &msg -> list);
     pthread_mutex_unlock(&to -> worker -> lock);
+
+    // notify target thread
+    uint64_t value = 1;
+    write(
+        to -> worker ? to -> worker -> fd_worker2main : from -> worker -> fd_main2worker,
+        (void*)&value, 8
+    );
 }
 
 
@@ -471,22 +491,24 @@ App* LJS_NewApp(
     app -> worker = NULL;
     app -> busy = false;
     app -> thread = pthread_self();
+    app -> interrupt = 0;
+    app -> tick_func = JS_UNDEFINED;
 
     init_list_head(&app -> workers);
 
     if(parent && worker){
-        // 分配worker专用资源
+        // worker props
         struct Worker_Props* wel = app -> worker = malloc(sizeof(struct Worker_Props));
         wel -> worker_msgcb = JS_UNDEFINED;
+        wel -> main_msgcb = JS_UNDEFINED;
+        wel -> destroy_cb = JS_UNDEFINED;
         wel -> error = NULL;
-
-        init_list_head(&wel -> main_msg);
-        init_list_head(&wel -> worker_msg);
-        pthread_mutex_init(&wel -> lock, NULL);
+        wel -> exiting = false;
+        sem_init(&wel -> destroy_sem, 0, 0);
 
         // Add to parent's worker list
-        init_list_head(&app -> link);
-        list_add_tail(&parent -> workers, &app -> link);
+        init_list_head(&app -> workers);
+        list_add_tail(&app -> link, &parent -> workers);
 
         // Create eventfd for worker-main communication
         int fd1 = eventfd(0, EFD_NONBLOCK),
@@ -499,9 +521,10 @@ App* LJS_NewApp(
         // Message List
         init_list_head(&wel -> main_msg);
         init_list_head(&wel -> worker_msg);
-
-        app -> worker -> efd_worker2main.fd = fd1;
-        app -> worker -> efd_main2worker.fd = fd2;
+        pthread_mutex_init(&wel -> lock, NULL);
+        
+        app -> worker -> fd_worker2main = fd1;
+        app -> worker -> fd_main2worker = fd2;
         app -> worker -> parent = parent;
     }
 
@@ -525,14 +548,14 @@ static inline void msglist_clear(JSContext* ctx, struct list_head* list){
     }
 }
 
+// Note: this call will block until all the sub-workers exits
 void LJS_DestroyApp(App* app) {
     if (!app) return;
 
-     if (app -> worker) {
+    if (app -> worker) {
         struct Worker_Props* wel = app -> worker;
-        // 关闭eventfd文件描述符
-        evfd_close2(wel -> efd_worker2main.worker);
-        evfd_close(wel -> efd_main2worker.worker);
+        if(wel -> efd_main2worker)
+            evfd_close(wel -> efd_main2worker);
         
         // remove lock
         pthread_mutex_destroy(&wel -> lock);
@@ -555,18 +578,20 @@ void LJS_DestroyApp(App* app) {
             free(wel -> error);
         }
         
-        // 释放worker结构体
+        list_del(&app -> link);
         free(wel);
     }
 
     // sandbox can be auto destroyed, however workers not.
+    // Note: LJS can create sub-workers for workers
     if(!list_empty(&app -> workers)){
         struct list_head* pos, *tmp;
         list_for_each_safe(pos, tmp, &app -> workers){
             App* child = list_entry(pos, App, link);
             JSRuntime* rt = JS_GetRuntime(child -> ctx);
-            pthread_kill(child -> thread, SIGINT);
-            pthread_join(child -> thread, NULL);
+            child -> interrupt = -1;
+            child -> worker -> exiting = true;
+            sem_wait(&child -> worker -> destroy_sem);
             worker_free_app(child);
             JS_FreeRuntime(rt);
         }
@@ -611,62 +636,23 @@ static inline void worker_free_app(App* app){
     }
 }
 
+JSValue message_delay_run(JSContext* ctx, int argc, JSValue* argv){
+    return JS_Call(ctx, argv[0], JS_UNDEFINED, argc -1, argv +1);
+}
+
+static inline void call_delay(JSContext* ctx, JSValue func, JSValue arg){
+    JS_EnqueueJob(ctx, message_delay_run, 1, (JSValueConst[]){ arg });
+}
+
 // for worker thread
 static int worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* user_data){
     App* app = (App*)user_data;
-    __maybe_unused uint64_t value;
-    // Alert: main2worker eventfs should be closed by worker thread
-    assert(read(app -> worker -> efd_main2worker.fd, &value, sizeof(uint64_t)) == sizeof(uint64_t));
-        
-    // 读取队列
-    if(JS_IsFunction(app -> ctx, app -> worker -> worker_msgcb)){
-        pthread_mutex_lock(&app -> worker -> lock);
-        // if(list_empty(&app -> worker -> main_msg)) abort();
-        struct list_head* pos, *tmp;
-        list_for_each_safe(pos, tmp, &app -> worker -> worker_msg){
-            struct WorkerMessage* msg = list_entry(pos, struct WorkerMessage, list);
-            list_del(&msg -> list);
-
-            // call
-            JS_Call(app -> ctx, app -> worker -> worker_msgcb, JS_UNDEFINED, 1, &msg -> arg);
-            free(msg);
-        }
-        pthread_mutex_unlock(&app -> worker -> lock);
-    }
-    
-    return EVCB_RET_DONE;
-}
-
-// for worker thread
-static void worker_close_callback(EvFD* fd, void* user_data){
-    struct Worker_Props* wel = ((App*)user_data) -> worker;
-    evfd_close(wel -> efd_worker2main.worker);
-    evfd_close2(wel -> efd_main2worker.worker);
-    worker_exit((App*)user_data, 0, "worker closed");
-}
-
-// for worker thread
-static void worker_writeable_callback(EvFD* __, bool __unused__, void* opaque){
-    App* app = opaque;
-
-    // message
-    write(
-        app -> worker -> efd_worker2main.fd, 
-        (uint8_t*)app -> worker -> msg_id,
-        sizeof(uint64_t) 
-    );
-}
-
-// for main thread
-static int main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* opaque){
-    App* app = (App*)opaque;    // worker APP, not main!
     uint64_t value;
-    if(read(app -> worker -> efd_worker2main.fd, &value, sizeof(uint64_t)) != sizeof(uint64_t))
-        return EVCB_RET_DONE;
+    // Alert: main2worker eventfs should be closed by worker thread
+    assert(read(app -> worker -> fd_main2worker, &value, sizeof(uint64_t)) == sizeof(uint64_t));
         
-    // read queue
-    JSContext *ctx = app -> worker -> parent -> ctx;
-    if(JS_IsFunction(ctx, app -> worker -> main_msgcb)){
+    // process queue
+    if(JS_IsFunction(app -> ctx, app -> worker -> worker_msgcb)){
         pthread_mutex_lock(&app -> worker -> lock);
         // if(list_empty(&app -> worker -> main_msg)) abort();
         struct list_head* pos, *tmp;
@@ -675,24 +661,56 @@ static int main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, 
             list_del(&msg -> list);
 
             // call
-            JS_Call(ctx, app -> worker -> main_msgcb, JS_UNDEFINED, 1, &msg -> arg);
+            call_delay(app -> ctx, app -> worker -> worker_msgcb, msg -> arg);
             free(msg);
         }
         pthread_mutex_unlock(&app -> worker -> lock);
     }
 
+    // reset eventfd
+    value = 0;
+    write(app -> worker -> fd_worker2main, (void*)&value, 8);
+    
     return EVCB_RET_DONE;
 }
 
+// for worker thread
+static void worker_close_callback(EvFD* fd, void* user_data){
+    struct Worker_Props* wel = ((App*)user_data) -> worker;
+    evfd_close(wel -> efd_worker2main);
+    worker_exit((App*)user_data, 0, "worker closed");
+}
+
 // for main thread
-static void main_writeable_callback(EvFD* __, bool __unused__, void* opaque){
-    App* data = opaque;
-    // message
-    write(
-        data -> worker -> efd_main2worker.fd, 
-        (uint8_t*)data -> worker -> msg_id,
-        sizeof(uint64_t) 
-    );
+static int main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* opaque){
+    App* app = (App*)opaque;    // worker APP, not main!
+    uint64_t value;
+    if(read(app -> worker -> fd_worker2main, &value, sizeof(uint64_t)) != sizeof(uint64_t))
+        return EVCB_RET_DONE;
+        
+    // read queue
+    JSContext __maybe_unused *pctx = app -> worker -> parent -> ctx,
+            *ctx = app -> ctx;
+    if(JS_IsFunction(pctx, app -> worker -> main_msgcb)){
+        pthread_mutex_lock(&app -> worker -> lock);
+        // if(list_empty(&app -> worker -> main_msg)) abort();
+        struct list_head* pos, *tmp;
+        list_for_each_safe(pos, tmp, &app -> worker -> worker_msg){
+            struct WorkerMessage* msg = list_entry(pos, struct WorkerMessage, list);
+            list_del(&msg -> list);
+
+            // call
+            call_delay(pctx, app -> worker -> main_msgcb, msg -> arg);
+            free(msg);
+        }
+        pthread_mutex_unlock(&app -> worker -> lock);
+    }
+
+    // reset eventfd
+    value = 0;
+    write(app -> worker -> fd_main2worker, (void*)&value, 8);
+
+    return EVCB_RET_DONE;
 }
 
 // for main thread
@@ -711,7 +729,7 @@ static void main_close_callback(EvFD* fd, void* user_data){
             JS_SetPropertyStr(ctx, obj, "code", JS_NewInt32(ctx, app -> worker -> error -> code));
             JS_SetPropertyStr(ctx, obj, "message", JS_NewString(ctx, app -> worker -> error -> message));
             JS_Call(ctx, app -> worker -> destroy_cb, JS_UNDEFINED, 1, (JSValueConst[]){ obj });
-            // obj will be freed by JS_Call
+            JS_FreeValue(ctx, obj);
         }
 
         free(app -> worker -> error -> message);
@@ -720,34 +738,11 @@ static void main_close_callback(EvFD* fd, void* user_data){
     }
 
     // close fd
-    evfd_close2(app -> worker -> efd_worker2main.main);
-    evfd_close(app -> worker -> efd_main2worker.main);
+    if(app -> worker -> efd_main2worker)
+        evfd_close(app -> worker -> efd_main2worker);
+    worker_free_app(app);
 }
 
-static void worker_run_jobs(App* app){
-    int jobs = 0;
-    JSRuntime* rt = JS_GetRuntime(app -> ctx);
-
-    do{
-        jobs = js_run_promise_jobs();  // thread-local jobs
-
-        int res = 1;
-        JSContext* ectx;
-        while(likely(res = JS_ExecutePendingJob(rt, &ectx))){
-            jobs ++;
-            if(res < 0){    // error
-                JSValue exception = JS_GetException(ectx);
-                if(unlikely(JS_IsInternalError(ectx, exception))){
-                    app -> worker -> exiting = true;
-                }
-                JS_FreeValue(ectx, exception);
-            }
-        }
-#ifdef LJS_DEBUG
-        printf("run jobs: %d\n", jobs);
-#endif
-    }while(jobs);
-}
 
 static bool worker_check_abort(void* opaque){
     App* app = (App*)opaque;
@@ -760,10 +755,7 @@ static bool worker_check_abort(void* opaque){
 
 static void worker_main_loop(App* app, JSValue func){
     JSContext* ctx = app -> ctx;
-
-    // 初始化epoll
-    evcore_init();
-
+    
     // prevent signal(only handled in main thread)
     sigset_t sigmask;
     sigfillset(&sigmask);
@@ -772,17 +764,11 @@ static void worker_main_loop(App* app, JSValue func){
     pthread_sigmask(SIG_BLOCK, NULL, &sigmask);
 
     // 监听pipe
-    app -> worker -> efd_main2worker.worker = 
-        evcore_attach(app -> worker -> efd_main2worker.fd, false, 
+    app -> worker -> efd_main2worker = 
+        evcore_attach(app -> worker -> fd_main2worker, false, 
             worker_message_callback, app,
             NULL, NULL,
             worker_close_callback, app
-        );
-    app -> worker -> efd_worker2main.worker = 
-        evcore_attach(app -> worker -> efd_worker2main.fd, false, 
-            NULL, NULL,
-            worker_writeable_callback, app,
-            NULL, NULL
         );
 
 #ifdef LJS_DEBUG
@@ -790,7 +776,7 @@ static void worker_main_loop(App* app, JSValue func){
 #endif
 
     // 调用
-    JSValue ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
+    JSValue ret = JS_EvalFunction(ctx, func);
     if(JS_IsException(ret)){
         JSValue error = JS_GetException(ctx);
         js_dump(ctx, error, pstderr);
@@ -798,26 +784,48 @@ static void worker_main_loop(App* app, JSValue func){
         const char* message = JS_ToCString(ctx, error);
         char* space = malloc(strlen(message) + 39);
         memcpy(space, "Worker thread exited with exception: ", 37);
-        memcpy(space + 37, message, strlen(message));
+        memcpy(space + 37, message, strlen(message) +1);
+        JS_FreeValue(app -> ctx, error);
         worker_exit((App*)JS_GetContextOpaque(ctx), 1, space);
     }
 
-    // 启动事件循环
+    // start eventloop
     evcore_run(worker_check_abort, app);
 
     // exit
     worker_exit(app, 0, "worker thread exited");
 }
 
+int js_interrupt_handler(JSRuntime *rt, void *opaque){
+    App* app = JS_GetRuntimeOpaque(rt);
+    if(app -> interrupt <= 0){
+        return !!app -> interrupt;
+    }
+
+    // time
+    clock_t current = clock();
+    return current >= app -> interrupt;
+}
+
 void LJS_init_runtime(JSRuntime* rt){
-    // Promise追踪
+    // Promise logger
     JS_SetHostPromiseRejectionTracker(rt, js_handle_promise_reject, NULL);
 
-    // 初始化ES6模块
+    // ES module loader
     JS_SetModuleLoaderFunc(rt, js_module_format, js_module_loader, NULL);
 
-    // atomic
+    // atomic.wait()
     JS_SetCanBlock(rt, true);
+
+    // tick function
+    JS_SetInterruptHandler(rt, js_interrupt_handler, NULL);
+
+#ifdef LJS_DEBUG
+    JS_SetDumpFlags(rt, JS_DUMP_LEAKS | JS_DUMP_OBJECTS | JS_DUMP_SHAPES);
+    JS_SetMaxStackSize(rt, 0);
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
+#endif
 }
 
 // static bool in(char** arr, const char* str){
@@ -867,6 +875,7 @@ static void* worker_entry(void* arg){
     // init
     evcore_init();
     app -> thread = pthread_self();
+    g_runtime = JS_GetRuntime(app -> ctx);
 
     // eval script
     uint32_t buf_len;
@@ -883,6 +892,13 @@ static void* worker_entry(void* arg){
     JSValue func = JS_Eval(app -> ctx, (char*)buf, buf_len, app -> script_path, flag);
     free(buf);
 
+    if(JS_IsException(func)){
+        JSValue exception = JS_GetException(app -> ctx);
+        js_dump(app -> ctx, exception, pstderr);
+        JS_FreeValue(app -> ctx, exception);
+        worker_exit(app, 1, "eval script failed");
+    }
+
     // import.meta
     if(app -> module){
         js_set_import_meta(app -> ctx, func, raw_name, true);
@@ -895,34 +911,50 @@ static void* worker_entry(void* arg){
     return NULL;
 }
 
+static char** arg_dup(int argc, char** argv){
+    char** new_argv = malloc(sizeof(char*) * (argc + 1));
+    for(int i = 0; i < argc; i++){
+        new_argv[i] = strdup(argv[i]);
+    }
+    new_argv[argc] = NULL;
+    return new_argv;
+}
+
+static JSValue launch_worker(JSContext* ctx, int argc, JSValue* argv){
+    App* app = JS_VALUE_GET_PTR(argv[0]);
+    pthread_t thread;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    if(0 != pthread_create(&thread, &attr, worker_entry, app)){
+        LJS_DestroyApp(app);
+    }
+    return JS_UNDEFINED;
+}
+
 /**
  * Create a new worker thread.
  * Note: script_path will be freed by LJS_destroy_app.
  * @param parent 父进程的App
  */
 App* LJS_NewWorker(App* parent, char* script_path){
-    pthread_t thread;
-
     JSRuntime* rt = JS_NewRuntime();
     App* app = LJS_NewApp(
         rt, 
-        parent -> argc, parent -> argv,
+        parent -> argc, arg_dup(parent -> argc, parent -> argv),
         true, false, script_path, parent
     );
     LJS_init_runtime(rt);
     LJS_init_context(app);
+    JS_CopyRuntimeArgs(JS_GetRuntime(parent -> ctx), rt);
 
 // #ifdef LJS_DEBUG
 //     JS_SetDumpFlags(rt, JS_DUMP_GC | JS_DUMP_LEAKS | JS_DUMP_PROMISE | JS_DUMP_OBJECTS);
 // #endif
 
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-
-    if(0 != pthread_create(&thread, &attr, worker_entry, app)){
-        return NULL;
-    }
+    // avoid thread-competeion
+    JS_EnqueueJob(parent -> ctx, launch_worker, 1, (JSValueConst[]){ JS_MKPTR(JS_TAG_BOOL, app) });
 
     return app;
 }
@@ -937,8 +969,8 @@ static JSValue js_worker_close(JSContext* ctx, JSValueConst this_val, int argc, 
     if(!app) return JS_UNDEFINED;
 
     // Note: close main-thread to worker pipe, but remain another to main-thread.
-    evfd_close(app -> worker -> efd_main2worker.main);
-    evfd_close2(app -> worker -> efd_worker2main.main);
+    evfd_close(app -> worker -> efd_main2worker);
+    app -> interrupt = -1;
 
     JS_SetOpaque(this_val, NULL);
     return JS_UNDEFINED;
@@ -992,48 +1024,62 @@ static JSValue js_worker_get_busy(JSContext* ctx, JSValueConst this_val){
     return JS_NewBool(ctx, app -> busy);
 }
 
+static JSValue js_worker_interrupt(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    GET_APP(app);
+
+    double pre;
+    if(argc == 0 || !JS_IsNumber(argv[0])){
+        app -> interrupt = -1;
+    }else{
+        JS_ToFloat64(ctx, &pre, argv[0]);
+        app -> interrupt = pre * CLOCKS_PER_SEC;
+    }
+
+    return JS_UNDEFINED;
+}
+
 static JSCFunctionListEntry js_worker_props[] = {
     JS_CGETSET_DEF("onmessage", js_worker_get_onmessage, js_worker_set_onmessage),
     JS_CGETSET_DEF("ondestroy", js_worker_get_ondestroy, js_worker_set_ondestroy),
     JS_CFUNC_DEF("terminate", 0, js_worker_close),
     JS_CFUNC_DEF("postMessage", 1, js_worker_send),
     JS_CGETSET_DEF("busy", js_worker_get_busy, NULL),
+    JS_CFUNC_DEF("interrupt", 1, js_worker_interrupt),
     JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Worker", JS_PROP_CONFIGURABLE),
 };
 
 static JSValue js_worker_ctor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
     char* script_path;
-    bool module = false;
     
-    if(argc == 1){
+    if(argc != 0){
         script_path = (char*)JS_ToCString(ctx, argv[0]);
-    }else if(argc == 2){
-        script_path = (char*)JS_ToCString(ctx, argv[0]);
-        module = JS_ToBool(ctx, argv[1]);
     }else{
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Worker constructor takes 1 or 2 arguments",
-            "Worker(script_path: string, module: boolean = false)"
+            "Worker(script_path: string, opts = { ontick: undefined, module = true })"
         );
     }
 
-#ifdef LJS_DEBUG
-    printf("Worker: %s, module: %d\n", script_path, module);
-#endif
-
     App* app = LJS_NewWorker((App*)JS_GetContextOpaque(ctx), strdup(script_path));
 
+    app -> module = true;
+    if(argc >= 2 && JS_IsObject(argv[1])){
+        JSValue value;
+        if(JS_IsFunction(ctx, value = JS_GetPropertyStr(ctx, argv[1], "ontick"))){
+            app -> tick_func = JS_CopyValue(ctx, app -> ctx, value);
+        }
+        JS_FreeValue(ctx, value);
+        if(JS_IsBool(JS_GetPropertyStr(ctx, argv[1], "module"))){
+            app -> module = JS_ToBool(ctx, value);
+        }
+        JS_FreeValue(ctx, value);
+    }
+
     // evloop
-    app -> worker -> efd_worker2main.main =
-        evcore_attach(app -> worker -> efd_worker2main.fd, false, 
+    app -> worker -> efd_worker2main =
+        evcore_attach(app -> worker -> fd_worker2main, false, 
             main_message_callback, app,
             NULL, NULL,
             main_close_callback, app
-        );
-    app -> worker -> efd_main2worker.main =
-        evcore_attach(app -> worker -> efd_main2worker.fd, false,
-            NULL, NULL,
-            main_writeable_callback, app,
-            NULL, NULL
         );
 
     // construct class
@@ -1058,19 +1104,30 @@ static inline bool is_worker_ctx(JSContext* ctx){
 static JSValue js_worker_static_postMessage(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     CHECK_WORKER_CTX(ctx);
 
-    if(argc < 1 || !JS_IsObject(argv[0])){
+    if(argc == 0){
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Worker.postMessage takes 1 argument: message", "Worker.postMessage(message: any): void");
     }
 
     App* app = (App*)JS_GetContextOpaque(ctx);
-    push_message(app, app, &app -> worker -> worker_msg, argv[0]);
+    push_message(app, app, &app -> worker -> main_msg, argv[0]);
     return JS_UNDEFINED;
 }
 
 static JSValue js_worker_static_exit(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     CHECK_WORKER_CTX(ctx);
-    worker_exit((App*)JS_GetContextOpaque(ctx), 0, "worker thread exit");
-    return JS_UNDEFINED;
+    App* app = (App*)JS_GetContextOpaque(ctx);
+
+    int exit_code = 0;
+    const char* message = "Worker.exit() called";
+    if(argc != 0 && JS_IsNumber(argv[0])) JS_ToInt32(ctx, &exit_code, argv[0]);
+    if(argc >= 2 && JS_IsString(argv[1])) message = JS_ToCString(ctx, argv[1]);
+
+    JS_ThrowInternalError(ctx, " ");
+    Worker_Error* error = (Worker_Error*)malloc(sizeof(Worker_Error));
+    error -> message = (char*)message;
+    error -> code = exit_code;
+    app -> worker -> error = error;
+    return JS_EXCEPTION;
 }
 
 static JSValue js_worker_static_set_onmessage(JSContext* ctx, JSValueConst this_val, JSValueConst val){
@@ -1110,9 +1167,8 @@ bool LJS_init_thread(JSContext* ctx){
     JS_SetPropertyStr(ctx, global_obj, "Worker", worker_ctor);
 
     // worker props
-    if(is_worker_ctx(ctx)){
-        JS_SetPropertyFunctionList(ctx, worker_ctor, js_worker_static_funcs, countof(js_worker_static_funcs));
-    }
+    JS_SetPropertyFunctionList(ctx, worker_ctor, js_worker_static_funcs, countof(js_worker_static_funcs));
+    JS_DefinePropertyValueStr(ctx, worker_ctor, "isWorker", JS_NewBool(ctx, is_worker_ctx(ctx)), JS_PROP_CONFIGURABLE);
 
     JS_FreeValue(ctx, global_obj);
 
@@ -1559,20 +1615,40 @@ static JSValue js_vm_load(JSContext *ctx, JSValueConst this_val, int argc, JSVal
 static JSValue js_vm_compile(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(argc == 0 || !JS_IsString(argv[0])){
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "compile() requires a string argument",
-            "compile(source: string, strip?: boolean): Uint8Array"
+            "compile(source: string, opts?: { strip?: boolean, filename?: string, internal?: boolean, module?: boolean }): Uint8Array"
         );
     }
 
     size_t len;
     int flag = JS_EVAL_FLAG_COMPILE_ONLY | JS_EVAL_TYPE_GLOBAL;
+    int wflag = JS_WRITE_OBJ_BYTECODE;
+    const char* filename = "<eval>";
     const char *source = JS_ToCStringLen(ctx, &len, argv[0]);
     if(!source) return JS_EXCEPTION;
 
-    JSValue compiled = JS_Eval(ctx, source, len, "<eval>", flag);
+    if(JS_IsObject(argv[1])){
+        JSValue strip = JS_GetPropertyStr(ctx, argv[1], "strip");
+        JSValue fname = JS_GetPropertyStr(ctx, argv[1], "filename");
+        JSValue internal = JS_GetPropertyStr(ctx, argv[1], "internal");
+        JSValue module = JS_GetPropertyStr(ctx, argv[1], "module");
+        if(JS_IsBool(strip)) wflag |= JS_WRITE_OBJ_STRIP_DEBUG | JS_WRITE_OBJ_STRIP_SOURCE;
+        if(JS_IsBool(internal)) wflag |= JS_WRITE_OBJ_SAB | JS_WRITE_OBJ_REFERENCE;
+        if(JS_IsBool(module)) flag |= JS_EVAL_TYPE_MODULE;
+        if(JS_IsString(fname)){
+            filename = LJS_ToCString(ctx, fname, NULL);
+            JS_FreeValue(ctx, fname);   // for ToCString
+        }
+        JS_FreeValue(ctx, strip);
+        JS_FreeValue(ctx, fname);
+        JS_FreeValue(ctx, internal);
+    }
+
+    JSValue compiled = JS_Eval(ctx, source, len, filename, flag);
+
     if(JS_IsException(compiled)) goto fail;
 
     size_t output_len;
-    uint8_t* output = JS_WriteObject(ctx, &output_len, compiled, JS_WRITE_OBJ_BYTECODE);
+    uint8_t* output = JS_WriteObject(ctx, &output_len, compiled, wflag);
     if(!output){ 
         JS_FreeValue(ctx, compiled); 
         goto fail; 
@@ -1662,6 +1738,48 @@ static JSValue js_vm_unpack(JSContext *ctx, JSValueConst this_val, int argc, JSV
     return obj;
 }
 
+#define EACHOPT(_name, check_func, then) \
+    if(check_func(valtmp = JS_GetPropertyStr(ctx, argv[1], _name))) then \
+    JS_FreeValue(ctx, valtmp);
+#define EACHOPT2(_name, check_func, then) \
+    if(check_func(ctx, valtmp = JS_GetPropertyStr(ctx, argv[1], _name))) then \
+    JS_FreeValue(ctx, valtmp);
+
+static JSValue js_vm_setvmopts(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    if(argc == 0 || !JS_IsObject(argv[0])){
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "setvmopts() requires an object argument",
+            "setvmopts(opts: VMOpts extends Record<string, string | number>): void"
+        );
+    }
+
+    JSValue valtmp;
+    EACHOPT("memoryLimit", JS_IsBigInt, {
+        uint64_t max_mem;
+        if(JS_ToBigUint64(ctx, &max_mem, valtmp)){
+            JS_SetMemoryLimit(JS_GetRuntime(ctx), max_mem);
+        }
+    });
+    EACHOPT("codeExecutionTimeout", JS_IsNumber, {
+        double timeout;
+        if(JS_ToFloat64(ctx, &timeout, valtmp)){
+            App* app = JS_GetContextOpaque(ctx);
+            app -> interrupt = timeout * CLOCKS_PER_SEC;
+        }
+    });
+    EACHOPT("stackLimit", JS_IsNumber, {
+        uint32_t stack;
+        if(JS_ToUint32(ctx, &stack, valtmp)){
+            JS_SetMaxStackSize(JS_GetRuntime(ctx), stack);
+        }
+    });
+    EACHOPT("enablePromiseReport", JS_IsBool, {
+        bool disable = JS_ToBool(ctx, valtmp);
+        catch_error = disable;
+    });
+
+    return JS_UNDEFINED;
+}
+
 const JSCFunctionListEntry js_vm_funcs[] = {
     JS_CFUNC_DEF("gc", 0, js_vm_gc),
     JS_CFUNC_DEF("dump", 1, js_vm_dump),
@@ -1669,6 +1787,7 @@ const JSCFunctionListEntry js_vm_funcs[] = {
     JS_CFUNC_DEF("compile", 1, js_vm_compile),
     JS_CFUNC_DEF("pack", 1, js_vm_pack),
     JS_CFUNC_DEF("unpack", 1, js_vm_unpack),
+    JS_CFUNC_DEF("setVMOptions", 1, js_vm_setvmopts),
     // JS_CFUNC_DEF("compileModule", 1, js_vm_compileModule)
 };
 
@@ -1707,7 +1826,7 @@ static JSValue js_sandbox_eval(JSContext* ctx, JSValueConst this_val, int argc, 
             JS_CopyObject(app -> ctx, argv[1], meta, 32);
         }
     }else{
-        func = JS_Eval(app -> ctx, code, strlen(code), "<eval>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_COMPILE_ONLY);
+        func = JS_Eval(app -> ctx, code, strlen(code), "<eval>", JS_EVAL_TYPE_GLOBAL | JS_EVAL_FLAG_ASYNC | JS_EVAL_FLAG_COMPILE_ONLY);
     }
 
     if(JS_IsException(func)){
@@ -1957,8 +2076,6 @@ bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback 
 //         js_dump(ctx, reason, stderr);
 //     }
 // }
-
-static thread_local bool catch_error = false; 
 
 void js_handle_promise_reject(
     JSContext *ctx, JSValue promise,

@@ -576,7 +576,12 @@ static inline void printval_internal(JSContext *ctx, int argc, JSValueConst *arg
         else dbuf_putc(&output, ' ');
     }
     dbuf_putc(&output, '\n');
+#ifdef LJS_DEBUG
+    write(evfd_getfd(target_fd, NULL), output.buf, output.size);
+    dbuf_free(&output);
+#else
     evfd_write(target_fd, output.buf, output.size, __write_cb, output.buf);
+#endif
 }
 
 void js_dump(JSContext *ctx, JSValueConst val, EvFD* target_fd){
@@ -584,8 +589,16 @@ void js_dump(JSContext *ctx, JSValueConst val, EvFD* target_fd){
     DynBuf output;
     dbuf_init2(&output, JS_GetRuntime(ctx), dalloc);
     print_jsvalue(ctx, val, JS_UNDEFINED, 0, visited, &output);
-    if(evfd_closed(target_fd)) write(evfd_getfd(target_fd, NULL), output.buf, output.size);
-    else evfd_write(target_fd, output.buf, output.size, __write_cb, output.buf);
+#ifndef LJS_DEBUG
+    if(evfd_closed(target_fd)) {
+#endif
+        write(evfd_getfd(target_fd, NULL), output.buf, output.size);
+        dbuf_free(&output);
+#ifndef LJS_DEBUG
+    }else {
+        evfd_write(target_fd, output.buf, output.size, __write_cb, output.buf);
+    }
+#endif
 }
 
 // console.log 实现
@@ -594,16 +607,28 @@ static JSValue js_console_log(JSContext *ctx, JSValueConst this_val, int argc, J
     return JS_UNDEFINED;
 }
 
+static inline void print2(EvFD* fd, char* msg){
+#ifdef LJS_DEBUG
+    write(evfd_getfd(fd, NULL), msg, strlen(msg));
+#else
+    if(evfd_closed(fd)){
+        write(evfd_getfd(fd, NULL), msg, strlen(msg));
+    }else{
+        evfd_write(fd, (uint8_t*)msg, strlen(msg), NULL, NULL);
+    }
+#endif
+}
+
 // console.error 实现
 static JSValue js_console_error(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    evfd_write(pstderr, (uint8_t*)ANSI_RED " error " ANSI_RESET, strlen(ANSI_RED " error " ANSI_RESET), NULL, NULL);
+    print2(pstderr, ANSI_RED " error " ANSI_RESET);
     printval_internal(ctx, argc, argv, pstderr);
     return JS_UNDEFINED;
 }
 
 // console.info 实现
 static JSValue js_console_info(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    evfd_write(pstdout, (uint8_t*)ANSI_BLUE " info " ANSI_RESET, strlen(ANSI_BLUE " info " ANSI_RESET), NULL, NULL);
+    print2(pstdout, ANSI_BLUE " info " ANSI_RESET);
     printval_internal(ctx, argc, argv, pstdout);
     return JS_UNDEFINED;
 }

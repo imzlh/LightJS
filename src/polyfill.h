@@ -191,3 +191,12 @@ static inline bool JS_IsInternalError(JSContext* ctx, JSValueConst val){
 static inline void JS_Call2(JSContext* ctx, JSValueConst func, JSValueConst this_obj, int argc, JSValueConst* argv){
     JS_FreeValue(ctx, JS_Call(ctx, func, this_obj, argc, argv));
 }
+
+static inline JSValue JS_CopyValue(JSContext* source_ctx, JSContext* target_ctx, JSValue val){
+    size_t len;
+    JSValue ret;
+    uint8_t* opcode = JS_WriteObject(source_ctx, &len, val, JS_WRITE_OBJ_BYTECODE | JS_WRITE_OBJ_SAB | JS_WRITE_OBJ_REFERENCE);
+    ret = JS_ReadObject(target_ctx, opcode, len, JS_READ_OBJ_BYTECODE | JS_READ_OBJ_SAB | JS_READ_OBJ_REFERENCE);
+    js_free(source_ctx, opcode);
+    return ret;
+}

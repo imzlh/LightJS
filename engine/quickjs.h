@@ -513,6 +513,7 @@ JS_EXTERN void JS_SetMaxStackSize(JSRuntime *rt, size_t stack_size);
 /* should be called when changing thread to update the stack top value
    used to check stack overflow. */
 JS_EXTERN void JS_UpdateStackTop(JSRuntime *rt);
+JS_EXTERN void JS_CopyRuntimeArgs(JSRuntime* from, JSRuntime* to);
 JS_EXTERN JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque);
 JS_EXTERN void JS_FreeRuntime(JSRuntime *rt);
 JS_EXTERN void *JS_GetRuntimeOpaque(JSRuntime *rt);

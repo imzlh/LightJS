@@ -2485,6 +2485,13 @@ void JS_UpdateStackTop(JSRuntime *rt)
     update_stack_limit(rt);
 }
 
+void JS_CopyRuntimeArgs(JSRuntime* from, JSRuntime* to){
+    to->stack_size = from->stack_size;
+    update_stack_limit(to);
+
+    to->malloc_state.malloc_limit = from->malloc_state.malloc_limit;
+}
+
 static inline bool is_strict_mode(JSContext *ctx)
 {
     JSStackFrame *sf = ctx->rt->current_stack_frame;

@@ -87,7 +87,7 @@ globalThis.isEqual = function(value, other) {
     return true;
 }
 
-if(import.meta.main && !Worker.onmessage){
+if(import.meta.main && !Worker.isWorker){
     const file = self.args[0];
     if(!file){
         console.log(self, import.meta);

@@ -201,7 +201,12 @@ typedef struct {
 
     // thread
     pthread_t thread;
-    atomic_bool busy;
+    atomic_bool busy;                // is JS execution busy
+
+    // (for thread_top app)
+    atomic_int_fast64_t interrupt;   // interrupt current task, mostly for worker thread/sandbox
+                                     // if <0, interrupt immediately, otherwise, interrupt after given clocktick
+    JSValue tick_func;               // if not interrupted, call this function in each tick
 } App;
 
 typedef struct SignalEvent {
@@ -440,8 +445,29 @@ static inline void* strdup2(const char* str){
 #define MAX_OUTPUT_LEN 1024
 #endif
 
-static void __write_cb(EvFD* evfd, bool success, void* opaque){
+static __maybe_unused void __write_cb(EvFD* evfd, bool success, void* opaque){
     free2(opaque);
+}
+
+static inline int __fputs(const char* str, EvFD* fd){
+    char* str2 = strdup2(str);
+    if(!str2) return -1;
+#ifdef LJS_DEBUG
+    write(evfd_getfd(fd, NULL), str2, strlen(str2));
+#else
+    if(evfd_closed(fd)){
+        write(evfd_getfd(fd, NULL), str2, strlen(str2));
+    }else{
+        evfd_write(fd, (uint8_t*)str2, strlen(str2), __write_cb, str2);
+    }
+#endif
+    return 0;
+}
+
+static inline int __fputc(char chr, EvFD* fd){
+    char* str = strndup2((char*)&chr, 1);
+    __fputs(str, fd);
+    return 0;
 }
 
 __attribute__((format(printf, 2, 3)))
@@ -458,21 +484,8 @@ static inline int __fprintf(EvFD* fd, const char* fmt, ...){
         return -1;
     }
     
-    evfd_write(fd, (uint8_t*)buf, olen, __write_cb, buf);
+    __fputs(buf, fd);
     return olen;
-}
-
-static inline int __fputs(const char* str, EvFD* fd){
-    char* str2 = strdup2(str);
-    if(!str2) return -1;
-    evfd_write(fd, (uint8_t*)str2, strlen(str), __write_cb, str2);
-    return 0;
-}
-
-static inline int __fputc(char chr, EvFD* fd){
-    uint8_t* str = (void*)strndup2((char*)&chr, 1);
-    evfd_write(fd, str, 1, __write_cb, str);
-    return 0;
 }
 
 #ifdef __GNUC__
