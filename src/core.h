@@ -265,7 +265,7 @@ typedef void (*DnsResponseCallback)(int total_records, dns_record** records, voi
 typedef void (*DnsErrorCallback)(const char* error_msg, void* user_data);
 
 // Core events
-void js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data);
+bool js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data);
 
 // console
 void js_dump(JSContext *ctx, JSValueConst val, EvFD* target_fd);

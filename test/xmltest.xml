@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- This is a test XML for parser validation -->
+<testData xmlns="http://example.com/xml" xmlns:ext="http://example.com/extra">
+    <metadata created="2023-10-01" version="1.0">
+        <description>This is a test XML for parser validation</description>
+        <author>Tester</author>
+    </metadata>
+
+    <nestedStructure>
+        <level1>
+            <level2>
+                <level3>Deep nesting test</level3>
+            </level2>
+        </level1>
+    </nestedStructure>
+
+    <specialContent>
+        <escapedChars>&lt;hello&gt; &amp; &apos;world&apos; &quot;test&quot;</escapedChars>
+        <cdataExample><![CDATA[<This content won't be parsed> & can contain special chars directly]]></cdataExample>
+        <emptyElement/>
+    </specialContent>
+
+    <ext:extendedData>
+        <ext:item id="101">Namespace test</ext:item>
+    </ext:extendedData>
+
+    <mixedContent>
+        This is some text
+        <child>Mixed content test</child>
+        More text here
+    </mixedContent>
+
+    <list>
+        <item>Item 1</item>
+        <item>Item 2</item>
+        <item>Item 3</item>
+    </list>
+</testData>

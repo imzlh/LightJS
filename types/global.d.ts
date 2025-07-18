@@ -30,7 +30,6 @@ declare function decodeStr(data: Uint8Array): string;
 
 declare class Worker {
     static postMessage: (data: any) => void;
-    static onmessage: (data: any) => void;
     static exit: (code: number, reason?: string) => void;
     
     /**
@@ -215,3 +214,35 @@ declare const performance: {
     now(): number;
     readonly timeOrigin: number;
 };
+
+// Events
+/**
+ * Note: 与WebAPI的Event不同，合并了Event与CustomEvent有用的部分
+ */
+declare class Event<T = any>{
+    constructor(type: string, options?: {
+        cancelable?: boolean,
+        detail?: T
+    });
+
+    preventDefault(): void;
+
+    readonly type: string;
+    get detail(): T;
+}
+
+/**
+ * Note: 与WebAPI的EventTarget不同，使用了更短的命名，抛弃了addEventListener/removeEventListener等方法
+ */
+declare class EventTarget<MAP extends Record<string, any> = Record<string, any>>{
+    on<T extends keyof MAP>(type: T, listener: (event: MAP[T]) => void): void;
+    once<T extends keyof MAP>(type: T, listener: (event: MAP[T]) => void): void;
+    off<T extends keyof MAP>(type: T, listener: (event: MAP[T]) => void): void;
+    dispatch<T extends keyof MAP>(event: MAP[T]): void;
+}
+
+declare const events: EventTarget<{
+    exit: undefined;
+    unhandledrejection: { reason: any, promise: Promise<any> };
+    message: any;
+}>;

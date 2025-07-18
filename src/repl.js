@@ -29,7 +29,10 @@ import { read, write } from 'fs';
 import { Sandbox, setVMOptions } from 'vm';
 
 setVMOptions({
-    enablePromiseReport: false
+    enablePromiseReport: false,
+    eventNotifier: (ev, data) => {
+        console.log("Event<", ev, '>', data);
+    }
 });
 
 /**

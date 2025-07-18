@@ -25,6 +25,8 @@
 #include <sys/eventfd.h>
 
 #define BUFFER_SIZE 64 * 1024
+#define HASH_TABLE_SIZE 20
+#define EVENT_MAX_LISTENER 20
 
 static thread_local JSRuntime* g_runtime = NULL;
 static thread_local bool catch_error = false; 
@@ -391,7 +393,6 @@ struct Worker_Props{
     EvFD* efd_main2worker;
     int fd_main2worker;
 
-    JSValue worker_msgcb;// for worker thread
     JSValue main_msgcb;  // for main thread
     JSValue destroy_cb;  // for main thread
     Worker_Error* error; // for main thread
@@ -449,8 +450,24 @@ static inline void worker_exit(App* app, int code, const char* message){
     pthread_exit((void*)error);
 }
 
+// static inline JSValue __copy_arraybuffer(JSContext* from, JSContext* to, JSValue val){
+//     size_t psize;
+//     uint8_t* data = JS_GetArrayBuffer(from, psize, val);
+//     if(!data) return JS_UNDEFINED;
+//     JS_DetachArrayBuffer(from, val);
+
+//     JSValue ret = JS_NewArrayBuffer(to, )
+// }
+
+// static inline JSValue worker_copy_value(JSContext* from, JSContext* to, JSValue val){
+//     if(JS_IsArrayBuffer(from, val)){
+
+//     }
+// }
+
 static inline void push_message(App* from, App* to, struct list_head* list, JSValue arg){
     // clone arg
+    // XXX: WebAPI: Transferable object
     JSValue obj = JS_CopyValue(from -> ctx, to -> ctx, arg);
     if(JS_IsException(obj)) return;
 
@@ -499,7 +516,6 @@ App* LJS_NewApp(
     if(parent && worker){
         // worker props
         struct Worker_Props* wel = app -> worker = malloc(sizeof(struct Worker_Props));
-        wel -> worker_msgcb = JS_UNDEFINED;
         wel -> main_msgcb = JS_UNDEFINED;
         wel -> destroy_cb = JS_UNDEFINED;
         wel -> error = NULL;
@@ -561,8 +577,6 @@ void LJS_DestroyApp(App* app) {
         pthread_mutex_destroy(&wel -> lock);
 
         // free msgcallback
-        if(!JS_IsUndefined(wel-> worker_msgcb))
-            JS_FreeValue(app -> ctx, wel-> worker_msgcb);
         if(!JS_IsUndefined(wel -> main_msgcb))
             JS_FreeValue(wel -> parent -> ctx, wel -> main_msgcb);
         if(!JS_IsUndefined(wel -> destroy_cb))
@@ -637,11 +651,13 @@ static inline void worker_free_app(App* app){
 }
 
 JSValue message_delay_run(JSContext* ctx, int argc, JSValue* argv){
-    return JS_Call(ctx, argv[0], JS_UNDEFINED, argc -1, argv +1);
+    js_dispatch_global_event(ctx, JS_VALUE_GET_PTR(argv[0]), argv[1]);
+    JS_FreeValue(ctx, argv[1]);
+    return JS_UNDEFINED;
 }
 
-static inline void call_delay(JSContext* ctx, JSValue func, JSValue arg){
-    JS_EnqueueJob(ctx, message_delay_run, 1, (JSValueConst[]){ arg });
+static inline void callev_delay(JSContext* ctx, const char* name, JSValue arg){
+    JS_EnqueueJob(ctx, message_delay_run, 1, (JSValueConst[]){ JS_MKPTR(JS_TAG_INT, name), arg });
 }
 
 // for worker thread
@@ -652,7 +668,6 @@ static int worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size
     assert(read(app -> worker -> fd_main2worker, &value, sizeof(uint64_t)) == sizeof(uint64_t));
         
     // process queue
-    if(JS_IsFunction(app -> ctx, app -> worker -> worker_msgcb)){
         pthread_mutex_lock(&app -> worker -> lock);
         // if(list_empty(&app -> worker -> main_msg)) abort();
         struct list_head* pos, *tmp;
@@ -661,11 +676,10 @@ static int worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size
             list_del(&msg -> list);
 
             // call
-            call_delay(app -> ctx, app -> worker -> worker_msgcb, msg -> arg);
+            callev_delay(app -> ctx, "message", msg -> arg);
             free(msg);
         }
         pthread_mutex_unlock(&app -> worker -> lock);
-    }
 
     // reset eventfd
     value = 0;
@@ -990,21 +1004,6 @@ static JSValue js_worker_send(JSContext* ctx, JSValueConst this_val, int argc, J
     return JS_UNDEFINED;
 }
 
-static JSValue js_worker_set_onmessage(JSContext* ctx, JSValueConst this_val, JSValueConst val){
-    GET_APP(app);
-
-    if(!JS_IsUndefined(app -> worker -> worker_msgcb))
-        JS_FreeValue(ctx, app -> worker -> worker_msgcb);
-    app -> worker -> worker_msgcb = JS_DupValue(ctx, val);
-    return JS_UNDEFINED;
-}
-
-static JSValue js_worker_get_onmessage(JSContext* ctx, JSValueConst this_val){
-    GET_APP(app);
-
-    return JS_DupValue(ctx, app -> worker -> worker_msgcb);
-}
-
 static JSValue js_worker_set_ondestroy(JSContext* ctx, JSValueConst this_val, JSValueConst val){
     GET_APP(app);
 
@@ -1039,7 +1038,6 @@ static JSValue js_worker_interrupt(JSContext* ctx, JSValueConst this_val, int ar
 }
 
 static JSCFunctionListEntry js_worker_props[] = {
-    JS_CGETSET_DEF("onmessage", js_worker_get_onmessage, js_worker_set_onmessage),
     JS_CGETSET_DEF("ondestroy", js_worker_get_ondestroy, js_worker_set_ondestroy),
     JS_CFUNC_DEF("terminate", 0, js_worker_close),
     JS_CFUNC_DEF("postMessage", 1, js_worker_send),
@@ -1288,21 +1286,287 @@ void LJS_init_timer(JSContext* ctx){
 // ------- event --------------
 static thread_local JSValue event_notifier = JS_UNDEFINED;
 
-static JSValue js_set_event_notifier(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    if(argc == 0 || !JS_IsFunction(ctx, argv[0])){
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "setEventNotifier() requires a function argument",
-            "setEventNotifier(fn: (evname: string, data: any) => void):void"
+struct JSEventTarget {
+    JSContext* ctx;
+    struct list_head table[HASH_TABLE_SIZE];
+};
+
+struct JSListener {
+    JSValue listener;
+    bool once;
+};
+
+struct JSEventType {
+    JSAtom atom;
+    struct JSListener listener[EVENT_MAX_LISTENER];
+    int lcount;
+
+    bool cancelable;
+
+    struct list_head head;
+};
+
+struct JSEvent {
+    JSAtom event;
+    bool prevented;
+    JSValue data;
+};
+
+// create hash
+static inline uint8_t ev_hash(JSAtom atom){
+    return atom % HASH_TABLE_SIZE;
+}
+
+static inline struct JSEventType* ev_find_eventtype(struct JSEventTarget* target, JSAtom atom){
+    uint8_t hash = ev_hash(atom);
+    struct list_head* head = &target -> table[hash];
+
+    // find event
+    struct list_head* pos;
+    list_for_each(pos, head){
+        struct JSEventType* type = list_entry(pos, struct JSEventType, head);
+        if(type -> atom == atom){
+            // found listener
+            return type;
+        }
+    }
+
+    return NULL;
+}
+
+static inline struct JSEventType* ev_create_eventtype(struct JSEventTarget* target, JSAtom atom){
+    uint8_t hash = ev_hash(atom);
+    struct list_head* head = &target -> table[hash];
+
+    // create instance
+    struct JSEventType* type = js_malloc(target -> ctx, sizeof(struct JSEventType));
+    type -> atom = atom;
+    type -> lcount = 0;
+    list_add_tail(&type -> head, head);
+
+    return type;
+}
+
+static inline struct JSListener* ev_add_listener(struct JSEventTarget* target, JSAtom atom, JSValue listener){
+    struct JSEventType* first = ev_find_eventtype(target, atom);
+    if(first){
+        // add listener to first
+        struct JSEventType* type = ev_create_eventtype(target, atom);
+        first = type;
+    }
+    struct JSListener* lt = &first -> listener[first -> lcount ++];
+    *lt = (struct JSListener){
+        .once = false,
+        .listener = listener
+    };
+    return lt;
+}
+
+static inline bool ev_del_listener(struct JSEventTarget* target, JSAtom atom, JSValue listener){
+    struct JSEventType* type = ev_find_eventtype(target, atom);
+    if(type){
+        int i;
+        for(i = 0; i < type -> lcount; i++){
+            if(JS_VALUE_GET_PTR(type -> listener[i].listener) == JS_VALUE_GET_PTR(listener)){
+                type -> lcount --;
+                type -> listener[i] = type -> listener[type -> lcount];
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static inline bool ev_trigger_event(struct JSEventTarget* target, JSAtom atom, JSValue event){
+    struct JSEventType* type = ev_find_eventtype(target, atom);
+
+    if(!JS_IsUndefined(event_notifier)){
+        JS_FreeValue(target -> ctx, JS_Call(target -> ctx, event_notifier, JS_UNDEFINED, 1, (JSValue[1]){ event }));
+    }
+
+    if(type){
+        for(int i = 0; i < type -> lcount; i++){
+            JSValue listener = type -> listener[i].listener;
+            JSValue ret = JS_Call(target -> ctx, listener, JS_UNDEFINED, 1, (JSValue[1]){ event });
+            if(JS_IsException(ret)){
+                return false;
+            }
+            JS_FreeValue(target -> ctx, ret);
+            if(type -> listener[i].once){
+                type -> lcount --;
+                type -> listener[i] = type -> listener[type -> lcount];
+            }
+        }
+    }
+    return true;
+}
+
+static inline struct JSEventTarget* ev_new_target(JSContext* ctx){
+    struct JSEventTarget* target = js_malloc(ctx, sizeof(struct JSEventTarget));
+    target -> ctx = ctx;
+    for(int i = 0 ; i < HASH_TABLE_SIZE; i++){
+        init_list_head(&target -> table[i]);
+    }
+    return target;
+}
+
+static inline void ev_free_event(JSRuntime* rt, struct JSEvent* event){
+    JS_FreeAtomRT(rt, event -> event);
+    JS_FreeValueRT(rt, event -> data);
+    js_free_rt(rt, event);
+}
+
+static JSClassID event_class_id, eventtarget_class_id;
+
+// class Event
+static JSValue js_event_preventdefault(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    struct JSEvent* event = JS_GetOpaque2(ctx, this_val, event_class_id);
+    if(!event) return JS_EXCEPTION;
+
+    event -> prevented = true;
+    return JS_UNDEFINED;
+}
+
+static JSValue js_event_ctor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
+    if(argc == 0 || !JS_IsString(argv[0])){
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "at least 1 string argument required",
+            "new Event(type: string, options?: { cancelable?: boolean, detail?: any })"
         );
     }
 
-    if(JS_GetContextOpaque(ctx) != JS_GetRuntimeOpaque(JS_GetRuntime(ctx)))
-        return JS_ThrowTypeError(ctx, "setEventNotifier() cannot be used in a SandBox");
+    JSValue class = JS_NewObjectClass(ctx, event_class_id);
+    const char* name = JS_ToCString(ctx, argv[0]);
+    JSAtom atom = JS_NewAtom(ctx, name);
+    JS_FreeCString(ctx, name);
+    struct JSEvent* event = js_malloc(ctx, sizeof(struct JSEvent));
+    event -> prevented = false;
+    event -> data = JS_UNDEFINED;
+    event -> event = atom;
+    JS_SetOpaque(class, event);
+    JS_DefinePropertyValueStr(ctx, class, "type", JS_DupValue(ctx, argv[0]), JS_PROP_CONFIGURABLE);
+    
+    if(argc > 1 && JS_IsObject(argv[1])){
+        JSValue valtmp;
+        if(JS_IsBool(valtmp = JS_GetPropertyStr(ctx, argv[1], "cancelable"))){
+            event -> prevented = JS_ToBool(ctx, valtmp);
+        }
+        JS_FreeValue(ctx, valtmp);
 
-    if(!JS_IsUndefined(event_notifier))
-        JS_FreeValue(ctx, event_notifier);
-    event_notifier = JS_DupValue(ctx, argv[0]);
+        if(JS_IsString(valtmp = JS_GetPropertyStr(ctx, argv[1], "detail"))){
+            event -> data = JS_DupValue(ctx, valtmp);
+        }
+        JS_FreeValue(ctx, valtmp);
+    }
+
+    return class;
+}
+
+static JSValue js_event_get_detail(JSContext* ctx, JSValueConst this_val){
+    struct JSEvent* event = JS_GetOpaque2(ctx, this_val, event_class_id);
+    if(!event) return JS_EXCEPTION;
+
+    return JS_DupValue(ctx, event -> data);
+}
+
+static void js_event_finalizer(JSRuntime* rt, JSValue val){
+    struct JSEvent* event = JS_GetOpaque(val, event_class_id);
+    if(event){
+        ev_free_event(rt, event);
+    }
+}
+
+static JSClassDef event_def = {
+    "Event",
+    .finalizer = js_event_finalizer
+};
+
+static JSCFunctionListEntry js_event_props[] = {
+    JS_CFUNC_DEF("preventDefault", 0, js_event_preventdefault),
+    JS_CGETSET_DEF("detail", js_event_get_detail, NULL),
+};
+
+// class EventTarget
+static JSValue js_et_addlistener(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic){
+    struct JSEventTarget* target = JS_GetOpaque2(ctx, this_val, eventtarget_class_id);
+    if(!target) return JS_EXCEPTION;
+
+    if(argc < 2 || !JS_IsString(argv[0]) || !JS_IsFunction(ctx, argv[1])){
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "addEventListner takes 2 argument",
+            "addEventListener(type: string, listener: (ev: Event) => void): void"
+        );
+    }
+
+    const char* name = JS_ToCString(ctx, argv[0]);
+    JSAtom atom = JS_NewAtom(ctx, name);
+    JS_FreeCString(ctx, name);
+    struct JSListener* type = ev_add_listener(target, atom, argv[1]);
+    JS_FreeAtom(ctx, atom);
+
+    if(magic) {
+        type -> once = true;
+    }
+
     return JS_UNDEFINED;
 }
+
+static JSValue js_et_removelistener(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    struct JSEventTarget* target = JS_GetOpaque2(ctx, this_val, eventtarget_class_id);
+    if(!target) return JS_EXCEPTION;
+
+    if(argc < 2 || !JS_IsString(argv[0]) || !JS_IsFunction(ctx, argv[1])){
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "removeEventListener takes 2 argument",
+            "removeEventListener(type: string, listener: Function): void"
+        );
+    }
+
+    const char* name = JS_ToCString(ctx, argv[0]);
+    JSAtom atom = JS_NewAtom(ctx, name);
+    JS_FreeCString(ctx, name);
+    bool ret = ev_del_listener(target, atom, argv[1]);
+    JS_FreeAtom(ctx, atom);
+    return JS_NewBool(ctx, ret);
+}
+
+static JSValue js_et_dispatchevent(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    struct JSEventTarget* target = JS_GetOpaque2(ctx, this_val, eventtarget_class_id);
+    if(!target) return JS_EXCEPTION;
+
+    if(argc == 0 || !JS_IsObject(argv[0]) || !JS_GetOpaque(argv[0], event_class_id)){
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "dispatchEvent takes 1 Event typed argument",
+            "dispatchEvent(event: Event): boolean"
+        );
+    }
+
+    struct JSEvent* event = JS_GetOpaque(argv[0], event_class_id);
+    bool ret = ev_trigger_event(target, event -> event, argv[0]);
+    return JS_NewBool(ctx, ret);
+}
+
+static JSValue js_et_ctor(JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv){
+    struct JSEventTarget* target = ev_new_target(ctx);
+    JSValue obj = JS_NewObjectClass(ctx, eventtarget_class_id);
+    JS_SetOpaque(obj, target);
+    return obj;
+}
+
+static void js_et_finalizer(JSRuntime* rt, JSValue val){
+    struct JSEventTarget* target = JS_GetOpaque(val, eventtarget_class_id);
+    if(target){
+        js_free_rt(rt, target);
+    }
+}
+
+static JSClassDef eventtarget_def = {
+    "EventTarget",
+    .finalizer = js_et_finalizer
+};
+
+static JSCFunctionListEntry js_et_funcs[] = {
+    JS_CFUNC_MAGIC_DEF("on", 2, js_et_addlistener, 0),
+    JS_CFUNC_MAGIC_DEF("once", 2, js_et_addlistener, 1),
+    JS_CFUNC_DEF("off", 2, js_et_removelistener),
+    JS_CFUNC_DEF("fire", 1, js_et_dispatchevent),
+};
 
 // ------- base64 --------
 
@@ -1482,7 +1746,7 @@ bool LJS_init_global_helper(JSContext *ctx) {
     // JSRuntime *rt = JS_GetRuntime(ctx);
     JSValue global_obj = JS_GetGlobalObject(ctx);
 
-    // 添加全局atob和btoa函数
+    // Base64 encode/decode
     JS_SetPropertyStr(ctx, global_obj, "atob", JS_NewCFunction(ctx, js_atob, "atob", 1));
     JS_SetPropertyStr(ctx, global_obj, "btoa", JS_NewCFunction(ctx, js_btoa, "btoa", 1));
 
@@ -1490,16 +1754,43 @@ bool LJS_init_global_helper(JSContext *ctx) {
     JS_SetPropertyStr(ctx, global_obj, "encodeStr", JS_NewCFunction(ctx, js_str_to_u8array, "encodeStr", 1));
     JS_SetPropertyStr(ctx, global_obj, "decodeStr", JS_NewCFunction(ctx, js_u8array_to_str, "decodeStr", 1));
 
+    // Event
+    JS_NewClassID(JS_GetRuntime(ctx), &event_class_id);
+    JS_NewClass(JS_GetRuntime(ctx), event_class_id, &event_def);
+    JSValue event_proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, event_proto, js_event_props, countof(js_event_props));
+    JSValue event_ctor = JS_NewCFunction2(ctx, js_event_ctor, "Event", 1, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, event_ctor, event_proto);
+    JS_SetPropertyStr(ctx, global_obj, "Event", event_ctor);
+    
+    // EventTarget
+    JS_NewClassID(JS_GetRuntime(ctx), &eventtarget_class_id);
+    JS_NewClass(JS_GetRuntime(ctx), eventtarget_class_id, &eventtarget_def);
+    JSValue et_proto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, et_proto, js_et_funcs, countof(js_et_funcs));
+    JSValue et_ctor = JS_NewCFunction2(ctx, js_et_ctor, "EventTarget", 0, JS_CFUNC_constructor, 0);
+    JS_SetConstructor(ctx, et_ctor, et_proto);
+    JS_SetPropertyStr(ctx, global_obj, "EventTarget", et_ctor);
+
+    // global event
+    JSValue global_event = js_et_ctor(ctx, JS_UNDEFINED, 0, NULL);
+    JS_SetPropertyStr(ctx, global_obj, "events", global_event);
+
     JS_FreeValue(ctx, global_obj);
     return true;
 }
 
-void js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data){
+// return false if preventDefault() is called or handler return false
+bool js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data){
+    if(JS_IsUndefined(event_notifier)) return true;
     JSValue evname = JS_NewString(ctx, name);
-    JS_Call(ctx, event_notifier, JS_UNDEFINED, 2, (JSValueConst[]){
+    JSValue ret = JS_Call(ctx, event_notifier, JS_UNDEFINED, 2, (JSValueConst[]){
         evname, data
     });
+    bool retval = JS_ToBool(ctx, ret);
     JS_FreeValue(ctx, evname);
+    JS_FreeValue(ctx, ret);
+    return retval;
 }
 
 // ---------- Module Wrapper ----------
@@ -1632,7 +1923,7 @@ static JSValue js_vm_compile(JSContext *ctx, JSValueConst this_val, int argc, JS
         JSValue internal = JS_GetPropertyStr(ctx, argv[1], "internal");
         JSValue module = JS_GetPropertyStr(ctx, argv[1], "module");
         if(JS_IsBool(strip)) wflag |= JS_WRITE_OBJ_STRIP_DEBUG | JS_WRITE_OBJ_STRIP_SOURCE;
-        if(JS_IsBool(internal)) wflag |= JS_WRITE_OBJ_SAB | JS_WRITE_OBJ_REFERENCE;
+        if(JS_IsBool(internal)) wflag |= JS_WRITE_OBJ_SAB;
         if(JS_IsBool(module)) flag |= JS_EVAL_TYPE_MODULE;
         if(JS_IsString(fname)){
             filename = LJS_ToCString(ctx, fname, NULL);
@@ -1739,10 +2030,10 @@ static JSValue js_vm_unpack(JSContext *ctx, JSValueConst this_val, int argc, JSV
 }
 
 #define EACHOPT(_name, check_func, then) \
-    if(check_func(valtmp = JS_GetPropertyStr(ctx, argv[1], _name))) then \
+    if(check_func(valtmp = JS_GetPropertyStr(ctx, argv[0], _name))) then \
     JS_FreeValue(ctx, valtmp);
 #define EACHOPT2(_name, check_func, then) \
-    if(check_func(ctx, valtmp = JS_GetPropertyStr(ctx, argv[1], _name))) then \
+    if(check_func(ctx, valtmp = JS_GetPropertyStr(ctx, argv[0], _name))) then \
     JS_FreeValue(ctx, valtmp);
 
 static JSValue js_vm_setvmopts(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
@@ -1776,9 +2067,17 @@ static JSValue js_vm_setvmopts(JSContext* ctx, JSValueConst this_val, int argc, 
         bool disable = JS_ToBool(ctx, valtmp);
         catch_error = disable;
     });
+    if(JS_GetContextOpaque(ctx) == JS_GetRuntimeOpaque(JS_GetRuntime(ctx))){
+        EACHOPT2("eventNotifier", JS_IsFunction, {
+            event_notifier = JS_DupValue(ctx, valtmp);
+        });
+    }
 
     return JS_UNDEFINED;
 }
+
+#undef EACHOPT
+#undef EACHOPT2
 
 const JSCFunctionListEntry js_vm_funcs[] = {
     JS_CFUNC_DEF("gc", 0, js_vm_gc),
@@ -1969,9 +2268,6 @@ static int vm_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetModuleExport(ctx, m, "Sandbox", sandbox_ctor);
     JS_FreeValue(ctx, sandbox);
 
-    JSValue set_event_notifier = JS_NewCFunction(ctx, js_set_event_notifier, "setEventNotifier", 1);
-    JS_SetModuleExport(ctx, m, "setEventNotifier", set_event_notifier);
-
     JSValue module = JS_GetClassProto(ctx, js_module_class_id);
     JSValue module_ctor = JS_NewCFunction2(ctx, js_module_constructor, "Module", 1, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, module_ctor, module);
@@ -1991,8 +2287,6 @@ bool LJS_init_vm(JSContext *ctx) {
     JS_SetPropertyFunctionList(ctx, sandbox_proto, js_sandbox_funcs, countof(js_sandbox_funcs));
     JS_SetClassProto(ctx, js_sandbox_class_id, sandbox_proto);
     JS_AddModuleExport(ctx, m, "Sandbox");
-
-    JS_AddModuleExport(ctx, m, "setEventNotifier");
 
     JS_NewClassID(JS_GetRuntime(ctx), &js_module_class_id);
     if(-1 == JS_NewClass(JS_GetRuntime(ctx), js_module_class_id, &js_module_class)) return false;
@@ -2082,7 +2376,7 @@ void js_handle_promise_reject(
     JSValue reason,
     bool is_handled, void *opaque
 ){
-    if (!is_handled && !catch_error && !JS_IsInternalError(ctx, reason)){
+    if (!is_handled && !JS_IsInternalError(ctx, reason)){
         // force next_tick
         // struct Promise_data* data = (struct Promise_data*)malloc2(sizeof(struct Promise_data));
         // data -> promise = JS_DupValue(ctx, promise);
@@ -2090,8 +2384,15 @@ void js_handle_promise_reject(
         // data -> callback = handle_promise;
         // data -> opaque = LJS_NewJSValueProxy(ctx, promise);
         // list_add_tail(&data -> list, &promise_jobs);
-        __fprintf(pstderr, "Uncaught (in promise) ");
-        js_dump(ctx, reason, pstderr);
+
+        JSValue dobj = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, dobj, "promise", JS_DupValue(ctx, promise));
+        JS_SetPropertyStr(ctx, dobj, "reason", JS_DupValue(ctx, reason));
+        if(!catch_error && js_dispatch_global_event(ctx, "unhandledrejection", dobj)){
+            __fprintf(pstderr, "Uncaught (in promise) ");
+            js_dump(ctx, reason, pstderr);
+        }
+        JS_FreeValue(ctx, dobj);
         // JS_FreeValue(ctx, reason);
     }
 }

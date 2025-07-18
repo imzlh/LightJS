@@ -107,12 +107,6 @@ declare module 'vm' {
     }
 
     /**
-     * 设置事件通知器，用于接收VM的事件通知
-     * @param callback 
-     */
-    export function setEventNotifier(callback: (event: string, data: any) => void): void;
-
-    /**
      * (不安全，请小心使用)设置VM底层选项，可能会导致崩溃
      * @param opts 
      */
@@ -121,5 +115,6 @@ declare module 'vm' {
         memoryLimit: bigint,
         stackLimit: number,
         codeExecutionTimeout: number,
+        eventNotifier: (event: string, data: any) => void
     }>): void;
 }
