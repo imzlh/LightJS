@@ -162,7 +162,7 @@
  * The value of this symbol is typically a path in double quotes, either
  * absolute or relative to a directory on the include search path.
  */
-#define MBEDTLS_CONFIG_FILE "/lib/mbedtls_config.h"
+// #define MBEDTLS_CONFIG_FILE "/lib/mbedtls_config.h"
 
 /**
  * \def MBEDTLS_USER_CONFIG_FILE
@@ -450,7 +450,7 @@
  *
  * Comment to disable the context serialization APIs.
  */
-#define MBEDTLS_SSL_CONTEXT_SERIALIZATION
+// #define MBEDTLS_SSL_CONTEXT_SERIALIZATION
 
 /**
  * \def MBEDTLS_SSL_COOKIE_C
@@ -1245,3 +1245,53 @@
 //#define MBEDTLS_X509_MAX_INTERMEDIATE_CA   8   /**< Maximum number of intermediate CAs in a verification chain. */
 
 /** \} name SECTION: X.509 feature selection */
+
+/* 基础加密算法支持 */
+#define MBEDTLS_AES_C
+#define MBEDTLS_CIPHER_C
+#define MBEDTLS_MD_C
+#define MBEDTLS_SHA256_C
+#define MBEDTLS_SHA512_C
+#define MBEDTLS_CHACHAPOLY_C
+#define MBEDTLS_CHACHA20_C    // ChaCha20 流密码
+#define MBEDTLS_POLY1305_C    // Poly1305 认证
+#define MBEDTLS_CHACHAPOLY_C  // 启用完整算法
+#define MBEDTLS_BASE64_C
+#define MBEDTLS_PSA_CRYPTO_C
+#define MBEDTLS_PSA_CRYPTO_C
+#define MBEDTLS_PSA_CRYPTO_CONFIG
+#define MBEDTLS_PSA_CRYPTO_STORAGE_C
+#define MBEDTLS_PSA_CRYPTO_SE_C
+#define MBEDTLS_PSA_CRYPTO_DRIVERS
+
+/* 公钥加密支持 */
+#define MBEDTLS_RSA_C
+#define MBEDTLS_PKCS1_V15
+#define MBEDTLS_PKCS1_V21
+
+/* 椭圆曲线支持 */
+#define MBEDTLS_ECP_C
+#define MBEDTLS_ECP_DP_SECP384R1_ENABLED
+#define MBEDTLS_ECDH_C
+#define MBEDTLS_ECDSA_C
+
+/* 密钥交换支持 */
+#define MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED
+#define MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
+
+/* X.509证书支持 */
+#define MBEDTLS_X509_USE_C
+#define MBEDTLS_ASN1_PARSE_C
+#define MBEDTLS_ASN1_WRITE_C
+#define MBEDTLS_OID_C
+#define MBEDTLS_PK_PARSE_C
+#define MBEDTLS_PK_WRITE_C
+#define MBEDTLS_PK_C
+#define MBEDTLS_BIGNUM_C
+
+/* TLS 1.3专用支持 */
+#define MBEDTLS_SSL_PROTO_TLS1_3
+#define MBEDTLS_SSL_TLS1_3_COMPATIBILITY_MODE
+#define MBEDTLS_SSL_EARLY_DATA
+#define MBEDTLS_PSA_CRYPTO_CLIENT
+#define MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG

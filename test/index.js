@@ -100,13 +100,13 @@ if(import.meta.main && !Worker.isWorker){
             .filter(item => item.type == 'file' && item.name.endsWith('.js') && (!item.name.startsWith('_') && !item.name.startsWith('index.js')))
             .map(item => item.name.slice(0, -3));
     }else{
-        paths = [import.meta.dirname + '/' + file + '.js'];
+        paths = [file + '.js'];
     }
 
     for(const path of paths) try{
         console.log('Running test:', path);
-        await import(path)
+        await import('./' + path)
     }catch(e){
-        console.error('Could not load test:' + file, e)
+        console.error('Could not load test: ' + path, e)
     }
 }

@@ -46,8 +46,6 @@ static inline JSValue LJS_Throw(JSContext *ctx, ExceptionType type, const char *
     va_list args;
     JSValue error_obj = JS_NewError(ctx);
 
-    
-
     // Allocate the error message
     size_t msg_len = strlen(msg) * 3;
     char* msg2 = js_malloc(ctx, msg_len);   // guessed
@@ -68,6 +66,16 @@ static inline JSValue LJS_Throw(JSContext *ctx, ExceptionType type, const char *
         JS_DefinePropertyValueStr(ctx, error_obj, "help", JS_NewString(ctx, help), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     }
     return JS_Throw(ctx, error_obj);
+}
+
+#define LJS_ThrowInAsync(ctx, type, msg, help, ...) { \
+    LJS_Throw(ctx, type, msg, help, ##__VA_ARGS__); \
+    JSValue exception = JS_GetException(ctx), prom_cb[2], prom = JS_NewPromiseCapability(ctx, prom_cb); \
+    JS_FreeValue(ctx, prom_cb[0]); \
+    JS_Call(ctx, prom_cb[1], prom, 1, (JSValueConst[]){ exception }); \
+    JS_FreeValue(ctx, prom_cb[1]); \
+    JS_FreeValue(ctx, exception); \
+    return prom; \
 }
 
 static inline JSValue LJS_ThrowWithError(JSContext *ctx, const char *msg, const char *help){

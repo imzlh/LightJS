@@ -19,17 +19,19 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <netdb.h>
 #include <semaphore.h>
 #include <sys/epoll.h>
 #include <sys/stat.h>
 #include <sys/eventfd.h>
 
 #define BUFFER_SIZE 64 * 1024
-#define HASH_TABLE_SIZE 20
-#define EVENT_MAX_LISTENER 20
+#define HASH_TABLE_SIZE 26
+#define EVENT_MAX_LISTENER 16
 
 static thread_local JSRuntime* g_runtime = NULL;
 static thread_local bool catch_error = false; 
+static thread_local JSValue g_eventbus = JS_UNDEFINED;
 
 // predef 
 static inline JSModuleDef* module_getdef2(JSContext* ctx, JSValueConst this_val);
@@ -205,16 +207,171 @@ static char* js_module_format(JSContext *ctx,
     }else if(module_name[0] == '.'){
         char* module_name_path = LJS_resolve_path(module_name, module_base_name);
         if(!resolve_module_path(&module_name_path)){
-            LJS_Throw(ctx, EXCEPTION_IO, "Read file failed: %s", NULL, strerror(errno));
+            LJS_Throw(ctx, EXCEPTION_IO, "Stat file failed: %s", NULL, strerror(errno));
             free(module_name_path);
             return NULL;
         }
-        char* module_path = js_strdup(ctx, module_name_path);
+
+        char rp[1024];
+        char* module_path = realpath(module_name_path, (char*)&rp);
         free(module_name_path);
-        return module_path;
+        return js_strdup(ctx, module_path);
     }else{
         return js_strdup(ctx, module_name);
     }
+}
+
+// ? use libcurl instead ?
+static char* simple_sync_http_request(JSContext* ctx, URL_data* url, uint32_t* pbuf_len){
+    // limit: host、path length < 1000
+    if(!url -> host || strlen(url -> host) > 1000 || (url -> path && strlen(url -> path) > 1000)){
+        LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild or too long URL", NULL);
+        return NULL;
+    }
+
+    // resolve host
+    struct addrinfo *res;
+    if(-1 == getaddrinfo(url -> host, NULL, NULL, &res)){
+        LJS_Throw(ctx, EXCEPTION_IO, "getaddrinfo failed: %s", NULL, gai_strerror(errno));
+        return NULL;
+    }
+
+    // find ipv4/ipv6 address
+    struct addrinfo *v4addr = NULL, *v6addr = NULL;
+    for(struct addrinfo *ai = res; ai; ai = ai -> ai_next){
+        if(ai -> ai_family == AF_INET){
+            v4addr = ai;
+        }else if(ai -> ai_family == AF_INET6){
+            v6addr = ai;
+        }
+    }
+
+    int socket_fd = 0;
+    if(v6addr){
+        socket_fd = socket(AF_INET6, SOCK_STREAM, 0);
+        connect(socket_fd, (struct sockaddr*)v6addr -> ai_addr, v6addr -> ai_addrlen);
+    }else if(v4addr){
+        socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+        connect(socket_fd, (struct sockaddr*)v4addr -> ai_addr, v4addr -> ai_addrlen);
+    }else{
+        LJS_Throw(ctx, EXCEPTION_IO, "no valid address found", NULL);
+        freeaddrinfo(res);
+        return NULL;
+    }
+    freeaddrinfo(res);
+
+    // write body
+    char buf[1024];
+#define W(text, ...) { \
+        int n = snprintf(buf, 1024, text, __VA_ARGS__); \
+        if(-1 == write(socket_fd, buf, n)) goto error1; \
+}
+#define WD(text) { \
+        int n = strlen(text); \
+        if(-1 == write(socket_fd, text, n)) goto error1; \
+}
+    if(false){
+error1:
+        close(socket_fd);
+        LJS_Throw(ctx, EXCEPTION_IO, "write failed: %s", NULL, strerror(errno));
+        return NULL;
+    }
+
+    W("GET %s HTTP/1.1\r\n", url -> path);
+    W("Host: %s\r\n", url -> host);
+    WD("Connection: close\r\n");
+    WD("\r\n");
+
+    // read response
+    FILE* f = fdopen(socket_fd, "r");
+    int state = HTTP_FIRST_LINE;
+    size_t content_length = 0;
+    char* readed;
+    const char* edesc = "unknown error";
+    char* body = NULL;
+    while ((readed = fgets(buf, 1024, f)) != NULL){
+        switch (state){
+            case HTTP_FIRST_LINE:{
+                int hv2, st1, st2, st3;
+                if(-1 == sscanf(readed, "HTTP/1.%d %d%d%d", &hv2, &st1, &st2, &st3)){
+                    goto error2;
+                }
+                if(hv2 > 1){
+                    edesc = "unsupported HTTP version";
+                    goto error2;
+                }
+                if(st1 != 2 || st2 != 0 || st3 != 0){
+                    edesc = "http not ok(200)";
+                    goto error2;
+                }
+
+                state = HTTP_HEADER;
+                break;
+            }
+
+            case HTTP_HEADER:{
+                if(readed[0] == '\r' && readed[1] == '\n'){
+                    state = HTTP_BODY;
+                    goto read_body;
+                }else{
+                    char* key = readed;
+                    char* value = strchr(key, ':');
+                    if(!value){
+                        edesc = "invaild header line";
+                        goto error2;
+                    }
+
+                    *value = '\0';
+                    if(strcasecmp(key, "Content-Length") == 0){
+                        do{ value ++; } while(*value == ' ');
+                        content_length = atoi(value);
+                    }
+#ifdef LJS_DEBUG
+                    else{
+                        printf("header: %s\n", key);
+                    }
+#endif
+                    break;
+                }
+            }
+
+            default:
+error2:
+                fclose(f);
+                LJS_Throw(ctx, EXCEPTION_INPUT, "invaild response from server: %s", NULL, edesc);
+                return NULL;
+        }
+    }
+
+read_body:
+    // read whole body
+    if(content_length <= 0){
+        edesc = "no content found in response";
+        goto error2;
+    }
+    
+    size_t readed_len = 0;
+    body = js_malloc(ctx, content_length + 1);
+    if(!body){
+        fclose(f);
+        JS_ThrowOutOfMemory(ctx);
+        return NULL;
+    }
+
+    while (readed_len < content_length){
+        ssize_t r = fread(body + readed_len, 1, content_length - readed_len, f);
+        if(r <= 0){
+            js_free(ctx, body);
+            fclose(f);
+            LJS_Throw(ctx, EXCEPTION_IO, "read failed: %s", NULL, errno ? strerror(errno) : "reached end of file");
+            return NULL;
+        }
+        readed_len += r;
+    }
+    body[content_length] = '\0';
+    *pbuf_len = content_length;
+    fclose(f);
+    return body;
 }
 
 static JSModuleDef *js_module_loader(JSContext *ctx,
@@ -245,6 +402,8 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
         }else if((m = module_getdef2(ctx, ret)) != NULL){
             goto set_meta;
         }else{
+            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild return value of custom module loader",
+                "return value must be a string(module name or path) or a module object.");
             JS_FreeValue(ctx, ret);
             return NULL;
         }
@@ -254,16 +413,25 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
     JSValue func_val;
     URL_data url = {0};
     if(!LJS_parse_url(_modname, &url, NULL)){
+        LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid module URL: %s", NULL, _modname);
         return NULL;
     }
     free_url = true;
 
-    if(!url.protocol || memcmp(url.protocol, "file", 4)){
+    if(!url.protocol || memcmp(url.protocol, "file", 5)){
         buf = (char*)read_file(url.path, &buf_len);
         if (!buf){
+            LJS_Throw(ctx, EXCEPTION_NOTFOUND, "Read file failed: %s", NULL, strerror(errno));
             return NULL;
         }
+    }else if(memcmp(url.protocol, "http", 5) == 0){
+        buf = simple_sync_http_request(ctx, &url, &buf_len);
+        if(!buf){
+            return NULL;
+        }
+    // TODO: https stream?
     }else{
+        LJS_Throw(ctx, EXCEPTION_TYPEERROR, "%s protocol is not supported", NULL, url.protocol);
         return NULL;
     }
     module_name = url.path;
@@ -651,13 +819,21 @@ static inline void worker_free_app(App* app){
 }
 
 JSValue message_delay_run(JSContext* ctx, int argc, JSValue* argv){
-    js_dispatch_global_event(ctx, JS_VALUE_GET_PTR(argv[0]), argv[1]);
+    if(JS_VALUE_GET_TAG(argv[0]) == JS_TAG_INT)
+        js_dispatch_global_event(ctx, JS_VALUE_GET_PTR(argv[0]), argv[1], false);
+    else
+        JS_FreeValue(ctx, JS_Call(ctx, argv[0], JS_UNDEFINED, 1, (JSValueConst[]){ argv[1] }));
+    JS_FreeValue(ctx, argv[0]);
     JS_FreeValue(ctx, argv[1]);
     return JS_UNDEFINED;
 }
 
 static inline void callev_delay(JSContext* ctx, const char* name, JSValue arg){
-    JS_EnqueueJob(ctx, message_delay_run, 1, (JSValueConst[]){ JS_MKPTR(JS_TAG_INT, name), arg });
+    JS_EnqueueJob(ctx, message_delay_run, 1, (JSValueConst[]){ JS_MKPTR(JS_TAG_INT, (void*)name), arg });
+}
+
+static inline void call_delay(JSContext* ctx, JSValue func, JSValue arg){
+    JS_EnqueueJob(ctx, message_delay_run, 1, (JSValueConst[]){ func, arg });
 }
 
 // for worker thread
@@ -714,7 +890,7 @@ static int main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, 
             list_del(&msg -> list);
 
             // call
-            call_delay(pctx, app -> worker -> main_msgcb, msg -> arg);
+            call_delay(pctx, JS_DupValue(pctx, app -> worker -> main_msgcb), msg -> arg);
             free(msg);
         }
         pthread_mutex_unlock(&app -> worker -> lock);
@@ -850,10 +1026,10 @@ void LJS_init_runtime(JSRuntime* rt){
 // }
 
 void LJS_init_context(App* app) {
-    JSContext* ctx = app->ctx;
+    JSContext* ctx = app -> ctx;
     LJS_init_pipe(ctx);
     LJS_init_socket(ctx);
-    LJS_init_process(ctx, app->argc, app->argv);
+    LJS_init_process(ctx, app -> argc, app -> argv);
     LJS_init_thread(ctx);
 
     LJS_init_fs(ctx);
@@ -1301,14 +1477,13 @@ struct JSEventType {
     struct JSListener listener[EVENT_MAX_LISTENER];
     int lcount;
 
-    bool cancelable;
-
     struct list_head head;
 };
 
 struct JSEvent {
     JSAtom event;
     bool prevented;
+    bool cancelable;
     JSValue data;
 };
 
@@ -1349,7 +1524,7 @@ static inline struct JSEventType* ev_create_eventtype(struct JSEventTarget* targ
 
 static inline struct JSListener* ev_add_listener(struct JSEventTarget* target, JSAtom atom, JSValue listener){
     struct JSEventType* first = ev_find_eventtype(target, atom);
-    if(first){
+    if(!first){
         // add listener to first
         struct JSEventType* type = ev_create_eventtype(target, atom);
         first = type;
@@ -1379,10 +1554,6 @@ static inline bool ev_del_listener(struct JSEventTarget* target, JSAtom atom, JS
 
 static inline bool ev_trigger_event(struct JSEventTarget* target, JSAtom atom, JSValue event){
     struct JSEventType* type = ev_find_eventtype(target, atom);
-
-    if(!JS_IsUndefined(event_notifier)){
-        JS_FreeValue(target -> ctx, JS_Call(target -> ctx, event_notifier, JS_UNDEFINED, 1, (JSValue[1]){ event }));
-    }
 
     if(type){
         for(int i = 0; i < type -> lcount; i++){
@@ -1416,12 +1587,16 @@ static inline void ev_free_event(JSRuntime* rt, struct JSEvent* event){
     js_free_rt(rt, event);
 }
 
-static JSClassID event_class_id, eventtarget_class_id;
+static thread_local JSClassID event_class_id, eventtarget_class_id;
 
 // class Event
 static JSValue js_event_preventdefault(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     struct JSEvent* event = JS_GetOpaque2(ctx, this_val, event_class_id);
     if(!event) return JS_EXCEPTION;
+
+    if(!event -> cancelable){
+        return JS_ThrowTypeError(ctx, "Event is not cancelable");
+    }
 
     event -> prevented = true;
     return JS_UNDEFINED;
@@ -1442,13 +1617,14 @@ static JSValue js_event_ctor(JSContext* ctx, JSValueConst new_target, int argc, 
     event -> prevented = false;
     event -> data = JS_UNDEFINED;
     event -> event = atom;
+    event -> cancelable = true;
     JS_SetOpaque(class, event);
     JS_DefinePropertyValueStr(ctx, class, "type", JS_DupValue(ctx, argv[0]), JS_PROP_CONFIGURABLE);
     
     if(argc > 1 && JS_IsObject(argv[1])){
         JSValue valtmp;
         if(JS_IsBool(valtmp = JS_GetPropertyStr(ctx, argv[1], "cancelable"))){
-            event -> prevented = JS_ToBool(ctx, valtmp);
+            event -> cancelable = JS_ToBool(ctx, valtmp);
         }
         JS_FreeValue(ctx, valtmp);
 
@@ -1491,8 +1667,9 @@ static JSValue js_et_addlistener(JSContext* ctx, JSValueConst this_val, int argc
     if(!target) return JS_EXCEPTION;
 
     if(argc < 2 || !JS_IsString(argv[0]) || !JS_IsFunction(ctx, argv[1])){
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "addEventListner takes 2 argument",
-            "addEventListener(type: string, listener: (ev: Event) => void): void"
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "%s() takes 2 argument"
+            "_(type: string, listener: (ev: Event) => void): void",
+            magic ? "once" : "on"
         );
     }
 
@@ -1514,8 +1691,8 @@ static JSValue js_et_removelistener(JSContext* ctx, JSValueConst this_val, int a
     if(!target) return JS_EXCEPTION;
 
     if(argc < 2 || !JS_IsString(argv[0]) || !JS_IsFunction(ctx, argv[1])){
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "removeEventListener takes 2 argument",
-            "removeEventListener(type: string, listener: Function): void"
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "off() takes 2 argument",
+            "off(type: string, listener: Function): void"
         );
     }
 
@@ -1532,8 +1709,8 @@ static JSValue js_et_dispatchevent(JSContext* ctx, JSValueConst this_val, int ar
     if(!target) return JS_EXCEPTION;
 
     if(argc == 0 || !JS_IsObject(argv[0]) || !JS_GetOpaque(argv[0], event_class_id)){
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "dispatchEvent takes 1 Event typed argument",
-            "dispatchEvent(event: Event): boolean"
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "fire() takes 1 Event typed argument",
+            "fire(event: Event): boolean"
         );
     }
 
@@ -1567,6 +1744,26 @@ static JSCFunctionListEntry js_et_funcs[] = {
     JS_CFUNC_DEF("off", 2, js_et_removelistener),
     JS_CFUNC_DEF("fire", 1, js_et_dispatchevent),
 };
+
+
+// return false if preventDefault() is called or handler return false
+bool js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data, bool cancelable){
+    JSValue class = JS_NewObjectClass(ctx, event_class_id);
+    struct JSEvent* event = js_malloc(ctx, sizeof(struct JSEvent));
+    event -> prevented = false;
+    event -> data = JS_UNDEFINED;
+    event -> event = JS_NewAtom(ctx, name);
+    event -> cancelable = cancelable;
+    JS_SetOpaque(class, event);
+    JS_DefinePropertyValueStr(ctx, class, "type", JS_NewString(ctx, name), JS_PROP_CONFIGURABLE);
+
+    // dispatch
+    ev_trigger_event((struct JSEventTarget*)JS_GetOpaque(g_eventbus, eventtarget_class_id), event -> event, class);
+    bool ret = event -> prevented;
+    JS_FreeValue(ctx, class);   // finalizer will free event
+
+    return !ret;
+}
 
 // ------- base64 --------
 
@@ -1762,6 +1959,7 @@ bool LJS_init_global_helper(JSContext *ctx) {
     JSValue event_ctor = JS_NewCFunction2(ctx, js_event_ctor, "Event", 1, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, event_ctor, event_proto);
     JS_SetPropertyStr(ctx, global_obj, "Event", event_ctor);
+    JS_SetClassProto(ctx, event_class_id, event_proto);
     
     // EventTarget
     JS_NewClassID(JS_GetRuntime(ctx), &eventtarget_class_id);
@@ -1771,26 +1969,14 @@ bool LJS_init_global_helper(JSContext *ctx) {
     JSValue et_ctor = JS_NewCFunction2(ctx, js_et_ctor, "EventTarget", 0, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, et_ctor, et_proto);
     JS_SetPropertyStr(ctx, global_obj, "EventTarget", et_ctor);
+    JS_SetClassProto(ctx, eventtarget_class_id, et_proto);
 
     // global event
-    JSValue global_event = js_et_ctor(ctx, JS_UNDEFINED, 0, NULL);
-    JS_SetPropertyStr(ctx, global_obj, "events", global_event);
+    g_eventbus = js_et_ctor(ctx, JS_UNDEFINED, 0, NULL);
+    JS_SetPropertyStr(ctx, global_obj, "events", g_eventbus);
 
     JS_FreeValue(ctx, global_obj);
     return true;
-}
-
-// return false if preventDefault() is called or handler return false
-bool js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data){
-    if(JS_IsUndefined(event_notifier)) return true;
-    JSValue evname = JS_NewString(ctx, name);
-    JSValue ret = JS_Call(ctx, event_notifier, JS_UNDEFINED, 2, (JSValueConst[]){
-        evname, data
-    });
-    bool retval = JS_ToBool(ctx, ret);
-    JS_FreeValue(ctx, evname);
-    JS_FreeValue(ctx, ret);
-    return retval;
 }
 
 // ---------- Module Wrapper ----------
@@ -2388,7 +2574,7 @@ void js_handle_promise_reject(
         JSValue dobj = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, dobj, "promise", JS_DupValue(ctx, promise));
         JS_SetPropertyStr(ctx, dobj, "reason", JS_DupValue(ctx, reason));
-        if(!catch_error && js_dispatch_global_event(ctx, "unhandledrejection", dobj)){
+        if(!catch_error && js_dispatch_global_event(ctx, "unhandledrejection", dobj, true)){
             __fprintf(pstderr, "Uncaught (in promise) ");
             js_dump(ctx, reason, pstderr);
         }
@@ -2486,6 +2672,7 @@ static inline void free_promise(struct promise* proxy){
     JS_FreeValue(proxy -> ctx, proxy -> promise);
 
 #ifdef LJS_DEBUG
+    printf("Promise %p freed, resolve: %s, created: %s\n", proxy, proxy -> resolved, proxy -> created);
     list_del(&proxy -> link);
 #endif
 

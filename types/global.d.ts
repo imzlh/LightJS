@@ -235,10 +235,10 @@ declare class Event<T = any>{
  * Note: 与WebAPI的EventTarget不同，使用了更短的命名，抛弃了addEventListener/removeEventListener等方法
  */
 declare class EventTarget<MAP extends Record<string, any> = Record<string, any>>{
-    on<T extends keyof MAP>(type: T, listener: (event: MAP[T]) => void): void;
-    once<T extends keyof MAP>(type: T, listener: (event: MAP[T]) => void): void;
-    off<T extends keyof MAP>(type: T, listener: (event: MAP[T]) => void): void;
-    dispatch<T extends keyof MAP>(event: MAP[T]): void;
+    on<T extends keyof MAP>(type: T, listener: (event: Event<MAP[T]>) => void): void;
+    once<T extends keyof MAP>(type: T, listener: (event: Event<MAP[T]>) => void): void;
+    off<T extends keyof MAP>(type: T, listener: (event: Event<MAP[T]>) => void): void;
+    dispatch<T extends keyof MAP>(event: Event<MAP[T]>): void;
 }
 
 declare const events: EventTarget<{

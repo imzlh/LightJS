@@ -10,7 +10,8 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
-#define BUFFER_FOREACH_BYTE(_buffer, _index, _byte) \
+// Note: Unsafe in the case that the buffer is modified in loop
+#define BUFFER_UNSAFE_FOREACH_BYTE(_buffer, _index, _byte) \
     uint32_t __i = (_buffer) -> start, _index = 0; \
     uint8_t _byte = *(__i + (_buffer) -> buffer); \
     for(; (__i) != (_buffer) -> end; (_index) += 1, __i = (__i) + 1 == (_buffer) -> size ? 0 : (__i) + 1, _byte = *(__i + (_buffer) -> buffer)) 

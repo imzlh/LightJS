@@ -244,6 +244,22 @@ int main(int argc, char **argv) {
 #endif
 
                     "\n" , __DATE__);
+#if defined(LJS_MBEDTLS) || defined(LJS_LIBFFI) || defined(LJS_ZLIB) || defined(LJS_LIBEXPAT)
+                printf("Features: "
+#ifdef LJS_MBEDTLS
+                    "mbedtls "
+#endif
+#ifdef LJS_LIBFFI
+                    "ffi "
+#endif
+#ifdef LJS_ZLIB
+                    "zlib "
+#endif
+#ifdef LJS_LIBEXPAT
+                    "expat "
+#endif
+                "\n");
+#endif
                 return 0;
 #ifndef __LJSC
             }else if(strcmp(longopt, "eval") == 0 || opt == 'e'){
@@ -472,7 +488,7 @@ run_evloop: // note: unused in LJSC cmdline mode
 
     // dispatch exit event
 finalize:
-    js_dispatch_global_event(app -> ctx, "exit", JS_UNDEFINED);
+    js_dispatch_global_event(app -> ctx, "exit", JS_UNDEFINED, false);
     evcore_destroy();
     run_jobs();
     JS_FreeValue(app -> ctx, ret_val);

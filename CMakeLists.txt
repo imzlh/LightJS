@@ -121,7 +121,7 @@ endif()
 # QJS_ENABLE_MSAN only works with clang at the time of writing; also not checked
 # for the same reason
 xoption(QJS_BUILD_STATIC "Build a static ljs executable" OFF)
-xoption(QJS_BUILD_WITH_MIMALLOC "Build the ljs executable with mimalloc" ON)
+xoption(QJS_BUILD_WITH_MIMALLOC "Build the ljs executable with mimalloc" OFF)
 xoption(QJS_BUILD_WITH_STATIC_MIMALLOC "Build the ljs executable with mimalloc (statically linked)" OFF)
 xoption(QJS_ENABLE_ASAN "Enable AddressSanitizer (ASan)" OFF)
 xoption(QJS_ENABLE_MSAN "Enable MemorySanitizer (MSan)" OFF)
@@ -223,19 +223,19 @@ if(M_LIBRARIES OR CMAKE_C_COMPILER_ID STREQUAL "TinyCC")
 endif()
 
 # mbedtls
-# find_library(MBEDTLS_LIBRARIES mbedtls)
-# if(MBEDTLS_LIBRARIES)
-#     # check
-#     include(CheckSymbolExists)
-#     check_symbol_exists(MBEDTLS_X509_CRT_PARSE_C "mbedtls/mbedtls_config.h" HAVE_MBEDTLS_X509)
-#     if(NOT HAVE_MBEDTLS_X509)
-#         message(FATAL_ERROR "The build of MbedTLS does not support X509 certificates.")
-#     endif()
+find_library(MBEDTLS_LIBRARIES mbedtls)
+if(MBEDTLS_LIBRARIES)
+    # check
+    include(CheckSymbolExists)
+    check_symbol_exists(MBEDTLS_X509_CRT_PARSE_C "mbedtls/mbedtls_config.h" HAVE_MBEDTLS_X509)
+    if(NOT HAVE_MBEDTLS_X509)
+        message(FATAL_ERROR "The build of MbedTLS does not support X509 certificates.")
+    endif()
 
-#     message(STATUS "Building with mbedtls support")
-#     add_compile_definitions(LJS_MBEDTLS)
-#     list(APPEND ljs_libs mbedtls)
-# endif()
+    message(STATUS "Building with mbedtls support")
+    add_compile_definitions(LJS_MBEDTLS)
+    list(APPEND ljs_libs mbedtls mbedx509 mbedcrypto)
+endif()
 
 # libffi
 find_library(LIBFFI_LIBRARIES ffi)

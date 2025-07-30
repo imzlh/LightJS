@@ -74,9 +74,9 @@ static inline bool check_circular(JSContext *ctx, JSValue val, JSValue visited[]
 
 // measure whether to wrap display into multiple lines
 // useful for Array and Object with many properties
-static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MAX_OBJEXT_INLINE_PROP_LEN], int depth) {
+static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MAX_OBJEXT_INLINE_PROP_LEN], int depth, bool also_proto) {
 #define MEASURE_SUBELEMENT(el) JSValue value = el; \
-    if(measure_wrap_display(ctx, value, visited, depth + 1)){ \
+    if(measure_wrap_display(ctx, value, visited, depth + 1, also_proto)){ \
         JS_FreeValue(ctx, value); \
         return true; \
     }\
@@ -92,7 +92,11 @@ static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MA
     visited[depth] = val;
 
     int64_t plen;
-    if(JS_IsProxy(val) || JS_IsError(ctx, val)) return false;
+    // if(JS_IsProxy(val) || JS_IsError(ctx, val)) return false;
+    if(also_proto && JS_HasProperty(ctx, val, JS_ATOM_prototype)){
+        MEASURE_SUBELEMENT(JS_GetProperty(ctx, val, JS_ATOM_prototype));
+    }
+
     if(JS_GetEnumerableLength(ctx, val, &plen) != -1){
         if(plen > MAX_OBJEXT_INLINE_PROP_LEN) return false;
         for(int64_t i = 0; i < plen; i++){
@@ -108,7 +112,7 @@ static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MA
         }
 
         // NULL and many special objects
-        if(JS_IsNull(val) || JS_IsSymbol(val) || JS_IsRegExp(val) || JS_IsFunction(ctx, val) || JS_IsDate(val))
+        if(JS_IsNull(val) || JS_IsSymbol(val) || JS_IsRegExp(val) || JS_IsDate(val))
             return false;
         if(JS_IsPromise(val)){
             MEASURE_SUBELEMENT(JS_PromiseResult(ctx, val));
@@ -129,7 +133,7 @@ static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MA
         for(uint32_t i = 0; i < prop_count; i++){
             JSAtom atom = props[i].atom;
             JSValue prop = JS_GetProperty(ctx, val, atom);
-            if(measure_wrap_display(ctx, prop, visited, depth + 1)){
+            if(measure_wrap_display(ctx, prop, visited, depth + 1, also_proto)){
                 JS_FreeValue(ctx, prop);
                 JS_FreePropertyEnum(ctx, props, prop_count);
                 return true;
@@ -141,9 +145,9 @@ static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MA
     return false;
 }
 
-static inline bool measure_wrap_disp2(JSContext *ctx, JSValue val){
+static inline bool measure_wrap_disp2(JSContext *ctx, JSValue val, bool also_proto){
     JSValue visited[MAX_OBJEXT_INLINE_PROP_LEN];
-    return measure_wrap_display(ctx, val, visited, 0);
+    return measure_wrap_display(ctx, val, visited, 0, also_proto);
 }
 
 static void print_jserror(JSContext* ctx, JSValue val, int depth, DynBuf* output) {
@@ -256,6 +260,12 @@ print_buffer:
     }
 }
 
+static inline JSValue JS_GetPropertyNoDup(JSContext *ctx, JSValueConst obj, JSAtom atom){
+    JSValue ret = JS_GetProperty(ctx, obj, atom);
+    JS_FreeValue(ctx, ret);
+    return ret;
+}
+
 // print JSValue like node.js/deno
 static void print_jsvalue(JSContext *ctx, JSValueConst val, JSValueConst prototype_of, int depth, JSValue visited[], DynBuf* output) {
     if(depth == 64){        // max depth
@@ -290,6 +300,7 @@ static void print_jsvalue(JSContext *ctx, JSValueConst val, JSValueConst prototy
 
 main:
     visited[depth] = val;   // record visited value
+    bool obj_showproto = true;
 
     if (JS_IsUndefined(val)) {
         dbuf_putstr(output, ANSI_BLUE "undefined" ANSI_RESET);
@@ -329,6 +340,8 @@ main:
         if(name_str){
             if (JS_IsConstructor(ctx, val)){
                 dbuf_printf(output, ANSI_RED ANSI_ITALIC "f" ANSI_RESET ANSI_MAGENTA " class(" ANSI_RESET "%s" ANSI_MAGENTA ")" ANSI_RESET, name_str);
+                obj_showproto = false;
+                goto obj_restart;
             } else {
                 dbuf_printf(output, ANSI_RED ANSI_ITALIC "f" ANSI_RESET ANSI_MAGENTA " (" ANSI_RESET "%s" ANSI_MAGENTA ")" ANSI_RESET, name_str);
             }
@@ -354,20 +367,14 @@ main:
             goto end;
         }
 
-        if(depth >= MAX_DEPTH){
+        if(depth >= MAX_DEPTH || check_circular(ctx, val, visited, depth)){
             dbuf_printf(output, ANSI_RED "ArrayLike(%ld)" ANSI_RESET, length); // 保留格式化输出
-            goto end;
-        }
-
-        // Circular check
-        if(check_circular(ctx, val, visited, depth)) {
-            dbuf_putstr(output, ANSI_RED "[circular]" ANSI_RESET);
             goto end;
         }
         
         dbuf_putstr(output, ANSI_GREEN "[ " ANSI_RESET);
         const char* indent = getBlank(depth + 1);
-        bool wrap_display = measure_wrap_disp2(ctx, val);
+        bool wrap_display = measure_wrap_disp2(ctx, val, false);
         for (uint32_t i = 0; i < length; i++) {
             if(wrap_display)
                 dbuf_printf(output, "\n%s", indent);
@@ -407,7 +414,7 @@ main:
 
         // cached_object
         if(check_circular(ctx, val, visited, depth)){
-            dbuf_putstr(output, ANSI_RED "[circular]" ANSI_RESET);
+            dbuf_putstr(output, ANSI_RED "Object<CIRCULAR>" ANSI_RESET);
             goto end;
         }
 
@@ -416,47 +423,74 @@ main:
         if(JS_IsRegisteredClass(JS_GetRuntime(ctx), class_id)){
             const char* class_name = getClassName(ctx, val);
             if(NULL == class_name){
-                dbuf_putstr(output, ANSI_MAGENTA "Object(Unknown)" ANSI_RESET);
+                // toStringTag
+                JSValue tag = JS_GetProperty(ctx, val, JS_ATOM_Symbol_toStringTag);
+                if(JS_IsString(tag)){
+                    const char* tag_str = JS_ToCString(ctx, tag);
+                    if(tag_str){
+                        dbuf_printf(output, ANSI_MAGENTA "%s" ANSI_RESET, tag_str);
+                        JS_FreeCString(ctx, tag_str);
+                        JS_FreeValue(ctx, tag);
+                        goto show_content;
+                    }
+                }
+                JS_FreeValue(ctx, tag);
+                dbuf_putstr(output, ANSI_MAGENTA "Object" ANSI_RESET);
             }else{
                 dbuf_printf(output, ANSI_MAGENTA "%s" ANSI_RESET, class_name);
                 JS_FreeCString(ctx, class_name);
             }
         }
 
-        // toString?
-        JSValue tostr = JS_GetProperty(ctx, val, JS_ATOM_toString);
-        if(JS_IsFunction(ctx, tostr)){
-            JSValue proto_str = JS_Call(ctx, tostr, val, 0, NULL);
-            if(JS_IsException(proto_str)){
-                JS_ResetUncatchableError(ctx);
-            }else{
-                const char* proto_str_str = JS_ToCString(ctx, proto_str);
-                if(proto_str_str){
-                    if(memcmp("[object ", proto_str_str, 8) == 0){
-                        JS_FreeCString(ctx, proto_str_str);
-                        JS_FreeValue(ctx, proto_str);
-                        JS_FreeValue(ctx, tostr);
-                        goto obj_restart;
-                    }
-                    if(strlen(proto_str_str) > 100 || strchr(proto_str_str, '\n')){
-                        dbuf_printf(output, "<<< \n%s\n<<<", proto_str_str);
-                    }else{
-                        dbuf_printf(output, "(" ANSI_GREEN " %s " ANSI_RESET ")", proto_str_str);
-                    }
-                    JS_FreeCString(ctx, proto_str_str);
-                }else{
-                    JS_FreeValue(ctx, proto_str);
-                    JS_FreeValue(ctx, tostr);
-                    goto obj_restart;
-                }
-            }
-            JS_FreeValue(ctx, proto_str);
-            JS_FreeValue(ctx, tostr);
-            goto end1;
+show_content:
+        JSValue proto_str;
+        // Symbol.toPrimitive
+        JSValue valtmp;
+        if(JS_IsFunction(ctx, valtmp = JS_GetPropertyNoDup(ctx, val, JS_ATOM_Symbol_toPrimitive))){
+            JSValue str = JS_NewString(ctx, "string");
+            proto_str = JS_Call(ctx, valtmp, val, 1, (JSValueConst[]){ str });
+            JS_FreeValue(ctx, str);
         }
 
+        // toString?
+        else if(JS_IsFunction(ctx, valtmp = JS_GetPropertyNoDup(ctx, val, JS_ATOM_toString))){
+            proto_str = JS_Call(ctx, valtmp, val, 0, NULL);
+        }
+
+        // normal
+        else {
+            goto obj_restart;
+        }
+
+        if (JS_IsException(proto_str)) {
+            JS_ResetUncatchableError(ctx);
+        } else {
+            const char* proto_str_str = JS_ToCString(ctx, proto_str);
+            if (proto_str_str) {
+                if (memcmp("[object ", proto_str_str, 8) == 0) {
+                    JS_FreeCString(ctx, proto_str_str);
+                    JS_FreeValue(ctx, proto_str);
+                    goto obj_restart;
+                }
+                if (strlen(proto_str_str) > 100 || strchr(proto_str_str, '\n')) {
+                    dbuf_printf(output, "<<< \n%s\n<<<", proto_str_str);
+                }
+                else {
+                    dbuf_printf(output, "(" ANSI_GREEN " %s " ANSI_RESET ")", proto_str_str);
+                }
+                JS_FreeCString(ctx, proto_str_str);
+            }
+            else {
+                JS_FreeValue(ctx, proto_str);
+                goto obj_restart;
+            }
+
+            goto end1;
+        }
+        JS_FreeValue(ctx, proto_str);
+
 obj_restart:
-        bool wrap_display = measure_wrap_disp2(ctx, val);
+        bool wrap_display = measure_wrap_disp2(ctx, val, obj_showproto);
         // 读取对象键名
         JSPropertyEnum *props;
         uint32_t len;
@@ -471,6 +505,29 @@ obj_restart:
         JSValue getter_this = JS_IsUndefined(prototype_of) ? val : prototype_of;
         for (int i = 0; i < len; i++) {
             JSPropertyDescriptor desc;
+
+            if(props[i].atom == JS_ATOM_prototype){
+                if(obj_showproto){
+                    JSValue proto = JS_GetPrototype(ctx, val);
+                    // Not globalThis.Object and globalThis.Map
+                    if(!JS_IsUndefined(proto) && !JS_IsNull(proto) && !JS_IsException(proto)){
+                        for(int i = 0; i < countof(invisible_object); i++){
+                            if(JS_GetClassID(proto) == invisible_object[i]){
+                                goto skip_proto;
+                            }
+                        }
+
+                        dbuf_printf(output, ",\n%s" ANSI_MAGENTA ANSI_BOLD "__proto__" ANSI_RESET ": ", indent);
+                        print_jsvalue(ctx, proto, val, depth + 1, visited, output);
+                    }
+                    JS_FreeValue(ctx, proto);
+                }else{
+                    continue;
+                }
+            }else if(props[i].atom == JS_ATOM_Symbol_toStringTag){
+                continue;
+            }
+
             if (-1 == JS_GetOwnProperty(ctx, &desc, val, props[i].atom)) {
                 continue;
             }
@@ -513,29 +570,15 @@ obj_restart:
                 JS_FreeValue(ctx, desc.value);
             }
             
-            if ( i != len - 1 ) dbuf_putstr(output, ", ");
+            if ( i != len - 1 && !(i == len -2 && props[i+1].atom == JS_ATOM_prototype) ) dbuf_putstr(output, ", ");
             if ( i == MAX_OBJECT_PROP_LEN ){
                 dbuf_printf(output, "\n%s...", indent);
                 break;
             }
         }
 
-        JSValue proto = JS_GetPrototype(ctx, val);
-        // Not globalThis.Object and globalThis.Map
-        if(!JS_IsUndefined(proto) && !JS_IsNull(proto) && !JS_IsException(proto)){
-            for(int i = 0; i < countof(invisible_object); i++){
-                if(JS_GetClassID(proto) == invisible_object[i]){
-                    goto skip_proto;
-                }
-            }
-
-            dbuf_printf(output, ",\n%s" ANSI_MAGENTA ANSI_BOLD "__proto__" ANSI_RESET ": ", indent);
-            print_jsvalue(ctx, proto, val, depth + 1, visited, output);
-        }
 
 skip_proto:
-        JS_FreeValue(ctx, proto);
-        
         if(wrap_display) {
             dbuf_printf(output, "\n%s", indent + 4);
         } else {
@@ -561,7 +604,7 @@ static inline void printval_internal(JSContext *ctx, int argc, JSValueConst *arg
     if(evfd_closed(target_fd)) return;
 
     for(int i = 0; i < argc; i++){
-        if(measure_wrap_disp2(ctx, argv[i])){
+        if(measure_wrap_disp2(ctx, argv[i], true)){
             wrap = true;
             break;
         }

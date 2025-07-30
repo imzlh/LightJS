@@ -24,19 +24,19 @@ struct PackResult {
 
 static inline struct PackResult* js_unpack(JSContext* ctx, uint8_t* data, size_t length, size_t* count) {
     struct PackHeader* header = (struct PackHeader*)data;
-    if(memcmp(header->magic, JSRP_MAGIC, 4)!= 0) {
+    if(memcmp(header -> magic, JSRP_MAGIC, 4)!= 0) {
         return NULL;
     }
-    if(header->version!= JSRP_VERSION) {
+    if(header -> version!= JSRP_VERSION) {
         return NULL;
     }
     
     uint8_t* ptr = data + sizeof(struct PackHeader);
     uint8_t* ptr_end = data + length;
-    struct PackResult* result = (struct PackResult*)js_malloc(ctx, sizeof(struct PackResult) * header->count);
-    memset(result, 0, sizeof(struct PackResult) * header->count);
-    *count = header->count;
-    for(uint32_t i = 0; i < header->count; i++){
+    struct PackResult* result = (struct PackResult*)js_malloc(ctx, sizeof(struct PackResult) * header -> count);
+    memset(result, 0, sizeof(struct PackResult) * header -> count);
+    *count = header -> count;
+    for(uint32_t i = 0; i < header -> count; i++){
         size_t namesize = *(uint32_t*)ptr;
         ptr += 4;
         char* name = (char*)ptr;
@@ -57,8 +57,8 @@ static inline struct PackResult* js_unpack(JSContext* ctx, uint8_t* data, size_t
 
 error:
     while (result -> name != NULL){
-        js_free(ctx, result->name);
-        JS_FreeValue(ctx, result->value);
+        js_free(ctx, result -> name);
+        JS_FreeValue(ctx, result -> value);
         result ++;
     }
     

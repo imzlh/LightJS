@@ -5,17 +5,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <errno.h>
 #include <threads.h>
 #include <signal.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/un.h>
 #include <sys/epoll.h>
+#include <sys/socket.h>
+#include <sys/random.h>
 
 #ifdef LJS_MBEDTLS
 #include "../lib/mbedtls_config.h"
@@ -78,7 +79,7 @@ int server_handle_accept(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* 
     }
 
     // 转换为Pipe
-    JSValue pipe = LJS_NewFDPipe(data -> ctx, client_fd, PIPE_READ | PIPE_WRITE, data -> bufsize, false, NULL);
+    JSValue pipe = LJS_NewFDPipe(data -> ctx, client_fd, PIPE_READ | PIPE_WRITE, false, NULL);
 
     // 调用on_connection回调
     JSValue on_connection = data -> on_connection;
@@ -102,17 +103,26 @@ static void server_handle_close(EvFD* fd, void* user_data) {
 
 #define NONBLOCK(fd) fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
 static inline int socket_create(const char* protocol){
-    if(strstr(protocol, "tcp")) return socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    if(strstr(protocol, "tcp6")) return socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    if(strstr(protocol, "unix")) return socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(memcmp(protocol, "tcp6", 4) == 0) return socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(memcmp(protocol, "tcp", 3) == 0) return socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(memcmp(protocol, "udp6", 4) == 0) return socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(memcmp(protocol, "udp", 3) == 0) return socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
     errno = EADDRNOTAVAIL;
     return -1;
 }
 
-static bool socket_connect(int sockfd, const char* protocol, const char* host, uint16_t port, const char* unix_path) {
+static int socket_connect(int sockfd, const char* protocol, const char* host, uint16_t port, const char* unix_path) {
     NONBLOCK(sockfd);
     
-    if(strstr(protocol, "tcp")) {
+    if(memcmp(protocol, "tcp6", 4) == 0) {
+        struct sockaddr_in6 addr_in6 = {
+            .sin6_family = AF_INET6,
+            .sin6_port = htons(port)
+        };
+        if(inet_pton(AF_INET6, host, &addr_in6.sin6_addr) != 1) return -2;
+
+        return connect(sockfd, (struct sockaddr*)&addr_in6, sizeof(addr_in6));
+    }else if(memcmp(protocol, "tcp", 3) == 0) {
         struct sockaddr_in addr_in = {
             .sin_family = AF_INET,
             .sin_addr.s_addr = inet_addr(host),
@@ -120,25 +130,34 @@ static bool socket_connect(int sockfd, const char* protocol, const char* host, u
         };
         if(inet_pton(AF_INET, host, &addr_in.sin_addr) != 1) return -2;
 
-        connect(sockfd, (struct sockaddr*)&addr_in, sizeof(addr_in));
-    }else if(strstr(protocol, "tcp6")) {
+        return connect(sockfd, (struct sockaddr*)&addr_in, sizeof(addr_in));
+    }else if(memcmp(protocol, "unix", 4) == 0){
+        struct sockaddr_un addr_un = {
+            .sun_family = AF_UNIX
+        };
+        strncpy(addr_un.sun_path, unix_path, sizeof(addr_un.sun_path)-1);
+
+        return connect(sockfd, (struct sockaddr*)&addr_un, sizeof(addr_un));
+    }else if(memcmp(protocol, "udp6", 4) == 0){
         struct sockaddr_in6 addr_in6 = {
             .sin6_family = AF_INET6,
             .sin6_port = htons(port)
         };
         if(inet_pton(AF_INET6, host, &addr_in6.sin6_addr) != 1) return -2;
 
-        connect(sockfd, (struct sockaddr*)&addr_in6, sizeof(addr_in6));
-    }else if(strstr(protocol, "unix")){
-        struct sockaddr_un addr_un = {
-            .sun_family = AF_UNIX
+        return connect(sockfd, (struct sockaddr*)&addr_in6, sizeof(addr_in6));
+    }else if(memcmp(protocol, "udp", 3) == 0){
+        struct sockaddr_in addr_in = {
+            .sin_family = AF_INET,
+            .sin_addr.s_addr = inet_addr(host),
+            .sin_port = htons(port)
         };
-        strncpy(addr_un.sun_path, unix_path, sizeof(addr_un.sun_path)-1);
+        if(inet_pton(AF_INET, host, &addr_in.sin_addr) != 1) return -2;
 
-        connect(sockfd, (struct sockaddr*)&addr_un, sizeof(addr_un));
+        return connect(sockfd, (struct sockaddr*)&addr_in, sizeof(addr_in));
     }
     
-    return true;
+    return false;
 }
 
 static int socket_listen(int sockfd, const char* protocol, const char* host, uint16_t port, const char* unix_path) {
@@ -600,7 +619,6 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     }
     const char *addr_str = JS_ToCString(ctx, argv[0]);
     if(addr_str == NULL)  return JS_EXCEPTION;
-    uint32_t buffer_size = BUFFER_SIZE;
     URL_data addr = {};
     if(!LJS_parse_url((char*)addr_str, &addr, NULL)) {
         JS_FreeCString(ctx, addr_str);
@@ -608,24 +626,35 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     }
     JS_FreeCString(ctx, addr_str);
 
+#ifdef LJS_MBEDTLS
+    // TLS -> TCPs
+    bool is_tls;
+    if(memcmp(addr.protocol, "tls", 3) == 0){
+        bool v6 = addr.protocol[strlen(addr.protocol)-1] == '6';
+        js_free(ctx, addr.protocol);
+        addr.protocol = js_strdup(ctx, v6 ? "tcp6s" : "tcps");
+        is_tls = true;  
+    }
+#endif
+    bool is_udp = memcmp(addr.protocol, "udp", 3) == 0;
+
     int sockfd = socket_create(addr.protocol);
     if(sockfd <= 0){
         LJS_free_url(&addr);
         return LJS_Throw(ctx, EXCEPTION_IO, "failed to create socket: %s", NULL, strerror(errno));
     }
-    socket_connect(sockfd, addr.protocol, addr.host, addr.port, addr.path);
+    int con = socket_connect(sockfd, addr.protocol, addr.host, addr.port, addr.path);
+    if(con <= 0 && errno != EINPROGRESS){
+        close(sockfd);
+        LJS_free_url(&addr);
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to connect: %s", NULL, con == -1 ? strerror(errno) : "address format error");
+    }
     LJS_free_url(&addr);
     if(sockfd == -1) return LJS_Throw(ctx, EXCEPTION_IO, "failed to connect: %s", NULL, strerror(errno));
 
     // TCP设置
     JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
     JSValue jsobj;
-    if(-1 != JS_ToUint32(ctx, &buffer_size, jsobj = JS_GetPropertyStr(ctx, obj, "bufferSize"))){
-        if(buffer_size <= 0) buffer_size = BUFFER_SIZE;
-        setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
-        setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
-    }
-    JS_FreeValue(ctx, jsobj);
     uint32_t timeout = 0;
     if(JS_ToUint32(ctx, &timeout, jsobj = JS_GetPropertyStr(ctx, obj, "timeout")) != -1){
         setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
@@ -634,19 +663,33 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     JS_FreeValue(ctx, jsobj);
     JS_FreeValue(ctx, obj);
 
-    JSValue pipe = LJS_NewFDPipe(ctx, sockfd, PIPE_READ | PIPE_WRITE | PIPE_SOCKET, buffer_size, false, NULL);
+    EvFD* evfd;
+    JSValue pipe = LJS_NewFDPipe(ctx, sockfd, PIPE_READ | PIPE_WRITE | PIPE_SOCKET, false, &evfd);
+
+    if(is_udp){
+        evfd_setup_udp(evfd);
+    }
+#ifdef LJS_MBEDTLS
+    else if(is_tls){
+        evfd_initssl(evfd, NULL, true, 0, NULL, NULL);
+    }
+#endif
+
     return pipe;
 }
 
-void ssl_handshake_callback(EvFD* evfd, void* user_data) {
+void ssl_handshake_callback(EvFD* evfd, bool success, void* user_data) {
     Promise* promise = (Promise*)user_data;
-    js_resolve(promise, JS_UNDEFINED);
+    if(success)
+        js_resolve(promise, JS_UNDEFINED);
+    else
+        js_reject(promise, "SSL handshake failed");
 }
 
 static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
 #ifdef LJS_MBEDTLS
     if(argc == 0 || !JS_IsObject(argv[0])) {
-        return LJS_Throw(ctx, "handshake_ssl: missing or invalid arguments",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: missing or invalid arguments",
             "handshake_ssl(socket: Pipe, options?: Object) => Promise<void>"
         );
     }
@@ -702,7 +745,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
         free2(ciphers);
     }
 
-    return promise -> promise;
+    return js_get_promise(promise);
 #else
     return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: mbedtls not enabled in build",
         "remove `-DLJS_MBEDTLS=off` from cmake build flags to enable"
@@ -792,10 +835,18 @@ static JSValue js_resolve_dns(JSContext *ctx, JSValueConst this_val, int argc, J
     return js_get_promise(promise);
 }
 
+static int default_rng(void *userdata, unsigned char *output, size_t output_size) {
+    if(-1 == getrandom(output, output_size, GRND_NONBLOCK)){
+        long rand = random();
+        memcpy(output, &rand, output_size);
+    }
+    return 0;
+}
+
 static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0 || !JS_IsObject(argv[0])) {
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "cert_add: missing or invalid arguments",
-            "regCert(name: string, cert: string, key: string) => void"
+            "regCert(name: string, cert: string, key: string, options?: { keypwd?: string }) => void"
         );
     }
 
@@ -807,6 +858,17 @@ static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     const char* cert_str = JS_ToCString(ctx, cert_val);
     const char* key_str = JS_ToCString(ctx, key_val);
     if(cert_str == NULL || key_str == NULL || name_str == NULL) return JS_EXCEPTION;
+
+    const char* keypwd = NULL;
+    size_t keypwd_len = 0;
+    if(argc >= 4){
+        JSValue options_val = argv[3];
+        JSValue keypwd_val = JS_GetPropertyStr(ctx, options_val, "keypwd");
+        if(JS_IsString(keypwd_val)){
+            keypwd = JS_ToCStringLen(ctx, &keypwd_len, keypwd_val);
+        }
+        JS_FreeValue(ctx, keypwd_val);
+    }
     
     // mbedtls parse
     int ret;
@@ -819,20 +881,18 @@ static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     if(ret != 0){
         mbedtls_x509_crt_free(crt);
         mbedtls_pk_free(pk);
-        return LJS_Throw(ctx, "cert_add: failed to parse certificate", NULL);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "cert_add: failed to parse certificate", NULL);
     }
-    ret = mbedtls_pk_parse_key(pk, (const unsigned char*)key_str, strlen(key_str) + 1, NULL, 0);
+    // XXX: return a promise?
+    ret = mbedtls_pk_parse_key(pk, (const unsigned char*)key_str, strlen(key_str) + 1, (void*)keypwd, keypwd_len, default_rng, NULL);
     JS_FreeCString(ctx, key_str);
+    JS_FreeCString(ctx, name_str);
     if(ret != 0){
         mbedtls_x509_crt_free(crt);
         mbedtls_pk_free(pk);
-        return LJS_Throw(ctx, "cert_add: failed to parse private key", NULL);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "cert_add: failed to parse private key", NULL);
     }
 
-    // add to global
-    evfd_set_sni(strdup2(name_str), NULL, crt, pk);
-    JS_FreeCString(ctx, name_str);
-    
     return JS_UNDEFINED;
 #else
     return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "mbedtls not enabled in build",
@@ -897,41 +957,63 @@ bool LJS_dns_resolve(
 
 EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int bufsize) {
     bool ssl = protocol[strlen(protocol) - 1] == 's';
-    if(strstr(protocol, "unix") == NULL){
+    const char* host4 = NULL, *host6 = NULL;
+    // unix domain socket is not required to resolve DNS
+    if(memcmp(protocol, "unix", 4)){
         // resolve DNS sync
         // XXX: use async DNS resolve
-        struct addrinfo hints = {0}, *res;
+        struct addrinfo hints = {0}, *res, *res0;
         hints.ai_family = AF_INET; // IPv4
         hints.ai_socktype = SOCK_STREAM;
 
         if (getaddrinfo(hostname, NULL, &hints, &res) != 0) {
+            errno = EADDRNOTAVAIL;
             return NULL;
         }
 
-        switch(res -> ai_family){
-            case AF_INET:
-                hostname = inet_ntoa(((struct sockaddr_in*)res -> ai_addr) -> sin_addr);
-                protocol = "tcp";
+        res0 = res;
+        do{
+            switch(res0 -> ai_family){
+                case AF_INET:
+                    if(!host4)
+                        host4 = inet_ntoa(((struct sockaddr_in*)res0 -> ai_addr) -> sin_addr);
                 break;
-            case AF_INET6:
-                hostname = inet_ntop(AF_INET6, &((struct sockaddr_in6*)res -> ai_addr) -> sin6_addr, NULL, 0);
-                protocol = "tcp6";
+                case AF_INET6:
+                    if(!host6)
+                        host6 = inet_ntop(AF_INET6, &((struct sockaddr_in6*)res0 -> ai_addr) -> sin6_addr, NULL, 0);
                 break;
-            default:
-                freeaddrinfo(res);
-                return NULL;
-        }
+                default:
+                    freeaddrinfo(res);
+                    return NULL;
+            }
+        }while((res0 = res0 -> ai_next) != NULL);
         freeaddrinfo(res);
+
+        hostname = host6 ? host6 : host4;
+        protocol = host6 ? "tcp6" : "tcp";
     }
+    bool try_ipv4 = true;
+retry:
     int fd = socket_create(protocol);
     if(fd < 0) return NULL;
     socket_connect(fd, protocol, hostname, port, hostname);
     EvFD* evfd = evfd_new(fd, false, true, true, bufsize, NULL, NULL);
+    if(evfd == NULL || evfd_closed(evfd)){
+        // also try ipv6 address if ipv4 fails for non-unix socket
+        if(try_ipv4 && host4 && memcmp(protocol, "unix", 4)){
+            try_ipv4 = false;
+            hostname = host4;
+            protocol = "tcp";
+            goto retry;
+        }
+        return NULL;
+    }
     if(ssl){
 #ifdef LJS_MBEDTLS
         mbedtls_ssl_config* config = NULL;
         evfd_initssl(evfd, &config, true, MBEDTLS_SSL_PRESET_DEFAULT, NULL, NULL);
 #else
+        errno = ENOTSUP;
         evfd_close(evfd);
         return NULL;
 #endif

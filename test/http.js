@@ -24,12 +24,12 @@ import { bind } from "socket";
 await test('fetch', async () => {
     // await delay(3000);  // wait async bind syscall
     console.log("fetch start");
-    // const response = await fetch('http://127.0.0.1:8080', {
-    const response = await fetch('http://192.168.1.1:81', {
-    // const response = await fetch(self.argv[1] ?? 'http://127.0.0.1:81/', {
-        keepalive: true,
+    const response = await fetch('https://cp.cloudflare.com/generate_204', {
+        // note: keepalive会导致fd被占用测试完无法自动退出
+        keepalive: false,
         method: 'GET'
     });
+    console.log(response);
     assert(response instanceof Response);
     // for ts
     if(!(response instanceof Response)) return;

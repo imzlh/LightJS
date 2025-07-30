@@ -291,7 +291,7 @@ static JSValue js_zlib_deflate_stream(JSContext *ctx, JSValueConst this_val, int
     if(decompress) inflateInit(&js_stream -> zstream);
     else deflateInit(&js_stream -> zstream, Z_DEFAULT_COMPRESSION);
 
-    JSValue stream = LJS_NewU8Pipe(ctx, PIPE_READ | PIPE_WRITE, LJS_ZLIB_CHUNK_SIZE, stream_poll, stream_write, stream_close, js_stream);
+    JSValue stream = LJS_NewU8Pipe(ctx, PIPE_READ | PIPE_WRITE, stream_poll, stream_write, stream_close, js_stream);
     return stream;
 
 invaild_args:

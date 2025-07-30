@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <signal.h>
+#include <time.h>
 #include <linux/aio_abi.h>
 #include <sys/ioctl.h>
 #include <sys/epoll.h>
@@ -14,6 +15,7 @@
 #include <sys/eventfd.h>
 #include <sys/syscall.h>
 #include <sys/socket.h>
+#include <sys/random.h>
 #include <arpa/inet.h>
 
 // #undef LJS_DEBUG    // debug
@@ -28,6 +30,7 @@
 #include <mbedtls/ssl.h>
 #include <mbedtls/error.h>
 #include <mbedtls/debug.h>
+#include <mbedtls/ctr_drbg.h>
 
 #ifndef MBEDTLS_X509_CRT_PARSE_C
 #error "The build of MbedTLS does not support X509 certificates."
@@ -70,7 +73,7 @@ struct UDPContext {
     struct sockaddr_storage peer_addr;
     socklen_t addr_len;
 #ifdef LJS_MBEDTLS
-    mbedtls_ssl_context *dtls_ctx;
+    mbedtls_ssl_context* dtls_ctx;
 #endif
 };
 
@@ -107,7 +110,6 @@ struct Task {
     } cb;
 
     struct list_head list;
-    uint32_t aio_write_remain;
 };
 
 #ifdef LJS_MBEDTLS
@@ -116,11 +118,17 @@ struct EvFD_SSL {
     mbedtls_ssl_config config;
     struct Buffer* sendbuf;
     struct Buffer* recvbuf;
-    bool ssl_handshaking;
-    bool ssl_read_wants_write;
-    bool ssl_write_wants_read;
+
+    // for ssl read/write wants
+    bool want_read;
+
+    // for handshake
+    bool ssl_handshaking;       // SSL handshake in progress
     EvSSLHandshakeCallback handshake_cb;
     void* handshake_user_data;
+
+    // ssl error reason? by default =0(no error);
+    int mb_errno;
 };
 #endif
 
@@ -130,7 +138,7 @@ struct InotifyContext {
     char* move_tmp[2];
 };
 
-struct EvFD{
+struct EvFD {
     union {
         aio_context_t ctx;
         uint64_t __padding;
@@ -139,21 +147,23 @@ struct EvFD{
     int fd[2];  // if type==EVFD_AIO, fd[1] is the real fd
     enum EvFDType type;
 
-    struct UDPContext* proto_ctx;   // udp
-    struct InotifyContext* inotify;
+    union {
+        struct UDPContext* udp;
+        struct InotifyContext* inotify;
+    } proto;
 
 #ifdef LJS_MBEDTLS
     struct EvFD_SSL* ssl;           // for ssl
 #endif
     bool task_based;
-    union{
-        struct{
+    union {
+        struct {
             struct list_head read_tasks;
             struct list_head write_tasks;
             struct list_head close_tasks;
             EvFinalizerCallback finalizer;
             void* finalizer_opaque;
-            
+
             uint32_t offset;    // for AIO
         } task;
         struct {
@@ -165,10 +175,10 @@ struct EvFD{
             void* close_opaque;
         } cb;
     } u;
-    
+
     struct Buffer* incoming_buffer;
     bool strip_if_is_n; // whether to strip the \n at the start of a line
-                        // for readline task when previous buffer is end of \r
+    // for readline task when previous buffer is end of \r
     bool destroy;       // whether to destroy the fd before next loop
 
     int epoll_flags;
@@ -194,6 +204,21 @@ static int is_aio_supported = -1;
 
 // used when evfd_destroy is called
 static thread_local struct list_head evfd_list;
+
+#ifdef LJS_MBEDTLS
+// override certs
+static mbedtls_x509_crt tls_global_cert;
+static pthread_rwlock_t tls_cert_mod_lock;
+
+// use system random to generate random numbers
+static int default_rng(void* userdata, unsigned char* output, size_t output_size) {
+    if (-1 == getrandom(output, output_size, GRND_NONBLOCK)) {
+        long rand = random();
+        memcpy(output, &rand, output_size);
+    }
+    return 0;
+}
+#endif
 
 #define INIT_EVFD2(evfd) \
     evfd -> incoming_buffer = NULL; \
@@ -223,25 +248,25 @@ void __trace_debug(int events, int direction) {
 #define TRACE_NSTDEVENTS(evfd, add) if((evfd) -> fd[0] > STDERR_FILENO){ TRACE_EVENTS(evfd, add); }
 
 // linux_kernel aio syscall
-static inline int io_setup(unsigned nr, aio_context_t *ctxp) { 
-    return (int)syscall(__NR_io_setup, nr, ctxp); 
-} 
-
-static inline int io_destroy(aio_context_t ctx) { 
-	return (int)syscall(__NR_io_destroy, ctx); 
-} 
-
-static inline int io_submit(aio_context_t ctx, long nr, struct iocb **iocbpp) { 
-	return (int)syscall(__NR_io_submit, ctx, nr, iocbpp); 
+static inline int io_setup(unsigned nr, aio_context_t* ctxp) {
+    return (int) syscall(__NR_io_setup, nr, ctxp);
 }
 
-static inline int io_getevents(aio_context_t ctx, long min_nr, long max_nr, struct io_event *events, struct timespec *timeout) { 
-	return (int)syscall(__NR_io_getevents, ctx, min_nr, max_nr, events, timeout);
-} 
+static inline int io_destroy(aio_context_t ctx) {
+    return (int) syscall(__NR_io_destroy, ctx);
+}
 
-static inline int io_cancel(aio_context_t ctx, struct iocb *iocb, struct io_event *result) { 
-	return (int)syscall(__NR_io_cancel, ctx, iocb, result); 
-} 
+static inline int io_submit(aio_context_t ctx, long nr, struct iocb** iocbpp) {
+    return (int) syscall(__NR_io_submit, ctx, nr, iocbpp);
+}
+
+static inline int io_getevents(aio_context_t ctx, long min_nr, long max_nr, struct io_event* events, struct timespec* timeout) {
+    return (int) syscall(__NR_io_getevents, ctx, min_nr, max_nr, events, timeout);
+}
+
+static inline int io_cancel(aio_context_t ctx, struct iocb* iocb, struct io_event* result) {
+    return (int) syscall(__NR_io_cancel, ctx, iocb, result);
+}
 
 __attribute__((constructor)) static void evloop_init() {
     struct sigaction act = {
@@ -252,32 +277,59 @@ __attribute__((constructor)) static void evloop_init() {
 
     aio_context_t test_ctx;
     int ret = io_setup(MAX_EVENTS, &test_ctx);
-    if(-1 == ret){
+    if (-1 == ret) {
 #ifdef LJS_DEBUG
         perror("io_setup");
 #endif
         is_aio_supported = false;
-    }else{
+    }
+    else {
         io_destroy(test_ctx);
     }
     is_aio_supported = true;
+
+#ifdef LJS_MBEDTLS
+    // init 
+    mbedtls_x509_crt_init(&tls_global_cert);
+
+    // load system default ca certificates
+    int mbret = mbedtls_x509_crt_parse_file(&tls_global_cert, "/etc/ssl/certs/ca-certificates.crt");
+    if (mbret != 0) {
+        char errbuf[100];
+        mbedtls_strerror(mbret, errbuf, sizeof(errbuf));
+        printf("Warn: Failed to load default certificates: %s\n", errbuf);
+    }
+
+    // mutex for cert modification
+    pthread_rwlock_init(&tls_cert_mod_lock, NULL);
+
+#if defined(LJS_DEBUG) && defined(MBEDTLS_DEBUG_C)
+    mbedtls_debug_set_threshold(4);
+#endif
+#endif
 }
+
+#if defined(LJS_MBEDTLS) && defined(MBEDTLS_DEBUG_C)
+void debug_callback(void* evfd, int level, const char* file, int line, const char* str) {
+    printf("[ MbedTLS ] fd=%d %s %s:%04d: %s", ((EvFD*)evfd) -> fd[0], level == MBEDTLS_SSL_ALERT_LEVEL_FATAL ? "E:" : level == MBEDTLS_SSL_ALERT_LEVEL_WARNING ? "W:" : "I:", file, line, str);
+}
+#endif
 
 static void handle_close(int fd, EvFD* evfd);
 
-// 内部辅助函数
+// helper functions
 #define EPOLL_CTL_FREE -1
 static thread_local struct EvFD* evfd_modify_tasks[1024];
 static thread_local int evfd_modify_tasks_count = 0;
-static inline void evfd_ctl(struct EvFD* evfd, int epoll_flags){
+static inline void evfd_ctl(struct EvFD* evfd, int epoll_flags) {
     assert(!evfd -> destroy);
-    if(epoll_flags == evfd -> epoll_flags){
-        if(evfd -> modify_flag){
+    if (epoll_flags == evfd -> epoll_flags) {
+        if (evfd -> modify_flag) {
             // delete from modify_tasks
-            for(int i = 0; i < evfd_modify_tasks_count; i++){
-                if(evfd_modify_tasks[i] == evfd){
-                    evfd_modify_tasks[i] = evfd_modify_tasks[evfd_modify_tasks_count -1];
-                    evfd_modify_tasks_count --;
+            for (int i = 0; i < evfd_modify_tasks_count; i++) {
+                if (evfd_modify_tasks[i] == evfd) {
+                    evfd_modify_tasks[i] = evfd_modify_tasks[evfd_modify_tasks_count - 1];
+                    evfd_modify_tasks_count--;
                     break;
                 }
             }
@@ -287,7 +339,7 @@ static inline void evfd_ctl(struct EvFD* evfd, int epoll_flags){
     }
 
     // already modify?
-    if(evfd -> modify_flag){
+    if (evfd -> modify_flag) {
         evfd -> modify_flag = epoll_flags;
         return;
     }
@@ -296,42 +348,50 @@ static inline void evfd_ctl(struct EvFD* evfd, int epoll_flags){
     evfd_modify_tasks[evfd_modify_tasks_count++] = evfd;
     evfd -> modify_flag = epoll_flags;
 
-    if(epoll_flags == EPOLL_CTL_FREE){
+    if (epoll_flags == EPOLL_CTL_FREE) {
         // remove from evfd_list
         list_del(&evfd -> link);
     }
 }
 
-static inline void evfd_mod(struct EvFD* evfd, bool add, int epoll_flags){
+static inline void evfd_mod(struct EvFD* evfd, bool add, int epoll_flags) {
     int flag = evfd -> modify_flag ? evfd -> modify_flag : evfd -> epoll_flags;
-    if(add) flag |= epoll_flags;
+    if (add) flag |= epoll_flags;
     else flag &= ~epoll_flags;
     evfd_ctl(evfd, flag);
 }
 
-static inline void evfd_mod_start(){
-    for(int i = 0; i < evfd_modify_tasks_count; i++){
+static inline void evfd_mod_start() {
+    for (int i = 0; i < evfd_modify_tasks_count; i++) {
         struct EvFD* task = evfd_modify_tasks[i];
-        if(task -> modify_flag == EPOLL_CTL_FREE){
+        if (task -> modify_flag == EPOLL_CTL_FREE) {
 #ifdef LJS_DEBUG
             printf("evfd_mod_start: free fd=%d\n", task -> fd[0]);
 #endif
+#ifdef LJS_MBEDTLS
+            if(task -> type == EVFD_SSL){
+                // clean up ssl
+                free2(task -> ssl);
+            }
+#endif
             task -> fd[0] = -1; // fall safe
             free2(task);
-        }else{
+        }        
+else {
             struct epoll_event ev = {
                .events = task -> modify_flag,
                .data.ptr = task
             };
-            if(-1 == epoll_ctl(epoll_fd, EPOLL_CTL_MOD, task -> fd[0], &ev)){
+            if (-1 == epoll_ctl(epoll_fd, EPOLL_CTL_MOD, task -> fd[0], &ev)) {
 #ifdef LJS_DEBUG
                 perror("epoll_ctl");
 #endif
-            }else{
+            }            
+else {
 #ifdef LJS_DEBUG
                 printf("epoll_ctl: fd=%d, events=%d, r=%d, w=%d\n", task -> fd[0], task -> modify_flag, task -> modify_flag & EPOLLIN, task -> modify_flag & EPOLLOUT);
 #endif
-                task -> epoll_flags = task -> modify_flag;    
+                task -> epoll_flags = task -> modify_flag;
             }
             task -> modify_flag = 0;
         }
@@ -341,37 +401,40 @@ static inline void evfd_mod_start(){
 
 static inline void free_task(struct Task* task);
 
-// 在handle_read/handle_write中添加队列状态检查
-static void check_queue_status(EvFD* evfd, int fd) {
-    if(evfd -> destroy) return;
+// required to check whether fd should EPOLLIN/EPOLLOUT
+static void check_queue_status(EvFD* evfd) {
+    if (evfd -> destroy) return;
 
     uint32_t new_events = EPOLLLT;
-    switch(evfd -> type){
-        case EVFD_AIO:
-        case EVFD_TIMER:
-        case EVFD_INOTIFY:
-            if(!list_empty(&evfd -> u.task.read_tasks) || !list_empty(&evfd -> u.task.write_tasks))
-                new_events |= EPOLLIN;
+    switch (evfd -> type) {
+    case EVFD_AIO:
+    case EVFD_TIMER:
+    case EVFD_INOTIFY:
+        if (!list_empty(&evfd -> u.task.read_tasks) || !list_empty(&evfd -> u.task.write_tasks))
+            new_events |= EPOLLIN;
         break;
 
 #ifdef LJS_MBEDTLS
-        case EVFD_SSL:
-        case EVFD_DTLS:
-            new_events |= EPOLLHUP | EPOLLERR;
-            if(evfd -> ssl -> ssl_handshaking) new_events |= EPOLLIN | EPOLLOUT;
-            else{ 
-                if(evfd -> ssl -> ssl_read_wants_write) new_events |= EPOLLOUT;
-                if(evfd -> ssl -> ssl_write_wants_read) new_events |= EPOLLIN;
-            }
+    case EVFD_SSL:
+    case EVFD_DTLS:
+        new_events |= EPOLLHUP | EPOLLERR;
+        // if(evfd -> ssl -> ssl_wants_write) new_events |= EPOLLOUT;
+        // if(evfd -> ssl -> want_read) new_events |= EPOLLIN;
+        if (!buffer_is_empty(evfd -> ssl -> sendbuf)) {
+            new_events |= EPOLLOUT;
+        }
+        if (evfd -> ssl -> want_read) {
+            new_events |= EPOLLIN;
+        }
         break;
 #endif
-        default:
-            new_events |= EPOLLHUP | EPOLLERR;
-            if(!list_empty(&evfd -> u.task.read_tasks)) new_events |= EPOLLIN;
-            if(!list_empty(&evfd -> u.task.write_tasks)) new_events |= EPOLLOUT;
+    default:
+        new_events |= EPOLLHUP | EPOLLERR;
+        if (!list_empty(&evfd -> u.task.read_tasks)) new_events |= EPOLLIN;
+        if (!list_empty(&evfd -> u.task.write_tasks)) new_events |= EPOLLOUT;
         break;
     }
-    
+
     // 修改epoll事件
     evfd_ctl(evfd, new_events);
 }
@@ -380,19 +443,15 @@ static void check_queue_status(EvFD* evfd, int fd) {
 #define CALL_AND_HANDLE(func, blk, ...) int _ret = func(__VA_ARGS__); \
     if (unlikely(evfd -> destroy)) return; \
     if (!unlikely(_ret & EVCB_RET_REWIND)) blk; \
-    if (_ret & EVCB_RET_CONTINUE){ \
-        /* reuse the same task to read(task resume) */ \
-        list_add(&task -> list, &evfd -> u.task.read_tasks); TRACE_EVENTS(evfd, +1); \
-        goto main;\
-    }
+    if (_ret & EVCB_RET_CONTINUE) goto main;
 
-static inline bool pipeto_ready(struct PipeToTask* task){
-    if(task -> ready_state == 2) return true;
-    return task -> ready_state ++ == 1;
+static inline bool pipeto_ready(struct PipeToTask* task) {
+    if (task -> ready_state == 2) return true;
+    return task -> ready_state++ == 1;
 }
 
-static inline void __pipeto_remove_task(struct PipeToTask* task, struct list_head* tlist){
-    bool del_task = false; 
+static inline void __pipeto_remove_task(struct PipeToTask* task, struct list_head* tlist) {
+    bool del_task = false;
     struct list_head* cur, * tmp;
     list_for_each_safe(cur, tmp, tlist) {
         struct Task* t = list_entry(cur, struct Task, list);
@@ -418,7 +477,8 @@ static inline bool pipeto_handle_close(EvFD* evfd, struct PipeToTask* task, bool
     if (task -> notify) {
         if (error) {
             task -> notify(evfd, task -> to, EV_PIPETO_NOTIFY_CLOSED, task -> notify_opaque);
-        }else if (is_from && !has_data) {
+        }
+        else if (is_from && !has_data) {
             task -> notify(evfd, task -> to, EV_PIPETO_NOTIFY_DONE, task -> notify_opaque);
         }
         task -> notify = NULL;
@@ -435,33 +495,75 @@ static inline bool pipeto_handle_close(EvFD* evfd, struct PipeToTask* task, bool
     const bool keep = is_from && has_data && !both_closed;
 
     if (keep) {
-        check_queue_status(task -> to, evfd_getfd(task -> to, NULL));
-    } else {
+        check_queue_status(task -> to);
+    }
+    else {
         if (!both_closed) {
-            struct list_head* target_list = is_from 
-                ? &task -> to -> u.task.write_tasks 
+            struct list_head* target_list = is_from
+                ? &task -> to -> u.task.write_tasks
                 : &task -> from -> u.task.read_tasks;
             EvFD* fd = is_from ? task -> from : task -> to;
-            
+
             __pipeto_remove_task(task, target_list);
             TRACE_NSTDEVENTS(is_from ? task -> to : task -> from, -1);
-            check_queue_status(fd, evfd_getfd(fd, NULL));
+            check_queue_status(fd);
         }
-        
+
         free2(task);
     }
-    
+
     return false;
 }
 
 static inline void free_task(struct Task* task) {
-    if(task -> buffer) buffer_free(task -> buffer);
+    if (task -> buffer) buffer_free(task -> buffer);
     free2(task);
 }
 
-// 事件处理函数
+// Note: as handshake will return 0 if successful, zero_as_error should set to false
+static inline int handle_mbedtls_ret(EvFD* evfd, bool zero_as_error, int ret) {
+    if (ret > 0) {
+        return ret;
+    } else if (ret == 0 && zero_as_error) {
+        handle_close(evfd_getfd(evfd, NULL), evfd);
+        return -1;
+    } else switch (ret) {
+        case 0:
+        case MBEDTLS_ERR_SSL_WANT_READ:
+        case MBEDTLS_ERR_SSL_WANT_WRITE:
+            // short of data
+            // Note: handled in handle_ssl_recv/send
+        return 0;
+
+        case MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY:
+            handle_close(evfd_getfd(evfd, NULL), evfd);
+        break;
+
+        default:
+            evfd -> ssl -> mb_errno = ret;
+#ifdef LJS_DEBUG
+            char errbuf[100];
+            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+            printf("MbedTLS error: %s\n", errbuf);
+#endif
+            handle_close(evfd_getfd(evfd, NULL), evfd);
+        break;
+    }
+
+    return -1;
+}
+
+static void handle_handshake_done(EvFD* evfd){
+    evfd -> ssl -> ssl_handshaking = false;
+
+    // callback
+    if(evfd -> ssl -> handshake_cb)
+        evfd -> ssl -> handshake_cb(evfd, true, evfd -> ssl -> handshake_user_data);
+}
+
+// handle readable event/ssl recv event
 static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotify_event* inev) {
-    if(list_empty(&evfd -> u.task.read_tasks)) goto end;
+    if (list_empty(&evfd -> u.task.read_tasks)) goto end;
     // get data
     struct Task* next_task = list_entry(evfd -> u.task.read_tasks.next, struct Task, list);
     uint32_t n = 0;
@@ -469,14 +571,13 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
         uint8_t* ptr_buffer = evfd -> incoming_buffer -> buffer + evfd -> incoming_buffer -> end;
         n = buffer_read(evfd -> incoming_buffer, fd, UINT32_MAX);
 
-        if (n == -1){ 
+        // n == 0: use existing data, no-return
+        if (n == -1) {
 #ifdef LJS_DEBUG
             perror("evfd_read");
 #endif
             return handle_close(fd, evfd);
         }    // error
-
-        if (n <= 0) return;
 
         // strip_if_is_\n
         if (evfd -> strip_if_is_n && *ptr_buffer == '\n') {
@@ -484,16 +585,32 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
             if (n-- == 1) return;
         }
         evfd -> strip_if_is_n = false;
-    } else if (evfd -> type == EVFD_AIO/* && iocb */) {
+    }
+    else if (evfd -> type == EVFD_AIO/* && iocb */) {
         n = ioev -> res;
         evfd -> u.task.offset += n;
         buffer_push(evfd -> incoming_buffer, (uint8_t*) ((struct iocb*) ioev -> obj) -> aio_buf, n);
-    } else if (evfd -> type == EVFD_SSL) {
-        // evfd SSL下，只有mbedtls处理后才有数据
-        n = buffer_used(evfd -> incoming_buffer);
-    } else if (evfd -> type == EVFD_UDP || evfd -> type == EVFD_DTLS) {
+    }
+    else if (evfd -> type == EVFD_SSL) {
+        // evfd_ssl: read from mbedtls
+        if(evfd -> ssl -> ssl_handshaking){
+            n = handle_mbedtls_ret(evfd, false, mbedtls_ssl_handshake(&evfd -> ssl -> ctx));
+            if(n == -1) return;
+            handle_handshake_done(evfd);
+
+            // write to fd before read
+            handle_read(fd, evfd, NULL, NULL);
+            if(evfd -> destroy) return;
+        }
+        buffer_flat(evfd -> incoming_buffer);
+        n = handle_mbedtls_ret(evfd, true,
+            mbedtls_ssl_read(&evfd -> ssl -> ctx, evfd -> incoming_buffer -> buffer + evfd -> incoming_buffer -> end, evfd -> incoming_buffer -> size - evfd -> incoming_buffer -> end)
+        );
+        if (n == -1) return;
+    }
+    else if (evfd -> type == EVFD_UDP || evfd -> type == EVFD_DTLS) {
         // TODO: buffer_recvfrom
-        struct UDPContext* ctx = evfd -> proto_ctx;
+        struct UDPContext* ctx = evfd -> proto.udp;
         n = recvfrom(fd, evfd -> incoming_buffer -> buffer,
             evfd -> incoming_buffer -> size - evfd -> incoming_buffer -> end, 0,
             (struct sockaddr*) &ctx -> peer_addr,
@@ -507,30 +624,33 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
         }
         else if (n == 0) return;
         evfd -> incoming_buffer -> end += n;
-    } else if(next_task -> type == EV_TASK_PIPETO){
-        if(!pipeto_ready(next_task -> cb.pipeto)){
+    }
+    else if (next_task -> type == EV_TASK_PIPETO) {
+        if (!pipeto_ready(next_task -> cb.pipeto)) {
             // suspend read
             evfd_mod(evfd, false, EPOLLIN);
             return;
         }
         // closed?
-        if(PIPETO_WCLOSED(next_task -> cb.pipeto -> closed)){
+        if (PIPETO_WCLOSED(next_task -> cb.pipeto -> closed)) {
             // move data back
             struct Buffer* buf = next_task -> cb.pipeto -> exchange_buffer;
             n = buffer_merge2(evfd -> incoming_buffer, buf);
             // finalize task
             free_task(next_task);
-        }else{
+        }
+        else {
             // check whether buffer full
             EvFD* to = next_task -> cb.pipeto -> to;
             struct Buffer* buf = next_task -> cb.pipeto -> exchange_buffer;
-            if(buffer_is_full(buf)){
+            if (buffer_is_full(buf)) {
                 evfd_mod(evfd, false, EPOLLIN); // suspend read
                 return;
-            }else{
+            }
+            else {
                 evfd_mod(to, true, EPOLLOUT);   // wakeup write
                 n = buffer_read(buf, fd, UINT32_MAX);
-                if (n == -1) { 
+                if (n == -1) {
 #ifdef LJS_DEBUG
                     perror("evfd_read");
 #endif
@@ -540,30 +660,34 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
         }
     }
 
-    struct list_head *cur, *tmp;
+    struct list_head* cur, * tmp;
+    bool retried = false;
+mainloop:
     list_for_each_prev_safe(cur, tmp, &evfd -> u.task.read_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
 
-        // linux inotify文件更改事件
-        if(evfd -> type == EVFD_INOTIFY){
-            char real_path[PATH_MAX +1];
+        // linux inotify
+        // XXX: use struct to compute before for better performance?
+        if (evfd -> type == EVFD_INOTIFY) {
+            char real_path[PATH_MAX + 1];
 
             // find path by wd
-            const char* str = evfd -> inotify -> paths[inev -> wd];
+            const char* str = evfd -> proto.inotify -> paths[inev -> wd];
             assert(str);
             size_t len = strlen(str);
-            memcpy(real_path, str, len +1);
+            memcpy(real_path, str, len + 1);
 
-            if(inev -> len){
+            if (inev -> len) {
                 memcpy(real_path + len, inev -> name, inev -> len);
-                len += inev -> len -1;  // note: len include \0
+                len += inev -> len - 1;  // note: len include \0
             }
 
-            if(inev -> cookie & IN_MOVED_FROM){
-                evfd -> inotify -> move_tmp[0] = strdup2(real_path);
+            if (inev -> cookie & IN_MOVED_FROM) {
+                evfd -> proto.inotify -> move_tmp[0] = strdup2(real_path);
                 goto inev_move;
-            }else if(inev -> cookie & IN_MOVED_TO){
-                evfd -> inotify -> move_tmp[1] = strdup2(real_path);
+            }
+            else if (inev -> cookie & IN_MOVED_TO) {
+                evfd -> proto.inotify -> move_tmp[1] = strdup2(real_path);
                 goto inev_move;
             }
 
@@ -571,31 +695,33 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
             task -> cb.inotify(evfd, real_path, inev -> mask, NULL, task -> opaque);
             continue;
 
-inev_move:
-            if(!(
-                evfd -> inotify -> move_tmp[0] &&
-                evfd -> inotify -> move_tmp[1]
-            )) continue;
+        inev_move:
+            if (!(
+                evfd -> proto.inotify -> move_tmp[0] &&
+                evfd -> proto.inotify -> move_tmp[1]
+                )) continue;
             // handle move event
-            task -> cb.inotify(evfd, evfd -> inotify -> move_tmp[0], IN_MOVE, NULL, task -> opaque);
-            free2(evfd -> inotify -> move_tmp[0]);
-            evfd -> inotify -> move_tmp[0] = NULL;
-            free2(evfd -> inotify -> move_tmp[1]);
-            evfd -> inotify -> move_tmp[1] = NULL;
+            task -> cb.inotify(evfd, evfd -> proto.inotify -> move_tmp[0], IN_MOVE, NULL, task -> opaque);
+            free2(evfd -> proto.inotify -> move_tmp[0]);
+            evfd -> proto.inotify -> move_tmp[0] = NULL;
+            free2(evfd -> proto.inotify -> move_tmp[1]);
+            evfd -> proto.inotify -> move_tmp[1] = NULL;
             continue;
-            
-        }else if(evfd -> type == EVFD_TIMER){
+
+        }
+        else if (evfd -> type == EVFD_TIMER) {
             // read timerfd to get count
             uint64_t val;
-            if(sizeof(val) == read(fd, &val, sizeof(val))){
+            if (sizeof(val) == read(fd, &val, sizeof(val))) {
                 task -> cb.timer(val, task -> opaque);
                 // will be reused, clear current task
-                if(((struct TimerFD*)evfd) -> once){
+                if (((struct TimerFD*) evfd) -> once) {
                     list_del(&task -> list);
                     TRACE_EVENTS(evfd, -1);
                     free2(task);
                 }
-            }else{
+            }            
+else {
 #ifdef LJS_DEBUG
                 perror("timerfd read");
 #endif
@@ -606,171 +732,191 @@ inev_move:
         TRACE_EVENTS(evfd, -1);
         list_del(cur); // avoid recursive call
 
-        if(task -> type == EV_TASK_NOOP){
+        if (task -> type == EV_TASK_NOOP) {
             task -> cb.sync(evfd, true, task -> opaque);
             continue;
         }
 
-main:   // while loop
+    main:   // while loop
         uint32_t bufsize = buffer_used(evfd -> incoming_buffer);
-        if(bufsize == 0) goto end;
-        switch(task -> type){
-            case EV_TASK_READ: // readsize
-                // note: buffer contains 1 byte free space to maintain circular buffer
-                if (task -> buffer -> size -1 <= bufsize) {
-                    // export
-                    buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, task -> buffer -> size);
-                    CALL_AND_HANDLE(
-                        task -> cb.read,
-                        { buffer_seek(evfd -> incoming_buffer, evfd -> incoming_buffer -> end); }, 
-                        evfd, task -> buffer -> buffer, task -> buffer -> size -1, task -> opaque
-                    );
-                    goto _continue;
-                } else if(-1 == n) {
-#ifdef LJS_DEBUG
-                    perror("evfd_readsize");
-#endif
-                    TRACE_EVENTS(evfd, +1); handle_close(fd, evfd);
-                    goto _break;
-                }
-                goto __break;
-
-            case EV_TASK_READLINE:
-                if (n <= 0) {
-                    if (n == 0){
-                        TRACE_EVENTS(evfd, +1); handle_close(fd, evfd);
-                    }
-                    goto _break;
-                }
-                
-                // find \r\n or \n
-                char forward_char = 0;
-                uint32_t first_r_occurrence = UINT32_MAX;
-                uint32_t first_r_bytes = 0;
-                BUFFER_FOREACH_BYTE(evfd -> incoming_buffer, bytes, chr) {
-                    uint32_t i = __i;   // note: __i is index of current byte in buffer    
-                    if (chr == '\n') {
-                        char* nchr = (void*)(evfd -> incoming_buffer -> buffer + i);
-                        // CRLF check: replace to end-of-line with \0
-                        if(i != 0 && forward_char == '\r') nchr -= 1;
-                        *nchr = '\0';
-                        
-                        // Copy buffer to task buffer
-                        uint32_t readed = buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, bytes);
-
-                        // Trigger callback
-                        CALL_AND_HANDLE(
-                            task -> cb.read,
-                            { buffer_seek(evfd -> incoming_buffer, i +1); },
-                            evfd, task -> buffer -> buffer, readed, task -> opaque
-                        );
-                        goto _continue;
-                    } else if(first_r_occurrence == UINT32_MAX && chr == '\r'){
-                        // fallback if \n not found
-                        first_r_occurrence =i;
-                        first_r_bytes = bytes;
-                    }
-
-                    forward_char = chr;
-                }
-
-                // fallback: \r
-                if(first_r_occurrence != UINT32_MAX){
-                    evfd -> strip_if_is_n = true;
-                    char* rchr = (void*)(evfd -> incoming_buffer -> buffer + first_r_occurrence);
-                    *rchr = '\0';
-
-                    uint32_t readed = buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, first_r_bytes);
-                    CALL_AND_HANDLE(
-                        task -> cb.read,
-                        { buffer_seek(evfd -> incoming_buffer, first_r_occurrence +1); },
-                        evfd, task -> buffer -> buffer, readed, task -> opaque
-                    );
-                    
-                    goto _continue;
-                }
-                
-                // Buffer full?
-                // Note: buffer contains 1 byte free space to maintain circular buffer and \0 terminator
-                if (bufsize >= (task -> buffer -> size -2)) {
-                    *(task -> buffer -> buffer + task -> buffer -> size -2) = '\0';
-                    buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, task -> buffer -> size -2);
-                    CALL_AND_HANDLE(
-                        task -> cb.read,
-                        { buffer_seek_cur(evfd -> incoming_buffer, task -> buffer -> size -2); },
-                        evfd, task -> buffer -> buffer, task -> buffer -> size -2, task -> opaque
-                    )
-                    goto _continue;
-                }
-
-                // Not found
-                goto __break;
-        
-            case EV_TASK_READONCE: // readonce
-                // int available;
-                // ioctl(fd, FIONREAD, &available);
-                // available = available > task -> total_size ? task -> total_size : available;
-
-                buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, n);
-                size_t n2 = n;  // backup
-                n = 0;          // avoid reuse used data
+        if (bufsize == 0) {
+            // no data
+            list_add(&task -> list, &evfd -> u.task.read_tasks);
+            TRACE_EVENTS(evfd, +1);
+            goto end;
+        }
+        switch (task -> type) {
+        case EV_TASK_READ: // readsize
+            // note: buffer contains 1 byte free space to maintain circular buffer
+            if (task -> buffer -> size - 1 <= bufsize) {
+                // export
+                uint32_t copied = buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, task -> buffer -> size);
                 CALL_AND_HANDLE(
                     task -> cb.read,
-                    { buffer_seek_cur(evfd -> incoming_buffer, n2); },
-                    evfd, task -> buffer -> buffer, n2, task -> opaque
+                    { buffer_seek_cur(evfd -> incoming_buffer, copied); },
+                    evfd, task -> buffer -> buffer, task -> buffer -> size - 1, task -> opaque
+                );
+                goto _continue;
+            }
+            else if (-1 == n) {
+#ifdef LJS_DEBUG
+                perror("evfd_readsize");
+#endif
+                TRACE_EVENTS(evfd, +1); handle_close(fd, evfd);
+                goto _break;
+            }
+            goto __break;
+
+        case EV_TASK_READLINE:
+            if (n <= 0) {
+                if (n == -1) {
+                    TRACE_EVENTS(evfd, +1); handle_close(fd, evfd);
+                }
+                goto _break;
+            }
+
+            // find \r\n or \n
+            char forward_char = 0;
+            uint32_t first_r_occurrence = UINT32_MAX;
+            uint32_t first_r_bytes = 0;
+            uint32_t copied = 0;
+            BUFFER_UNSAFE_FOREACH_BYTE(evfd -> incoming_buffer, bytes, chr) {
+                uint32_t i = __i;   // note: __i is index of current byte position in buffer    
+                copied++;
+                if (chr == '\n') {
+                    char* nchr = (void*) (evfd -> incoming_buffer -> buffer + i);
+                    // CRLF check: replace to end-of-line with \0
+                    if (i != 0 && forward_char == '\r') nchr -= 1;
+                    *nchr = '\0';
+
+                    // Copy buffer to task buffer
+                    buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, copied);
+
+                    // Trigger callback
+                    CALL_AND_HANDLE(
+                        task -> cb.read,
+                        // Note: buffer would be changed by callback, absolute-position is dangerous
+                        { buffer_seek_cur(evfd -> incoming_buffer, copied); },
+                        evfd, task -> buffer -> buffer, (void*) nchr - (void*) task -> buffer -> buffer, task -> opaque
+                    );
+                    goto _continue;
+                }
+                else if (first_r_occurrence == UINT32_MAX && chr == '\r') {
+                    // fallback if \n not found
+                    first_r_occurrence = i;
+                    first_r_bytes = bytes;
+                }
+
+                forward_char = chr;
+            }
+
+            // fallback: \r
+            if (first_r_occurrence != UINT32_MAX) {
+                evfd -> strip_if_is_n = true;
+                char* rchr = (void*) (evfd -> incoming_buffer -> buffer + first_r_occurrence);
+                *rchr = '\0';
+
+                uint32_t readed = buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, first_r_bytes);
+                CALL_AND_HANDLE(
+                    task -> cb.read,
+                    { buffer_seek_cur(evfd -> incoming_buffer, readed); },
+                    evfd, task -> buffer -> buffer, readed, task -> opaque
+                );
+
+                goto _continue;
+            }
+
+            // Buffer full?
+            // Note: buffer contains 1 byte free space to maintain circular buffer and \0 terminator
+            if (bufsize >= (task -> buffer -> size - 2)) {
+                *(task -> buffer -> buffer + task -> buffer -> size - 2) = '\0';
+                uint32_t copied = buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, task -> buffer -> size - 2);
+                CALL_AND_HANDLE(
+                    task -> cb.read,
+                    { buffer_seek_cur(evfd -> incoming_buffer, copied); },
+                    evfd, task -> buffer -> buffer, task -> buffer -> size - 2, task -> opaque
                 )
+                    goto _continue;
+            }
+
+            // Not found
+            goto __break;
+
+        case EV_TASK_READONCE: // readonce
+            // int available;
+            // ioctl(fd, FIONREAD, &available);
+            // available = available > task -> total_size ? task -> total_size : available;
+
+            buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, n);
+            size_t n2 = n;  // backup
+            n = 0;          // avoid reuse used data
+            CALL_AND_HANDLE(
+                task -> cb.read,
+                { buffer_seek_cur(evfd -> incoming_buffer, n2); },
+                evfd, task -> buffer -> buffer, n2, task -> opaque
+            )
                 goto _continue;
 
             // Note: the main logic of pipeto is in handle_write
-            case EV_TASK_PIPETO:
-                // filter
-                EvPipeToFilter filter = task -> cb.pipeto -> filter;
-                struct Buffer* buf = task -> cb.pipeto -> exchange_buffer;
-                if(filter && !filter(buf, task -> cb.pipeto -> filter_opaque)){
-                    // skip current chunk
-                    buffer_seek_cur(buf, n);
-                }else{
-                    // push to target buffer
-                    assert(buffer_merge2(task -> cb.pipeto -> to -> incoming_buffer, buf) == n);
-                }
+        case EV_TASK_PIPETO:
+            // filter
+            EvPipeToFilter filter = task -> cb.pipeto -> filter;
+            struct Buffer* buf = task -> cb.pipeto -> exchange_buffer;
+            if (filter && !filter(buf, task -> cb.pipeto -> filter_opaque)) {
+                // skip current chunk
+                buffer_seek_cur(buf, n);
+            }
+            else {
+                // push to target buffer
+                assert(buffer_merge2(task -> cb.pipeto -> to -> incoming_buffer, buf) == n);
+            }
             return;   // block task execution
 
-            _continue:
-                if(evfd -> destroy) return;   // task already destroyed
-                free_task(task);
-                continue;
+        _continue:
+            if (evfd -> destroy) return;   // task already destroyed
+            free_task(task);
+            continue;
 
-            __break:
-                if(evfd -> destroy) return;
-                list_add(&task -> list, &evfd -> u.task.read_tasks);
-                TRACE_EVENTS(evfd, +1);
-                break;
+        __break:
+            if (evfd -> destroy) return;
+            list_add(&task -> list, &evfd -> u.task.read_tasks);
+            TRACE_EVENTS(evfd, +1);
+            break;
 
-            _break:
-                if(evfd -> destroy) return;   // task already destroyed
-                free_task(task);
-                break;
+        _break:
+            if (evfd -> destroy) return;   // task already destroyed
+            free_task(task);
+            break;
 
-            default:    // never reach here
-                abort();
+        default:    // never reach here
+            abort();
         }
     }
 
+    // check if loop ended but still have task
+    // mostly, when executing callback of last task
+    // callback add new task, but list_for_each_prev_safe will not handle it
+    if (!retried && cur == &evfd -> u.task.read_tasks && !list_empty(&evfd -> u.task.read_tasks)) {
+        retried = true;
+        goto mainloop;
+    }
 end:
     // finalize for timerfd
-    if(evfd -> type == EVFD_TIMER){
+    if (evfd -> type == EVFD_TIMER) {
         struct TimerFD* tfd = (void*) evfd;
         if (tfd -> once) {
             tfd -> time = 0;
             evfd_ctl(evfd, EPOLLLT);    // disable timerfd
         }
+    } else if (evfd -> type == EVFD_SSL) {
+        evfd -> ssl -> want_read = !list_empty(&evfd -> u.task.read_tasks);
     }
-    check_queue_status(evfd, fd);
+    check_queue_status(evfd);
 }
 
-static inline int blksize_get(int fd){
+static inline int blksize_get(int fd) {
     int blksize;
-    if(ioctl(fd, BLKSSZGET, &blksize) != 0) return 512;
+    if (ioctl(fd, BLKSSZGET, &blksize) != 0) return 512;
     return blksize;
 }
 
@@ -778,17 +924,17 @@ static inline int blksize_get(int fd){
 // debug: AIO buffer对齐检查
 static bool check_aio_alignment(EvFD* evfd, struct Buffer* buf, off_t offset) {
     int blksize = blksize_get(evfd -> fd[1]);
-    
-    if ((uintptr_t)buf -> buffer % blksize != 0 || offset % blksize != 0)
+
+    if ((uintptr_t) buf -> buffer % blksize != 0 || offset % blksize != 0)
         return false;
-    
+
     buf -> size = (buf -> size / blksize) * blksize;
     return true;
 }
 #endif
 
-static inline int submit_aio_read(EvFD* evfd, struct Task* task){
-    if(!is_aio_supported) return -1;
+static inline int submit_aio_read(EvFD* evfd, struct Task* task) {
+    if (!is_aio_supported) return -1;
 
     // buffer对齐
     buffer_aligned(task -> buffer, blksize_get(evfd -> fd[1]));
@@ -798,28 +944,27 @@ static inline int submit_aio_read(EvFD* evfd, struct Task* task){
         .aio_fildes = evfd -> fd[1],
         .aio_lio_opcode = IOCB_CMD_PREAD,
         .aio_buf = (unsigned long long)task -> buffer -> buffer,
-        .aio_nbytes = task -> buffer -> size -1,
+        .aio_nbytes = task -> buffer -> size - 1,
         .aio_offset = evfd -> u.task.offset,
-        .aio_data = (uint64_t)task,
+        .aio_data = (uint64_t) task,
         .aio_flags = IOCB_FLAG_RESFD,
         .aio_resfd = evfd -> fd[0],
     };
-    int ret = io_submit(evfd -> aio.ctx, 1, (struct iocb*[1]){&iocb});
+    int ret = io_submit(evfd -> aio.ctx, 1, (struct iocb* [1]) { &iocb });
 #ifdef LJS_DEBUG
-    printf("submit_aio_read: fd=%d, size=%d, ret=%d\n", evfd -> fd[1], task -> buffer -> size -1, ret);
-    if(ret == -1) perror("io_submit");
+    printf("submit_aio_read: fd=%d, size=%d, ret=%d\n", evfd -> fd[1], task -> buffer -> size - 1, ret);
+    if (ret == -1) perror("io_submit");
 #endif
     return ret;
 }
 
 // 注意这里的buffer不能circular
 static inline int submit_aio_write(EvFD* evfd, struct Task* task) {
-    if(!is_aio_supported) return -1;
+    if (!is_aio_supported) return -1;
 
     // buffer对齐，适配aio
     buffer_aligned(task -> buffer, blksize_get(evfd -> fd[1]));
-    task -> aio_write_remain = task -> buffer -> size -1;
-    
+
     // 检查最终对齐有效性
 #ifdef LJS_DEBUG
     if (!check_aio_alignment(evfd, task -> buffer, task -> buffer -> start)) {
@@ -832,50 +977,52 @@ static inline int submit_aio_write(EvFD* evfd, struct Task* task) {
         .aio_fildes = evfd -> fd[1],
         .aio_lio_opcode = IOCB_CMD_PWRITE,
         .aio_buf = (unsigned long long)task -> buffer -> buffer,
-        .aio_nbytes = task -> buffer -> size -1,
+        .aio_nbytes = task -> buffer -> size - 1,
         .aio_offset = evfd -> u.task.offset,
-        .aio_data = (uint64_t)task,
+        .aio_data = (uint64_t) task,
         .aio_flags = IOCB_FLAG_RESFD,
         .aio_resfd = evfd -> fd[0],
     };
-    int ret = io_submit(evfd -> aio.ctx, 1, (struct iocb*[1]){&iocb});
+    int ret = io_submit(evfd -> aio.ctx, 1, (struct iocb* [1]) { &iocb });
 
 #ifdef LJS_DEBUG
-    printf("submit_aio_write: fd=%d, remain=%d, ret=%d\n", evfd -> fd[1], task -> aio_write_remain, ret);
-    if(ret == -1) perror("io_submit");
+    printf("submit_aio_write: fd=%d, remain=%d, ret=%d\n", evfd -> fd[1], buffer_used(task -> buffer), ret);
+    if (ret == -1) perror("io_submit");
 #endif
     return ret;
 }
 
+// handle write event for normal/ssl fd or aio fd
 static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
-    struct list_head *cur, *tmp;
-    // 只考虑aio、fd write
-// loop:
+    if (evfd -> type == EVFD_AIO && !list_empty(&evfd -> u.task.write_tasks)) {
+        if (ioev -> res < 0) {
+            handle_close(fd, evfd);
+            return;
+        }
+        // precheck
+        // struct Task* task = list_entry(evfd -> u.task.write_tasks.next, struct Task, list);
+        // buffer_seek_cur(task -> buffer, ioev -> res);
+    }
+
+    if(evfd -> type == EVFD_SSL && evfd -> ssl -> ssl_handshaking){
+        int n = handle_mbedtls_ret(evfd, false, mbedtls_ssl_handshake(&evfd -> ssl -> ctx));
+        if(n == -1) return;
+        handle_handshake_done(evfd);
+
+        // also active read task
+        handle_read(fd, evfd, NULL, NULL);
+        if(evfd -> destroy) return;
+    }
+
+    struct list_head* cur, * tmp;
+    // loop:
     list_for_each_prev_safe(cur, tmp, &evfd -> u.task.write_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
 
-        if(evfd -> type == EVFD_AIO){
-            task -> aio_write_remain -= ioev -> res;
-            evfd -> u.task.offset += ioev -> res;
-            // 完成！
-            if(task -> aio_write_remain == 0){
-                TRACE_EVENTS(evfd, -1);
-                list_del(&task -> list);
-
-                task -> cb.write(evfd, true, task -> opaque);
-                
-                free_task(task);
-                // 添加io事务：下一个io
-                if(!list_empty(&evfd -> u.task.write_tasks)){
-                    struct Task* next_task = list_entry(evfd -> u.task.write_tasks.next, struct Task, list);
-                    submit_aio_write(evfd, next_task);
-                }
-            }
-            return;
-        }else if(task -> type == EV_TASK_PIPETO){
+        if (task -> type == EV_TASK_PIPETO) {
             struct PipeToTask* pt = task -> cb.pipeto;
 
-            if(!pipeto_ready(pt)){
+            if (!pipeto_ready(pt)) {
                 // suspend write
                 evfd_mod(evfd, false, EPOLLOUT);
                 return;
@@ -885,104 +1032,140 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
             // and not capable to handle AIO write
             ssize_t writed = buffer_write(pt -> exchange_buffer, fd, UINT32_MAX);
 
-            if(writed == -1){
+            if (writed == -1) {
 #ifdef LJS_DEBUG
                 perror("evfd_write");
 #endif
                 return handle_close(fd, evfd);
             }
 
-            if(buffer_is_empty(task -> buffer)){
+            if (buffer_is_empty(task -> buffer)) {
                 // suspense
-                if(PIPETO_RCLOSED(pt -> closed)){
+                if (PIPETO_RCLOSED(pt -> closed)) {
                     pipeto_handle_close(evfd, pt, false);
                     continue;   // next task
-                }else{
+                }
+                else {
                     evfd_mod(pt -> from, true, EPOLLIN);
                     return evfd_mod(evfd, false, EPOLLOUT);
                 }
-            }else{
+            }
+            else {
                 // wait for next write
                 evfd_mod(evfd, true, EPOLLOUT);
                 return;
             }
-        }else if(task -> type == EV_TASK_NOOP){
+        }
+        else if (task -> type == EV_TASK_NOOP) {
             list_del(&task -> list);
             TRACE_EVENTS(evfd, -1);
-            
+
             task -> cb.sync(evfd, true, task -> opaque);
-            
+
             free2(task);
             continue;
         }
 
-        ssize_t n = buffer_write(task -> buffer, fd, UINT32_MAX);
+        ssize_t n;
+
+        if (evfd -> type == EVFD_AIO) {
+            n = ioev -> res;
+
+            if (n == 0) {
+                // submit io write
+                if (submit_aio_write(evfd, task) == -1) return;
+            }
+
+            ioev -> res = 0;
+        }
+        else if (evfd -> type == EVFD_SSL) {
+            // write to mbedtls
+            ssize_t prev_write;
+            n = 0;
+            while (handle_mbedtls_ret(evfd, true,
+                prev_write = mbedtls_ssl_write(
+                    &evfd -> ssl -> ctx,
+                    task -> buffer -> buffer + n,
+                    task -> buffer -> size - n - 1
+                )
+            ) > 0) {
+                n += prev_write;
+            }
+        }
+        else {
+            // write to fd directly
+            n = buffer_write(task -> buffer, fd, UINT32_MAX);
+        }
+
         if (n > 0) {
-            if(buffer_is_empty(task -> buffer)){
+            if (buffer_is_empty(task -> buffer)) {
                 TRACE_EVENTS(evfd, -1);
                 list_del(&task -> list);
-                if(task -> cb.write) task -> cb.write(evfd, true, task -> opaque);
+                if (task -> cb.write) task -> cb.write(evfd, true, task -> opaque);
                 free_task(task);
             }
-        } else if(n == -1){
+        }
+        else if (n == -1) {
 #ifdef LJS_DEBUG
             perror("evfd_write");
 #endif
             return handle_close(fd, evfd);
-        } else {
+        }
+        else {
             break;  // fd is busy
         }
     }
     // if(!list_empty(&evfd -> u.task.write_tasks)) goto loop;
 
-    check_queue_status(evfd, fd);
+    check_queue_status(evfd);
 }
 
 static thread_local bool __handle_closing = false;
 static void clear_tasks(EvFD* evfd, bool call_close) {
-    if(__handle_closing) return;
+    if (__handle_closing) return;
     __handle_closing = true;
     struct list_head* cur, * tmp;
     bool has_data = evfd -> incoming_buffer && !buffer_is_empty(evfd -> incoming_buffer);
     // read queue
     list_for_each_prev_safe(cur, tmp, &evfd -> u.task.read_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
-        if (task -> type == EV_TASK_NOOP){
+        if (task -> type == EV_TASK_NOOP) {
             task -> cb.sync(evfd, false, task -> opaque);
             goto _continue;
         }
-        if (task -> type == EV_TASK_PIPETO){ 
+        if (task -> type == EV_TASK_PIPETO) {
             evfd -> u.task.read_tasks.next = cur;  // delete elements between cur and first
             cur -> prev = &evfd -> u.task.read_tasks;
             pipeto_handle_close(evfd, task -> cb.pipeto, true); // also freed task
             continue;
         }
-        
+
         if (task -> cb.read) {
             if (has_data) {
                 // copy to user buffer
-                uint32_t readed = buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, task -> buffer -> size -1);
+                uint32_t readed = buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, task -> buffer -> size - 1);
 
                 // Note: readline requires \0 terminator
-                if (task -> buffer -> end < task -> buffer -> size -1 && task -> type == EV_TASK_READLINE) 
+                if (task -> buffer -> end < task -> buffer -> size - 1 && task -> type == EV_TASK_READLINE)
                     task -> buffer -> buffer[task -> buffer -> end] = '\0';    // end with \0
 
                 task -> cb.read(evfd, task -> buffer -> buffer, readed, task -> opaque);
                 has_data = false;
-            } else {
-            //     task -> cb.sync(evfd, task -> opaque);
+            }
+            else {
+                //     task -> cb.sync(evfd, task -> opaque);
                 task -> cb.read(evfd, NULL, 0, task -> opaque);
             }
         }
-        if (task -> buffer){
+        if (task -> buffer) {
             buffer_free(task -> buffer);
         }
 
-_continue:
+    _continue:
         free2(task);
         TRACE_EVENTS(evfd, -1);
     }
-    if(evfd -> u.task.finalizer){
+    if (evfd -> u.task.finalizer) {
         evfd -> u.task.finalizer(evfd, evfd -> incoming_buffer, evfd -> u.task.finalizer_opaque);
         evfd -> u.task.finalizer = NULL;
     }
@@ -990,49 +1173,49 @@ _continue:
     // write queue
     list_for_each_prev_safe(cur, tmp, &evfd -> u.task.write_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
-        if(task -> type == EV_TASK_PIPETO){
+        if (task -> type == EV_TASK_PIPETO) {
             evfd -> u.task.write_tasks.next = cur;  // delete elements between cur and first
             cur -> prev = &evfd -> u.task.write_tasks;
             pipeto_handle_close(evfd, task -> cb.pipeto, true); // also freed task
             continue;
         }
-        if (task -> type == EV_TASK_NOOP){
+        if (task -> type == EV_TASK_NOOP) {
             task -> cb.sync(evfd, false, task -> opaque);
             goto _continue2;
         }
-        if(task -> cb.write) {
-            if(task -> type == EV_TASK_NOOP)
+        if (task -> cb.write) {
+            if (task -> type == EV_TASK_NOOP)
                 task -> cb.sync(evfd, true, task -> opaque);
             else
                 task -> cb.write(evfd, true, task -> opaque);
         }
-        if(task -> buffer) buffer_free(task -> buffer);
+        if (task -> buffer) buffer_free(task -> buffer);
 
-_continue2:
+    _continue2:
         free2(task);
         TRACE_EVENTS(evfd, -1);
     }
 
     // close queue
-    if(call_close)
+    if (call_close)
         list_for_each_prev_safe(cur, tmp, &evfd -> u.task.close_tasks) {
-            struct Task* task = list_entry(cur, struct Task, list);
-            task -> cb.close(evfd, task -> opaque);
-            free2(task);
-            TRACE_NSTDEVENTS(evfd, -1);
-        }
+        struct Task* task = list_entry(cur, struct Task, list);
+        task -> cb.close(evfd, task -> opaque);
+        free2(task);
+        TRACE_NSTDEVENTS(evfd, -1);
+    }
     __handle_closing = false;
 }
 
 static void handle_close(int fd, EvFD* evfd) {
-    if(__handle_closing) return;
+    if (__handle_closing) return;
     __handle_closing = true;
 
 #ifdef LJS_DEBUG
     printf("handle_close: fd=%d; ", fd);
 #endif
 
-    if(evfd -> destroy) return;
+    if (evfd -> destroy) return;
 
     // free in next loop
     evfd_ctl(evfd, EPOLL_CTL_FREE);
@@ -1042,56 +1225,58 @@ static void handle_close(int fd, EvFD* evfd) {
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
     TRACE_NSTDEVENTS(evfd, -1);
 
-    if(evfd -> task_based){
+    if (evfd -> task_based) {
         __handle_closing = false;
         clear_tasks(evfd, true);
         __handle_closing = true;
-    }else if(evfd -> u.cb.close){ 
+    }
+    else if (evfd -> u.cb.close) {
         evfd -> u.cb.close(evfd, evfd -> u.cb.close_opaque);
     }
 
     // close fd
-    if(!evfd -> destroy) switch (evfd -> type){
-        case EVFD_NORM:
-        case EVFD_TIMER:
-        case EVFD_INOTIFY:
-            close(fd);
+    if (!evfd -> destroy) switch (evfd -> type) {
+    case EVFD_NORM:
+    case EVFD_TIMER:
+    case EVFD_INOTIFY:
+        close(fd);
         break;
 
-        case EVFD_AIO:
-            close(evfd -> fd[0]);
-            close(evfd -> fd[1]);   // eventfd
-            io_destroy(evfd -> aio.ctx);
+    case EVFD_AIO:
+        close(evfd -> fd[0]);
+        close(evfd -> fd[1]);   // eventfd
+        io_destroy(evfd -> aio.ctx);
         break;
 
-        case EVFD_SSL:
+    case EVFD_SSL:
 #ifdef LJS_MBEDTLS
-            if (evfd -> ssl) {
-                buffer_free(evfd -> ssl -> sendbuf);
-                buffer_free(evfd -> ssl -> recvbuf);
-                mbedtls_ssl_free2(&evfd -> ssl -> ctx);
-                mbedtls_ssl_config_free2(&evfd -> ssl -> config);
-                free2(evfd -> ssl);
-            }
+        if (evfd -> ssl) {
+            buffer_free(evfd -> ssl -> sendbuf);
+            buffer_free(evfd -> ssl -> recvbuf);
+            mbedtls_ssl_free(&evfd -> ssl -> ctx);
+            mbedtls_ssl_config_free(&evfd -> ssl -> config);
+            // Note: ssl object should live as long as evfd to get errno
+            // it will be freed in next epoll loop
+        }
 #endif
         break;
 
-        default:
-            abort();
+    default:
+        abort();
         break;
     }
-    if(evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
+    if (evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
 
     __handle_closing = false;
 }
 
-static void handle_sync(EvFD* evfd){
-    struct list_head *cur, *tmp;
+static void handle_sync(EvFD* evfd) {
+    struct list_head* cur, * tmp;
     // read queue
     list_for_each_prev_safe(cur, tmp, &evfd -> u.task.read_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
         task -> cb.sync(evfd, true, task -> opaque);
-        if(task -> type == EV_TASK_SYNC) {
+        if (task -> type == EV_TASK_SYNC) {
             TRACE_EVENTS(evfd, -1);
             list_del(&task -> list);
             free2(task);
@@ -1101,136 +1286,122 @@ static void handle_sync(EvFD* evfd){
 
 #ifdef LJS_MBEDTLS
 static int handle_ssl_send(void* ctx, const unsigned char* buf, size_t len) {
-    EvFD* evfd = (EvFD*)ctx;
+    EvFD* evfd = (EvFD*) ctx;
     struct Buffer* sendbuf = evfd -> ssl -> sendbuf;
-    
-    if (buffer_available(sendbuf) < len) {
-        return MBEDTLS_ERR_SSL_WANT_WRITE;
-    }
-    
-    if (buffer_push(sendbuf, buf, len) != len) {
-        return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
-    }
-    
-    return (int)len;
+
+    if (evfd -> destroy) return 0;
+    if (buffer_is_full(sendbuf)) return MBEDTLS_ERR_SSL_WANT_WRITE;
+
+    // copy chunk to buffer
+    return buffer_push(sendbuf, buf, len);
 }
 
 static int handle_ssl_recv(void* ctx, unsigned char* buf, size_t len) {
-    EvFD* evfd = (EvFD*)ctx;
-    size_t copied = buffer_copyto(evfd -> ssl -> recvbuf, buf, len);
-    handle_read(evfd -> fd[0], evfd, NULL, NULL);
-    return copied;
-}
+    EvFD* evfd = (EvFD*) ctx;
+    if (evfd -> destroy) return 0;   // closed
 
-static inline void update_ssl_events(EvFD* evfd) {
-    uint32_t events = EPOLLLT | EPOLLERR | EPOLLHUP;
-    
-    if (evfd -> ssl -> ssl_handshaking) {
-        if (evfd -> ssl -> ssl_read_wants_write) {
-            events |= EPOLLOUT;
-        } else {
-            events |= EPOLLIN;
-        }
-    } else {
-        if (!buffer_is_empty(evfd -> ssl -> sendbuf)) {
-            events |= EPOLLOUT;
-        }
-        if (buffer_available(evfd -> ssl -> recvbuf) > 0) {
-            events |= EPOLLIN;
-        }
+    size_t copied = buffer_copyto(evfd -> ssl -> recvbuf, buf, len);
+    buffer_seek_cur(evfd -> ssl -> recvbuf, copied);
+    if (copied == 0) {
+        evfd -> ssl -> want_read = true;
+        return MBEDTLS_ERR_SSL_WANT_READ;
     }
-    
-    evfd_ctl(evfd, events);
+    return copied;
 }
 
 static void ssl_handle_handshake(EvFD* evfd) {
     int ret;
     while ((ret = mbedtls_ssl_handshake(&evfd -> ssl -> ctx)) != 0) {
         if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
-            evfd -> ssl -> ssl_read_wants_write = false;
-            update_ssl_events(evfd);
-            return; // 退出循环等待事件
-        } else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-            evfd -> ssl -> ssl_write_wants_read = false;
-            update_ssl_events(evfd);
+            check_queue_status(evfd);
             return;
-        } else {
-            // 处理致命错误
+        }
+        else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            evfd -> ssl -> want_read = false;
+            check_queue_status(evfd);
+            return;
+        }
+        else {
+            // fatal error
             evfd_close(evfd);
+#ifdef LJS_DEBUG
+            char mberror[1024];
+            mbedtls_strerror(ret, mberror, sizeof(mberror));
+            printf("ssl_handle_handshake: ret=%d, strerror=%s\n", ret, mberror);
+#endif
+            evfd -> ssl -> mb_errno = ret;
             return;
         }
     }
-    
-    // 握手成功
+    // handshake done
     evfd -> ssl -> ssl_handshaking = false;
-    evfd -> ssl -> handshake_cb(evfd, evfd -> ssl -> handshake_user_data);
-    update_ssl_events(evfd);
+    evfd -> ssl -> handshake_cb(evfd, true, evfd -> ssl -> handshake_user_data);
+
+    // try to execute pending tasks
+    handle_read(evfd -> fd[0], evfd, NULL, NULL);
+    handle_write(evfd -> fd[0], evfd, NULL);
 }
 
 struct SSL_data {
-    char *name;
+    char* name;
     char* server_name; // optional
-    mbedtls_x509_crt *cacert;
-    mbedtls_pk_context *cakey;
+    mbedtls_x509_crt* cacert;
+    mbedtls_pk_context* cakey;
     struct list_head link;
 };
 
-static struct list_head* certs = NULL;
+static struct list_head cert_list;
 
-int ssl_sni_callback(void *ssl, const unsigned char *name, size_t len) {
-    if(certs == NULL) return -1;
-
-    struct list_head *cur, *tmp;
-    list_for_each_prev_safe(cur, tmp, certs) {
-        struct SSL_data *data = list_entry(cur, struct SSL_data, link);
+int ssl_sni_callback(void* ssl, const unsigned char* name, size_t len) {
+    struct list_head* cur, * tmp;
+    list_for_each_prev_safe(cur, tmp, &cert_list) {
+        struct SSL_data* data = list_entry(cur, struct SSL_data, link);
         if (len == strlen(data -> name) && memcmp(name, data -> name, len) == 0) {
-            if(data -> server_name)
-                mbedtls_ssl_set_hostname(&((EvFD*)ssl) -> ssl -> ctx, data -> name);
-            return mbedtls_ssl_set_hs_own_cert(&((EvFD*)ssl) -> ssl -> ctx, data -> cacert, data -> cakey);
+            if (data -> server_name)
+                mbedtls_ssl_set_hostname(&((EvFD*) ssl) -> ssl -> ctx, data -> name);
+            return mbedtls_ssl_set_hs_own_cert(&((EvFD*) ssl) -> ssl -> ctx, data -> cacert, data -> cakey);
         }
     }
     return -1;
 }
 
-static int udp_packet_send(void *ctx, const unsigned char *buf, size_t len) {
-    EvFD *evfd = (EvFD*)ctx;
-    struct UDPContext *uctx = evfd -> proto_ctx;
-    
-    // 获取UDP套接字fd（假设存放在fd[0]）
+static int udp_packet_send(void* ctx, const unsigned char* buf, size_t len) {
+    EvFD* evfd = (EvFD*) ctx;
+    struct UDPContext* uctx = evfd -> proto.udp;
     int sockfd = evfd -> fd[0];
-    
+
     ssize_t sent = sendto(sockfd, buf, len, MSG_DONTWAIT,
-                        (struct sockaddr*)&uctx -> peer_addr, 
-                        uctx -> addr_len);
-    
+        (struct sockaddr*) &uctx -> peer_addr,
+        uctx -> addr_len);
+
     if (sent < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
             return MBEDTLS_ERR_SSL_WANT_WRITE;
         return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
     }
-    return (int)sent;
+    return (int) sent;
 }
 
-static int udp_packet_recv(void *ctx, unsigned char *buf, size_t len) {
-    EvFD *evfd = (EvFD*)ctx;
-    struct UDPContext *uctx = evfd -> proto_ctx;
-    
-    // 接收时自动填充对端地址
+static int udp_packet_recv(void* ctx, unsigned char* buf, size_t len) {
+    EvFD* evfd = (EvFD*) ctx;
+    struct UDPContext* uctx = evfd -> proto.udp;
+
+    // fill target address
     socklen_t addr_len = sizeof(struct sockaddr_storage);
     int sockfd = evfd -> fd[0];
-    
+
     ssize_t recvd = recvfrom(sockfd, buf, len, MSG_DONTWAIT,
-                           (struct sockaddr*)&uctx -> peer_addr,
-                           &addr_len);
-    
+        (struct sockaddr*) &uctx -> peer_addr,
+        &addr_len);
+
     if (recvd < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
             return MBEDTLS_ERR_SSL_WANT_READ;
         return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
     }
-    
-    uctx -> addr_len = addr_len; // 保存最新对端地址
-    return (int)recvd;
+
+    uctx -> addr_len = addr_len;
+    return (int) recvd;
 }
 #endif
 
@@ -1248,8 +1419,9 @@ bool evcore_init() {
     init_list_head(&timer_list);
     init_list_head(&evfd_list);
     init_list_head(&timer_list);
+    init_list_head(&cert_list);
 
-    thread_id ++;
+    thread_id++;
     return true;
 }
 
@@ -1259,21 +1431,23 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
     struct epoll_event events[MAX_EVENTS];
     while (1) {
         bool abort_check_result = true;
-        if(evloop_abort_check) abort_check_result = evloop_abort_check(user_data);
+        if (evloop_abort_check) abort_check_result = evloop_abort_check(user_data);
 
-        if (unlikely(abort_check_result && evloop_events <= 0)){
+        if (unlikely(abort_check_result && evloop_events <= 0)) {
 #ifdef LJS_DEBUG
             printf("evloop_abort_check: abort, events=%ld(thread#%d)\n", evloop_events, thread_id);
 #endif
             return true; // no events
         }
 
+        if (evloop_events <= 0) continue;    // no events
+
 #ifdef LJS_DEBUG
         printf("epoll_wait: enter, events=%ld(thread#%d)\n", evloop_events, thread_id);
         bool first_epoll = true;
 #endif
 
-        if(epoll_fd == -1){
+        if (epoll_fd == -1) {
 #ifdef LJS_DEBUG
             printf("epoll_wait: destroyed, force exit\n");
 #endif
@@ -1292,7 +1466,7 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
             perror("epoll_wait");
 #endif
         }
-        
+
         for (int i = 0; i < nfds; ++i) {
             struct EvFD* evfd = events[i].data.ptr;
 
@@ -1300,103 +1474,102 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
             printf("epoll_wait: consumed, fd=%d, r=%d, w=%d, e=%d\n", evfd_getfd(evfd, NULL), events[i].events & EPOLLIN, events[i].events & EPOLLOUT, events[i].events & EPOLLERR);
 #endif
 
-            if(evfd -> task_based){
+            if (evfd -> task_based) {
 #ifdef LJS_DEBUG
-                if(!first_epoll){
-                    if(events[i].events & EPOLLIN) assert(!list_empty(&evfd -> u.task.write_tasks));
-                    if(events[i].events & EPOLLOUT) assert(!list_empty(&evfd -> u.task.read_tasks));
-                    if(events[i].events & EPOLLERR) assert(!list_empty(&evfd -> u.task.close_tasks));
+                if (!first_epoll) {
+                    if (events[i].events & EPOLLIN) assert(!list_empty(&evfd -> u.task.write_tasks));
+                    if (events[i].events & EPOLLOUT) assert(!list_empty(&evfd -> u.task.read_tasks));
+                    if (events[i].events & EPOLLERR) assert(!list_empty(&evfd -> u.task.close_tasks));
                     first_epoll = false;
                 }
 #endif
-        
-                if (events[i].events & (EPOLLERR | EPOLLHUP)){
+
+                if (events[i].events & (EPOLLERR | EPOLLHUP)) {
                     handle_close(evfd_getfd(evfd, NULL), evfd);
                     continue;
                 }
 
                 CHECK_TO_BE_CLOSE(evfd);
-                
-                if (events[i].events & EPOLLIN) switch(evfd -> type){
-                    case EVFD_NORM:
-                    case EVFD_TIMER:
-                    case EVFD_UDP:
-                    case EVFD_DTLS:
-                        handle_read(evfd -> fd[0], evfd, NULL, NULL);
+
+                if (events[i].events & EPOLLIN) switch (evfd -> type) {
+                case EVFD_NORM:
+                case EVFD_TIMER:
+                case EVFD_UDP:
+                case EVFD_DTLS:
+                    handle_read(evfd -> fd[0], evfd, NULL, NULL);
                     break;
 
-                    case EVFD_AIO:
-                        struct io_event events[MAX_EVENTS];
-                        struct timespec timeout = {0, 0};
-                        int ret = io_getevents(evfd -> aio.ctx, 1, MAX_EVENTS, events, &timeout);
-                        if (ret < 0) {
+                case EVFD_AIO:
+                    struct io_event events[MAX_EVENTS];
+                    struct timespec timeout = { 0, 0 };
+                    int ret = io_getevents(evfd -> aio.ctx, 1, MAX_EVENTS, events, &timeout);
+                    if (ret < 0) {
 #ifdef LJS_DEBUG
-                            perror("io_getevents");
+                        perror("io_getevents");
 #endif
-                            break;
-                        }
-                        for (int j = 0; j < ret; ++j) {
-                            struct iocb* iocb = (struct iocb*)(uintptr_t)events[j].obj;
-                            if(iocb -> aio_lio_opcode == IOCB_CMD_PREAD)
-                                handle_read(evfd -> fd[0], evfd, &events[j], NULL);
-                            else if(iocb -> aio_lio_opcode == IOCB_CMD_PWRITE)
-                                handle_write(evfd -> fd[0], evfd, &events[j]);
-                            else if(iocb -> aio_lio_opcode == IOCB_CMD_FSYNC)
-                                handle_sync(evfd);
-                            else    // ?
-                                handle_close(evfd -> fd[0], evfd);
-                        }
+                        break;
+                    }
+                    for (int j = 0; j < ret; ++j) {
+                        struct iocb* iocb = (struct iocb*) (uintptr_t) events[j].obj;
+                        if (iocb -> aio_lio_opcode == IOCB_CMD_PREAD)
+                            handle_read(evfd -> fd[0], evfd, &events[j], NULL);
+                        else if (iocb -> aio_lio_opcode == IOCB_CMD_PWRITE)
+                            handle_write(evfd -> fd[0], evfd, &events[j]);
+                        else if (iocb -> aio_lio_opcode == IOCB_CMD_FSYNC)
+                            handle_sync(evfd);
+                        else    // ?
+                            handle_close(evfd -> fd[0], evfd);
+                    }
                     break;
 
-                    case EVFD_INOTIFY:
-                        struct inotify_event inev;
-                        while (read(evfd -> fd[0], &inev, sizeof(inev)) == sizeof(inev)) {
-                            handle_read(evfd -> fd[0], evfd, NULL, &inev);
-                        }
+                case EVFD_INOTIFY:
+                    struct inotify_event inev;
+                    while (read(evfd -> fd[0], &inev, sizeof(inev)) == sizeof(inev)) {
+                        handle_read(evfd -> fd[0], evfd, NULL, &inev);
+                    }
                     break;
 
-                    case EVFD_SSL:
+                case EVFD_SSL:
 #ifdef LJS_MBEDTLS
-                        struct EvFD_SSL *ssl_evfd = evfd -> ssl;
-                        
-                        while (1) {
-                            uint8_t tmp[4096];
-                            int ret = mbedtls_ssl_read(&ssl_evfd -> ctx, tmp, sizeof(tmp));
-                            
-                            if (ret > 0) {
-                                buffer_push(ssl_evfd -> recvbuf, tmp, ret);
-                                handle_read(evfd -> fd[0], evfd, NULL, NULL); // 触发用户回调
-                            } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
-                                break; // 等待下次事件
-                            } else {
-                                break;
-                            }
-                        }
-                        update_ssl_events(evfd);
+                    struct EvFD_SSL* ssl_evfd = evfd -> ssl;
+                    // feed to buffer
+                    ssize_t n = buffer_read(ssl_evfd -> recvbuf, evfd -> fd[0], UINT32_MAX);
+                    if (n < 0) {
+                        handle_close(evfd -> fd[0], evfd);
+                    }
+                    else {
+                        // read from mbedtls
+                        handle_read(evfd -> fd[0], evfd, NULL, NULL);
+                        check_queue_status(evfd);
+                    }
 #endif
                     break;
                 }
 
                 CHECK_TO_BE_CLOSE(evfd);
-                
-                if (events[i].events & EPOLLOUT){
-                    if(evfd -> type == EVFD_NORM){
+
+                if (events[i].events & EPOLLOUT) {
+                    if (evfd -> type == EVFD_NORM) {
                         handle_write(evfd -> fd[0], evfd, NULL);
                     }
 #ifdef LJS_MBEDTLS
-                    else if(evfd -> type == EVFD_SSL){
+                    else if (evfd -> type == EVFD_SSL) {
+                        // write buffer from mbedtls to fd
                         ssize_t n = buffer_write(evfd -> ssl -> sendbuf, evfd -> fd[0], UINT32_MAX);
-                            
+
                         if (n == -1 && errno != EAGAIN) {
                             handle_close(evfd -> fd[0], evfd);
                             break;
                         }
 
-                        update_ssl_events(evfd);
+                        // write to mbedtls to fill sendbuf
+                        handle_write(evfd -> fd[0], evfd, NULL);
+                        check_queue_status(evfd);
                     }
 #endif
                 }
-            }else{
+            }
+            else {
                 if (events[i].events & (EPOLLERR | EPOLLHUP)) {
                     evfd -> u.cb.close(evfd, evfd -> u.cb.close_opaque);
                     TRACE_NSTDEVENTS(evfd, -1);
@@ -1404,15 +1577,15 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
 
                 CHECK_TO_BE_CLOSE(evfd);
 
-                if (events[i].events & EPOLLIN) 
+                if (events[i].events & EPOLLIN)
                     evfd -> u.cb.read(evfd, NULL, 0, evfd -> u.cb.read_opaque);
-                
+
                 CHECK_TO_BE_CLOSE(evfd);
-                
-                if (events[i].events & EPOLLOUT) 
+
+                if (events[i].events & EPOLLOUT)
                     evfd -> u.cb.write(evfd, true, evfd -> u.cb.write_opaque);
             }
-_continue:      continue;
+        _continue:      continue;
         }
     }
 
@@ -1420,11 +1593,17 @@ _continue:      continue;
     return true;
 }
 
+static inline void expand_bufsize(EvFD* evfd, uint32_t minsize) {
+    if (evfd -> incoming_buffer -> size < minsize) {
+        buffer_realloc(evfd -> incoming_buffer, minsize + buffer_used(evfd -> incoming_buffer) + 2, false);
+    }
+}
+
 void evcore_destroy() {
-    if(epoll_fd == -1) return;
+    if (epoll_fd == -1) return;
 
     // free all timerfd
-    struct list_head *cur, *tmp;
+    struct list_head* cur, * tmp;
     list_for_each_prev_safe(cur, tmp, &timer_list) {
         struct EvFD* timer = list_entry(cur, struct EvFD, link);
         evcore_clearTimer2(timer);
@@ -1441,9 +1620,9 @@ void evcore_destroy() {
 
     // free all SSL_data
 #ifdef LJS_MBEDTLS
-    struct list_head *cur2, *tmp2;
-    list_for_each_prev_safe(cur2, tmp2, certs) {
-        struct SSL_data *data = list_entry(cur2, struct SSL_data, link);
+    struct list_head* cur2, * tmp2;
+    list_for_each_prev_safe(cur2, tmp2, &cert_list) {
+        struct SSL_data* data = list_entry(cur2, struct SSL_data, link);
         list_del(&data -> link);
         free2(data);
     }
@@ -1471,24 +1650,24 @@ void evcore_destroy() {
 
 // Make async tasks synchronous(blocking)
 bool evfd_syncexec(EvFD* pipe) {
-    if(epoll_fd == -1) return false;
+    if (epoll_fd == -1) return false;
     tassert(pipe -> type != EVFD_INOTIFY && pipe -> type != EVFD_TIMER && !pipe -> destroy);
 
     int fd = evfd_getfd(pipe, NULL);
     int flags = ioctl(fd, F_GETFL, 0);
-    if(-1 == flags || -1 == ioctl(fd, F_SETFL, flags &~ O_NONBLOCK))
+    if (-1 == flags || -1 == ioctl(fd, F_SETFL, flags & ~O_NONBLOCK))
         return false;
-        
+
     // XXX: this logic is not safe, but it's a workaround for now.
-    if(pipe -> type == EVFD_AIO){
+    if (pipe -> type == EVFD_AIO) {
         epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
         close(pipe -> fd[0]); // close eventfd
         pipe -> fd[0] = fd;
         pipe -> type = EVFD_NORM;
     }
     handle_read(fd, pipe, NULL, NULL);
-    if(!pipe -> destroy) handle_write(fd, pipe, NULL);
-    
+    if (!pipe -> destroy) handle_write(fd, pipe, NULL);
+
     ioctl(fd, F_SETFL, flags);
     return true;
 }
@@ -1496,11 +1675,11 @@ bool evfd_syncexec(EvFD* pipe) {
 /**
  * 将fd附加到eventloop。
  */
-// 将fd附加到事件循环
+ // 将fd附加到事件循环
 struct EvFD* evcore_attach(
-    int fd, bool use_aio, 
-    EvReadCallback rcb, void* read_opaque, 
-    EvWriteCallback wcb, void* write_opaque, 
+    int fd, bool use_aio,
+    EvReadCallback rcb, void* read_opaque,
+    EvWriteCallback wcb, void* write_opaque,
     EvCloseCallback ccb, void* close_opaque
 ) {
     // fd是否有效？
@@ -1512,7 +1691,7 @@ struct EvFD* evcore_attach(
     }
 
     // O_DIRECT
-    if(use_aio) fcntl(fd, F_SETFL, O_DIRECT | fcntl(fd, F_GETFL, 0));
+    if (use_aio) fcntl(fd, F_SETFL, O_DIRECT | fcntl(fd, F_GETFL, 0));
 
     EvFD* evfd = malloc2(sizeof(EvFD));
     if (!evfd) return NULL;
@@ -1524,7 +1703,7 @@ struct EvFD* evcore_attach(
 #ifdef LJS_DEBUG
             perror("io_setup");
 #endif
-error:
+        error:
             list_del(&evfd -> link);
             free2(evfd);
             return NULL;
@@ -1533,7 +1712,8 @@ error:
         evfd -> fd[0] = fd;  // 原始fd
         evfd -> fd[1] = -1;  // aio使用虚拟fd
         evfd -> u.task.offset = 0;
-    } else {
+    }
+    else {
         evfd -> type = EVFD_NORM;
         evfd -> fd[0] = fd;
     }
@@ -1570,7 +1750,7 @@ error:
 
 // 创建新的evfd对象
 EvFD* evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize,
-                   EvCloseCallback close_callback, void* close_opaque) {
+    EvCloseCallback close_callback, void* close_opaque) {
     EvFD* evfd = malloc2(sizeof(EvFD));
     if (!evfd) return NULL;
 
@@ -1586,9 +1766,9 @@ EvFD* evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t buf
     evfd -> fd[1] = -1;
     evfd -> type = EVFD_NORM;
     evfd -> epoll_flags = EPOLLLT | EPOLLERR | EPOLLHUP;
-    if(readable) evfd -> epoll_flags |= EPOLLIN;
-    if(writeable) evfd -> epoll_flags |= EPOLLOUT;
-    if(readable){ 
+    if (readable) evfd -> epoll_flags |= EPOLLIN;
+    if (writeable) evfd -> epoll_flags |= EPOLLOUT;
+    if (readable) {
         assert(bufsize > 0);
         buffer_init(&evfd -> incoming_buffer, NULL, bufsize);
     }
@@ -1607,14 +1787,14 @@ EvFD* evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t buf
         evfd -> type = EVFD_AIO;
         evfd -> fd[1] = fd;
 
-        if(fcntl(fd, F_SETFL, O_DIRECT | fcntl(fd, F_GETFL, 0)) == -1){
+        if (fcntl(fd, F_SETFL, O_DIRECT | fcntl(fd, F_GETFL, 0)) == -1) {
 #ifdef LJS_DEBUG
             perror("fcntl");
 #endif
             goto error;
         }
 
-        if(io_setup(MAX_EVENTS, &evfd -> aio.ctx) == -1){
+        if (io_setup(MAX_EVENTS, &evfd -> aio.ctx) == -1) {
 #ifdef LJS_DEBUG
             perror("io_setup");
 #endif
@@ -1626,14 +1806,15 @@ EvFD* evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t buf
 #ifdef LJS_DEBUG
             perror("eventfd");
 #endif
-error:
+        error:
             list_del(&evfd -> link);
             free2(evfd);
             return NULL;
         }
         evfd -> u.task.offset = 0;
-    } else {
-        fcntl(fd, F_SETFL, O_NONBLOCK | fcntl(fd, F_GETFL, 0));        
+    }
+    else {
+        fcntl(fd, F_SETFL, O_NONBLOCK | fcntl(fd, F_GETFL, 0));
     }
 
     // push to eventloop
@@ -1659,13 +1840,23 @@ error:
 void evfd_setup_udp(EvFD* evfd) {
     assert(!evfd -> destroy);
     evfd -> type = EVFD_UDP;
-    evfd -> proto_ctx = malloc2(sizeof(struct UDPContext));
+    evfd -> proto.udp = malloc2(sizeof(struct UDPContext));
 #ifdef LJS_MBEDTLS
-    evfd -> proto_ctx -> dtls_ctx = NULL;
+    evfd -> proto.udp -> dtls_ctx = NULL;
 #endif
 }
 
 #ifdef LJS_MBEDTLS
+/**
+ * Initialize SSL/DTLS context for evfd.
+ * the arguments except `evfd` and `is_client` are all optional.
+ * \param evfd The evfd to initialize SSL/DTLS context for.
+ * \param config The SSL/DTLS configuration evfd creates. can be NULL.
+ * \param is_client Whether to act as a client or server.
+ * \param preset The SSL/DTLS preset to use.(`MBEDTLS_SSL_PRESET_SUITEB` or `0`)
+ * \param handshake_cb The callback to call when the SSL/DTLS handshake is complete.
+ * \param user_data The user data to pass to the handshake callback.
+ */
 bool evfd_initssl(
     EvFD* evfd, mbedtls_ssl_config** config,
     bool is_client, int preset,
@@ -1673,21 +1864,32 @@ bool evfd_initssl(
 ) {
     tassert(!evfd -> destroy);
     evfd -> type = EVFD_SSL;
-    
-    // 初始化mbedtls结构
+
+    // init basic config
     evfd -> ssl = malloc2(sizeof(struct EvFD_SSL));
     mbedtls_ssl_init(&evfd -> ssl -> ctx);
     mbedtls_ssl_config_init(&evfd -> ssl -> config);
     mbedtls_ssl_config_defaults(&evfd -> ssl -> config, is_client ? MBEDTLS_SSL_IS_CLIENT : MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM, preset);
-    mbedtls_ssl_conf_authmode(&evfd -> ssl -> config, MBEDTLS_SSL_VERIFY_NONE);
-    if(config) *config = &evfd -> ssl -> config;
-    
-    if (mbedtls_ssl_setup(&evfd -> ssl -> ctx, &evfd -> ssl -> config) != 0)
-        goto error;
-    
+    mbedtls_ssl_conf_authmode(&evfd -> ssl -> config, MBEDTLS_SSL_VERIFY_OPTIONAL);
+    // mbedtls_ssl_conf_min_version(&evfd -> ssl -> config, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_4);
+    // mbedtls_ssl_conf_max_version(&evfd -> ssl -> config, MBEDTLS_SSL_MAJOR_VERSION_3, MBEDTLS_SSL_MINOR_VERSION_4);
+    mbedtls_ssl_conf_rng(&evfd -> ssl -> config, default_rng, NULL);
+    if (config) *config = &evfd -> ssl -> config;
+
+    // init tls basic context
+    mbedtls_ssl_conf_own_cert(&evfd -> ssl -> config, &tls_global_cert, NULL);
+
+#if defined(LJS_MBEDTLS) && defined(MBEDTLS_DEBUG_C)
+    // debug?
+    mbedtls_ssl_conf_dbg(&evfd -> ssl -> config, debug_callback, evfd);
+#endif
+
+    int ret = mbedtls_ssl_setup(&evfd -> ssl -> ctx, &evfd -> ssl -> config);
+    if (0 != ret) goto error;
+
     mbedtls_ssl_conf_read_timeout(&evfd -> ssl -> config, 0);
     mbedtls_ssl_set_bio(&evfd -> ssl -> ctx, evfd, handle_ssl_send, handle_ssl_recv, NULL);
-    
+
     // 初始化加密/解密缓冲区
     buffer_init(&evfd -> ssl -> sendbuf, NULL, 16384);
     buffer_init(&evfd -> ssl -> recvbuf, NULL, 16384);
@@ -1695,52 +1897,52 @@ bool evfd_initssl(
     // callback
     evfd -> ssl -> handshake_cb = handshake_cb;
     evfd -> ssl -> handshake_user_data = user_data;
-    
+    evfd -> ssl -> mb_errno = 0;
+
     // 开始握手
     evfd -> ssl -> ssl_handshaking = true;
     ssl_handle_handshake(evfd);
-    return evfd;
+    return true;
 
 error:
+#ifdef LJS_DEBUG
+    char mberror[1024];
+    mbedtls_strerror(ret, mberror, sizeof(mberror));
+    printf("evfd_initssl: %s\n", mberror);
+#endif
     evfd_close(evfd);
-    return NULL;
+    return false;
 }
 
 bool evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config) {
     tassert(!evfd -> destroy);
-    if(!evfd -> proto_ctx) abort();
-    struct UDPContext *ctx = evfd -> proto_ctx;
+    if (!evfd -> proto.udp) abort();
+    struct UDPContext* ctx = evfd -> proto.udp;
     mbedtls_ssl_config* config = malloc2(sizeof(mbedtls_ssl_config));
-    if(_config) *_config = config;
-    
+    if (_config) *_config = config;
+
     mbedtls_ssl_init(ctx -> dtls_ctx);
     mbedtls_ssl_config_init(config);
     mbedtls_ssl_config_defaults(config, MBEDTLS_SSL_IS_SERVER,
-                              MBEDTLS_SSL_TRANSPORT_DATAGRAM,
-                              MBEDTLS_SSL_PRESET_DEFAULT);
+        MBEDTLS_SSL_TRANSPORT_DATAGRAM,
+        MBEDTLS_SSL_PRESET_DEFAULT);
     mbedtls_ssl_conf_authmode(&evfd -> ssl -> config, MBEDTLS_SSL_VERIFY_NONE);
     mbedtls_ssl_conf_read_timeout(&evfd -> ssl -> config, 0);
-    mbedtls_ssl_set_bio(ctx -> dtls_ctx, evfd, 
-                       udp_packet_send, udp_packet_recv, NULL);
+    mbedtls_ssl_set_bio(ctx -> dtls_ctx, evfd,
+        udp_packet_send, udp_packet_recv, NULL);
     return true;
 }
 
-#if defined(LJS_MBEDTLS) && defined(MBEDTLS_DEBUG_C)
-void debug_callback(void *ctx, int level, const char *file, int line, const char *str) {
-    printf("%s %s:%04d: %s\n", level == MBEDTLS_SSL_ALERT_LEVEL_FATAL ? "E:" : level == MBEDTLS_SSL_ALERT_LEVEL_WARNING ? "W:" : "I:", file, line, str);
-}
-#endif
-
 bool evfd_remove_sni(const char* name) {
-    struct list_head* pos, *tmp;
-    list_for_each_prev_safe(pos, tmp, certs) {
+    struct list_head* pos, * tmp;
+    list_for_each_prev_safe(pos, tmp, &cert_list) {
         struct SSL_data* data = list_entry(pos, struct SSL_data, link);
-        if(strcmp(data -> name, name) == 0) {
+        if (strcmp(data -> name, name) == 0) {
             list_del(pos);
             free2(data -> name);
-            if(data -> server_name) free2(data -> server_name);
-            mbedtls_x509_crt_free2(data -> cacert);
-            mbedtls_pk_free2(data -> cakey);
+            if (data -> server_name) free2(data -> server_name);
+            mbedtls_x509_crt_free(data -> cacert);
+            mbedtls_pk_free(data -> cakey);
             free2(data);
             return true;
         }
@@ -1750,11 +1952,8 @@ bool evfd_remove_sni(const char* name) {
 
 void evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey) {
     struct SSL_data* data = malloc2(sizeof(struct SSL_data));
-    if(!certs) init_list_head(certs = &data -> link);
-    else{ 
-        evfd_remove_sni(name);  // 先移除旧的
-        list_add(&data -> link, certs);
-    }
+    evfd_remove_sni(name);  // remove old cert
+    list_add(&data -> link, &cert_list);
     data -> name = name;
     data -> server_name = server_name;
     data -> cacert = cacert;
@@ -1765,36 +1964,41 @@ void evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedt
 // read size from evfd
 // similar to evfd_read, however, it will fail(buffer=NULL, size=0) or fill whole buffer
 // evfd_read will read_once even if buffer is not filled
+// we recommends allocate 1 byte bigger than buffer size is used
+// 
+// warn: the function may not be asyncronous, if there is data in buffer, it will return directly
+//     cautious when using it with promise
 bool evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
-                      EvReadCallback callback, void* user_data) {
+    EvReadCallback callback, void* user_data) {
     tassert(!evfd -> destroy && evfd -> task_based);
 
-    if(
-        evfd -> incoming_buffer && buffer_used(evfd -> incoming_buffer) >= buf_size && 
+    if (
+        evfd -> incoming_buffer && buffer_used(evfd -> incoming_buffer) >= buf_size &&
         list_empty(&evfd -> u.task.read_tasks)
-    ){
+        ) {
         // directly return data from buffer
         uint32_t available = buffer_copyto(evfd -> incoming_buffer, buffer, buf_size);
-        
+
         buffer_seek_cur(evfd -> incoming_buffer, available);
         callback(evfd, buffer, available, user_data);
         return true;
     }
 
+    expand_bufsize(evfd, buf_size);
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
     // initialize buffer
     struct Buffer* buf;
-    buffer_init(&buf, buffer, buf_size +1);
+    buffer_init(&buf, buffer, buf_size + 1);
 
-    if(!evfd -> incoming_buffer) buffer_init(&evfd -> incoming_buffer, NULL, EVFD_BUFSIZE);
+    if (!evfd -> incoming_buffer) buffer_init(&evfd -> incoming_buffer, NULL, EVFD_BUFSIZE);
 
     task -> type = EV_TASK_READ;
     task -> cb.read = callback;
     task -> opaque = user_data;
     task -> buffer = buf;
 
-    if(evfd -> type == EVFD_AIO) {
+    if (evfd -> type == EVFD_AIO) {
         // 提交AIO
         if (submit_aio_read(evfd, task)) {
             free2(task);
@@ -1802,39 +2006,48 @@ bool evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
             return false;
         }
     }
-
+    bool try_direct = list_empty(&evfd -> u.task.read_tasks);
     list_add(&task -> list, &evfd -> u.task.read_tasks);
-    check_queue_status(evfd, evfd -> fd[0]);
+    check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
+
+#ifdef LJS_MBEDTLS
+    if (try_direct && (evfd -> type == EVFD_SSL || evfd -> type == EVFD_DTLS)) {
+        // note: reading from mbedtls requires readbuf to be filled
+        handle_read(evfd_getfd(evfd, NULL), evfd, NULL, NULL);
+    }
+#endif
 
     return true;
 }
 
-bool evfd_clearbuf(EvFD* evfd){
-    if(evfd -> destroy) return false;
+bool evfd_clearbuf(EvFD* evfd) {
+    if (evfd -> destroy) return false;
     buffer_clear(evfd -> incoming_buffer);
     return true;
 }
 
 // read one line from evfd, "\r" "\r\n" "\n" are all welcomed
 // fail or complete
+// warn: the function may not be asyncronous, if there is data in buffer, it will return directly
+//     cautious when using it with promise
 bool evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
-                      EvReadCallback callback, void* user_data) {
+    EvReadCallback callback, void* user_data) {
     tassert(!evfd -> destroy);
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
 
     struct Buffer* buf;
     buffer_init(&buf, buffer, buf_size);
-    if(!evfd -> incoming_buffer) buffer_init(&evfd -> incoming_buffer, NULL, EVFD_BUFSIZE);
+    if (!evfd -> incoming_buffer) buffer_init(&evfd -> incoming_buffer, NULL, EVFD_BUFSIZE);
 
     task -> type = EV_TASK_READLINE;
     task -> buffer = buf;
     task -> cb.read = callback;
     task -> opaque = user_data;
     evfd -> strip_if_is_n = false;
-    
-    if(evfd -> type == EVFD_AIO && submit_aio_read(evfd, task)){
+
+    if (evfd -> type == EVFD_AIO && submit_aio_read(evfd, task)) {
         free2(task);
         buffer_free(buf);
         return false;
@@ -1842,41 +2055,42 @@ bool evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
 
     bool try_direct = list_empty(&evfd -> u.task.read_tasks);
     list_add(&task -> list, &evfd -> u.task.read_tasks);
-    check_queue_status(evfd, evfd -> fd[0]);
+    check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
 
-    if(
-        evfd -> incoming_buffer && !buffer_is_empty(evfd -> incoming_buffer) &&
-        try_direct
-    ){
-        // try to find line directly from buffer
+#ifdef LJS_MBEDTLS
+    if (try_direct && (evfd -> type == EVFD_SSL || evfd -> type == EVFD_DTLS)) {
+        // note: reading from mbedtls requires readbuf to be filled
         handle_read(evfd_getfd(evfd, NULL), evfd, NULL, NULL);
     }
+#endif
 
     return true;
 }
 
-// 通用读取请求
+// read data once from evfd
+// warn: the function may not be asyncronous, if there is data in buffer, it will return directly
+//     cautious when using it with promise
 bool evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
-                   EvReadCallback callback, void* user_data) {
+    EvReadCallback callback, void* user_data) {
     tassert(!evfd -> destroy && buf_size > 0);
 
-    if(evfd -> incoming_buffer && list_empty(&evfd -> u.task.read_tasks) && !buffer_is_empty(evfd -> incoming_buffer)){
+    if (evfd -> incoming_buffer && list_empty(&evfd -> u.task.read_tasks) && !buffer_is_empty(evfd -> incoming_buffer)) {
         // directly return data from buffer
         uint32_t available = buffer_copyto(evfd -> incoming_buffer, buffer, buf_size);
-        
+
         buffer_seek_cur(evfd -> incoming_buffer, available);
         callback(evfd, buffer, available, user_data);
         return true;
     }
-    
+
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
 
     struct Buffer* buf;
     buffer_init(&buf, buffer, buf_size);
 
-    if(!evfd -> incoming_buffer) buffer_init(&evfd -> incoming_buffer, NULL, EVFD_BUFSIZE);
+    if (!evfd -> incoming_buffer) buffer_init(&evfd -> incoming_buffer, NULL, EVFD_BUFSIZE);
 
     task -> type = EV_TASK_READONCE;
     task -> buffer = buf;
@@ -1884,42 +2098,52 @@ bool evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer,
     task -> opaque = user_data;
 
 #ifdef LJS_DEBUG
-    if(evfd -> type == EVFD_AIO)
+    if (evfd -> type == EVFD_AIO)
         printf("warn: aio is not supported for readonce\n");
 #endif
 
-    if(evfd -> type == EVFD_AIO) {
+    if (evfd -> type == EVFD_AIO) {
         buffer_aligned(buf, blksize_get(evfd -> fd[1]));
-        // 提交AIO
+        // submit aio read
         if (submit_aio_read(evfd, task)) {
             free2(task);
             buffer_free(buf);
             return false;
         }
     }
+    bool try_direct = list_empty(&evfd -> u.task.read_tasks);
     list_add(&task -> list, &evfd -> u.task.read_tasks);
-    check_queue_status(evfd, evfd -> fd[0]);
+    check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
+
+#ifdef LJS_MBEDTLS
+    if (try_direct && (evfd -> type == EVFD_SSL || evfd -> type == EVFD_DTLS)) {
+        // note: reading from mbedtls requires readbuf to be filled
+        handle_read(evfd_getfd(evfd, NULL), evfd, NULL, NULL);
+    }
+#endif
 
     return true;
 }
 
-// 提交写请求
+// submit write task to evfd
+// if size=0, it will call callback immediately with success=true
 bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
-                   EvWriteCallback callback, void* user_data) {
+    EvWriteCallback callback, void* user_data) {
     tassert(!evfd -> destroy);
-    if(size == 0){
+    if (size == 0) {
         callback(evfd, true, user_data);
         return true;
     }
 
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
+    bool try_direct = list_empty(&evfd -> u.task.write_tasks);
 
-    // 初始化写buffer
+    // write circular buffer
     struct Buffer* buf;
-    buffer_init(&buf, (uint8_t*)data, size +1);
-    buf -> end = size; // 预填充数据
+    buffer_init(&buf, (uint8_t*) data, size + 1);
+    buf -> end = size; // fill data
 
     task -> type = EV_TASK_WRITE;
     task -> buffer = buf;
@@ -1927,18 +2151,24 @@ bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
     task -> opaque = user_data;
 
     if (evfd -> type == EVFD_AIO) {
-        // 提交AIO
-        if (!submit_aio_write(evfd, task)) 
+        // submit AIO write
+        if (!submit_aio_write(evfd, task))
             goto error;
 
         // add to list
         list_add(&task -> list, &evfd -> u.task.write_tasks);
-    }else{
+    }
+    else {
         list_add(&task -> list, &evfd -> u.task.write_tasks);
     }
 
-    check_queue_status(evfd, evfd -> fd[0]);
+    check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
+
+    if (try_direct && (evfd -> type == EVFD_SSL || evfd -> type == EVFD_DTLS)) {
+        // note: writing requires mbedtls processing data before EPOLLOUT
+        handle_write(evfd -> fd[0], evfd, NULL);
+    }
 
     return true;
 
@@ -1948,15 +2178,15 @@ error:
     return false;
 }
 
-// UDP写
+// UDP write
 bool evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size,
-                         const struct sockaddr *addr, socklen_t addr_len,
-                         EvWriteCallback callback, void* user_data) {
+    const struct sockaddr* addr, socklen_t addr_len,
+    EvWriteCallback callback, void* user_data) {
     tassert(!evfd -> destroy);
-    struct UDPContext *ctx = evfd -> proto_ctx;
+    struct UDPContext* ctx = evfd -> proto.udp;
     memcpy(&ctx -> peer_addr, addr, addr_len);
     ctx -> addr_len = addr_len;
-    
+
     return evfd_write(evfd, data, size, callback, user_data);
 }
 
@@ -1967,8 +2197,8 @@ bool evfd_onclose(EvFD* evfd, EvCloseCallback callback, void* user_data) {
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
 
-    if(!callback){
-        if(list_empty(&evfd -> u.task.close_tasks)) return false;
+    if (!callback) {
+        if (list_empty(&evfd -> u.task.close_tasks)) return false;
         // clear callback
         struct Task* t = list_entry(evfd -> u.task.close_tasks.next, struct Task, list);
         list_del(&t -> list);
@@ -1996,7 +2226,7 @@ bool evfd_finalizer(EvFD* evfd, EvFinalizerCallback callback, void* user_data) {
 }
 
 // only support normal fd, like socket, pipe, pty that supports epoll and stream-based
-bool evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvPipeToNotify notify, void* nopaque){
+bool evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvPipeToNotify notify, void* nopaque) {
     tassert(!from -> destroy && !to -> destroy);
     tassert(from -> type == EVFD_NORM && to -> type == EVFD_NORM);
     struct Task* task = malloc2(sizeof(struct Task));
@@ -2023,18 +2253,18 @@ bool evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvP
 
     TRACE_EVENTS(from, +1);
     TRACE_EVENTS(to, +1);
-    check_queue_status(from, from -> fd[0]);
-    check_queue_status(to, to -> fd[0]);
+    check_queue_status(from);
+    check_queue_status(to);
     return true;
 }
 
-static inline void close_stdpipe(EvFD* evfd){
+static inline void close_stdpipe(EvFD* evfd) {
 #ifdef LJS_DEBUG
     printf("close_stdpipe: %d\n", evfd -> fd[0]);
 #endif
 
     clear_tasks(evfd, true);
-    if(evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
+    if (evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
     evfd_ctl(evfd, EPOLL_CTL_FREE);
     evfd -> destroy = true;
 }
@@ -2042,18 +2272,18 @@ static inline void close_stdpipe(EvFD* evfd){
 // close evfd
 bool evfd_close(EvFD* evfd) {
     tassert(evfd -> type != EVFD_TIMER && evfd -> type != EVFD_INOTIFY && evfd -> fd[0] >= 0);
-    if(evfd -> destroy) return false;
-    if(evfd -> fd[0] <= STDERR_FILENO) close_stdpipe(evfd);
+    if (evfd -> destroy) return false;
+    if (evfd -> fd[0] <= STDERR_FILENO) close_stdpipe(evfd);
     else handle_close(evfd -> fd[0], evfd);
     return true;
 }
 
 // Destroy evfd, not close fd
 bool evfd_close2(EvFD* evfd) {
-    if(evfd -> destroy) return false;
-    if(evfd -> fd[0] <= STDERR_FILENO) close_stdpipe(evfd);
-    if(evfd -> task_based) clear_tasks(evfd, false);
-    if(evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
+    if (evfd -> destroy) return false;
+    if (evfd -> fd[0] <= STDERR_FILENO) close_stdpipe(evfd);
+    if (evfd -> task_based) clear_tasks(evfd, false);
+    if (evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
     evfd_ctl(evfd, EPOLL_CTL_FREE);
     evfd -> destroy = true;
 
@@ -2062,8 +2292,8 @@ bool evfd_close2(EvFD* evfd) {
     return true;
 }
 
-static void __shutdown_cb(EvFD* evfd, bool success, void* opaque){
-    if(!success){
+static void __shutdown_cb(EvFD* evfd, bool success, void* opaque) {
+    if (!success) {
 #ifdef LJS_DEBUG
         perror("shutdown");
 #endif
@@ -2073,19 +2303,20 @@ static void __shutdown_cb(EvFD* evfd, bool success, void* opaque){
 
 // better choice than evfd_close
 // read/write all data from/to fd and close it
-bool evfd_shutdown(EvFD* evfd){
+bool evfd_shutdown(EvFD* evfd) {
     tassert(!evfd -> destroy);
 
     // force read Note: buffer is required
-    if(!evfd -> incoming_buffer) buffer_init(&evfd -> incoming_buffer, NULL, EVFD_BUFSIZE);
+    if (!evfd -> incoming_buffer) buffer_init(&evfd -> incoming_buffer, NULL, EVFD_BUFSIZE);
     handle_read(evfd -> fd[0], evfd, NULL, NULL);
 
     // wait for all data to be written
-    if(!evfd -> destroy && evfd -> task_based && (
+    if (!evfd -> destroy && evfd -> task_based && (
         !list_empty(&evfd -> u.task.write_tasks) || !list_empty(&evfd -> u.task.read_tasks)
-    )){
+        )) {
         evfd_wait2(evfd, __shutdown_cb, NULL);
-    }else{
+    }
+    else {
         evfd_close(evfd);
     }
 
@@ -2096,10 +2327,10 @@ bool evfd_shutdown(EvFD* evfd){
  * Overwrite the default behavior of an EvFD object to callbacks provided by the user.
  * Mostly used after using `evfd_new()` and donot want to close the fd.
  */
-bool evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque){
+bool evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque) {
     tassert(!evfd -> destroy && evfd -> task_based);
     clear_tasks(evfd, false);
-    if(evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
+    if (evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
     TRACE_NSTDEVENTS(evfd, +1);   // force add task
     evfd -> incoming_buffer = NULL;
     evfd -> u.cb.read = rcb;
@@ -2115,13 +2346,13 @@ bool evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCal
  * Wait for all tasks to complete.
  * After this, cb will be called with opaque as argument.
  */
-bool evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque){
+bool evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque) {
     tassert(!evfd -> destroy);
 
-    if( // already completed
+    if ( // already completed
         (wait_read && list_empty(&evfd -> u.task.read_tasks)) ||
         (wait_read && list_empty(&evfd -> u.task.write_tasks))
-    ) cb(evfd, true, opaque);
+        ) cb(evfd, true, opaque);
 
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
@@ -2130,9 +2361,10 @@ bool evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque){
     task -> cb.sync = cb;
     task -> opaque = opaque;
     task -> buffer = NULL;
-    if(wait_read){ 
+    if (wait_read) {
         list_add(&task -> list, &evfd -> u.task.read_tasks);
-    }else{
+    }
+    else {
         list_add(&task -> list, &evfd -> u.task.write_tasks);
     }
     TRACE_EVENTS(evfd, +1);
@@ -2146,16 +2378,16 @@ struct __sync_cb_arg {
 };
 
 // (internal use) close after all tasks are completed
-static void __sync_cb(EvFD* evfd, bool success, void* opaque){
+static void __sync_cb(EvFD* evfd, bool success, void* opaque) {
     struct __sync_cb_arg* arg = opaque;
-    if(arg -> count ++ == 1){ 
-        evfd_close(evfd); 
+    if (arg -> count++ == 1) {
+        evfd_close(evfd);
         arg -> cb(evfd, success, arg -> opaque);
         free2(arg);
     }
 }
 
-bool evfd_wait2(EvFD* evfd, EvSyncCallback cb, void* opaque){
+bool evfd_wait2(EvFD* evfd, EvSyncCallback cb, void* opaque) {
     struct __sync_cb_arg* arg = malloc2(sizeof(struct __sync_cb_arg));
     if (!arg) return false;
     arg -> count = 0;
@@ -2164,26 +2396,26 @@ bool evfd_wait2(EvFD* evfd, EvSyncCallback cb, void* opaque){
     return evfd_wait(evfd, false, __sync_cb, arg) && evfd_wait(evfd, true, __sync_cb, arg);
 }
 
-bool evfd_yield(EvFD* evfd, bool yield_read, bool yield_write){
+bool evfd_yield(EvFD* evfd, bool yield_read, bool yield_write) {
     tassert(!evfd -> destroy);
     int events = evfd -> epoll_flags;
-    if(yield_read) events &= ~EPOLLIN;
-    if(yield_write) events &= ~EPOLLOUT;
+    if (yield_read) events &= ~EPOLLIN;
+    if (yield_write) events &= ~EPOLLOUT;
     evfd_ctl(evfd, events);
     return true;
 }
 
-bool evfd_consume(EvFD* evfd, bool consume_read, bool consume_write){
+bool evfd_consume(EvFD* evfd, bool consume_read, bool consume_write) {
     tassert(!evfd -> destroy);
     int events = evfd -> epoll_flags;
-    if(consume_read) events |= EPOLLIN;
-    if(consume_write) events |= EPOLLOUT;
+    if (consume_read) events |= EPOLLIN;
+    if (consume_write) events |= EPOLLOUT;
     evfd_ctl(evfd, events);
     return true;
 }
 
 // Get whether the evfd is closed
-bool evfd_closed(EvFD* evfd){
+bool evfd_closed(EvFD* evfd) {
     return evfd -> destroy;
 }
 
@@ -2192,15 +2424,15 @@ static inline EvFD* timer_new(uint64_t milliseconds, EvTimerCallback callback, v
     struct TimerFD* tfd = NULL;
     int fd;
     bool reuse = false;
-    struct list_head *pos, *tmp;
-    list_for_each_safe(pos, tmp, &timer_list){
-        struct TimerFD* _tfd = (void*)list_entry(pos, struct EvFD, link);
-        if(_tfd -> time == 0){
+    struct list_head* pos, * tmp;
+    list_for_each_safe(pos, tmp, &timer_list) {
+        struct TimerFD* _tfd = (void*) list_entry(pos, struct EvFD, link);
+        if (_tfd -> time == 0) {
             _tfd -> time = milliseconds;
             _tfd -> once = once;
             tfd = _tfd;
             reuse = true;
-            fd = ((EvFD*)_tfd) -> fd[0];
+            fd = ((EvFD*) _tfd) -> fd[0];
             goto settime;
         }
     }
@@ -2216,7 +2448,7 @@ static inline EvFD* timer_new(uint64_t milliseconds, EvTimerCallback callback, v
 
     // 创建定时器对象
     tfd = malloc2(sizeof(struct TimerFD));
-    struct EvFD* evfd = (void*)tfd;
+    struct EvFD* evfd = (void*) tfd;
     evfd -> task_based = true;
     tfd -> time = milliseconds;
     tfd -> once = once;
@@ -2243,7 +2475,7 @@ settime:
         .it_value = itss,
         .it_interval = once ? itsn : itss
     };
-    
+
     if (timerfd_settime(fd, 0, &its, NULL) == -1) {
 #ifdef LJS_DEBUG
         perror("timerfd_settime");
@@ -2252,10 +2484,11 @@ settime:
         return NULL;
     }
 
-    if(reuse){
-        evfd = (void*)tfd;
+    if (reuse) {
+        evfd = (void*) tfd;
         evfd_ctl(evfd, EPOLLIN | EPOLLLT);
-    }else{
+    }
+    else {
         struct epoll_event ev = {
             .events = evfd -> epoll_flags = EPOLLIN | EPOLLLT,
             .data.ptr = evfd
@@ -2272,16 +2505,16 @@ settime:
         list_add(&evfd -> link, &timer_list);
 
 #ifdef LJS_DEBUG
-    printf("new timer fd:%d, s:%ld, ns:%ld, once:%d\n", fd, itss.tv_sec, itss.tv_nsec, once);
+        printf("new timer fd:%d, s:%ld, ns:%ld, once:%d\n", fd, itss.tv_sec, itss.tv_nsec, once);
 #endif
 
     }
-    
+
     return evfd;
 }
 
 static inline bool timer_task(struct EvFD* evfd, EvTimerCallback callback, void* user_data) {
-    if(!evfd) return false;
+    if (!evfd) return false;
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
 
@@ -2295,7 +2528,7 @@ static inline bool timer_task(struct EvFD* evfd, EvTimerCallback callback, void*
 
 EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* cbopaque, EvCloseCallback close_cb, void* close_opaque) {
     struct EvFD* evfd = timer_new(milliseconds, callback, cbopaque, false);
-    if(timer_task(evfd, callback, cbopaque)){
+    if (timer_task(evfd, callback, cbopaque)) {
         evfd_onclose(evfd, close_cb, close_opaque);
         return evfd;
     }
@@ -2306,7 +2539,7 @@ EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* cbo
 
 EvFD* evcore_setTimeout(uint64_t milliseconds, EvTimerCallback callback, void* user_data) {
     struct EvFD* evfd = timer_new(milliseconds, callback, user_data, true);
-    if(timer_task(evfd, callback, user_data)) return evfd;
+    if (timer_task(evfd, callback, user_data)) return evfd;
     evfd_close(evfd);
     return NULL;
 }
@@ -2320,15 +2553,15 @@ bool evcore_clearTimer2(EvFD* evfd) {
     printf("yield timer fd:%d\n", evfd_getfd(evfd, NULL));
 #endif
 
-    struct TimerFD* tfd = (void*)evfd;
+    struct TimerFD* tfd = (void*) evfd;
 
     // 清理任务队列
-    struct list_head *pos, *tmp;
+    struct list_head* pos, * tmp;
     list_for_each_prev_safe(pos, tmp, &evfd -> u.task.read_tasks) {
         struct Task* task = list_entry(pos, struct Task, list);
 
         // execute callback if once and not executed
-        if(!tfd -> executed && tfd -> once)
+        if (!tfd -> executed && tfd -> once)
             task -> cb.timer(0, task -> opaque);
 
         list_del(pos);
@@ -2337,10 +2570,11 @@ bool evcore_clearTimer2(EvFD* evfd) {
     }
 
     // clear onclose tasks
-    if(tfd -> once){
+    if (tfd -> once) {
         assert(list_empty(&evfd -> u.task.close_tasks));
-    }else{
-        struct list_head *pos2, *tmp2;
+    }
+    else {
+        struct list_head* pos2, * tmp2;
         list_for_each_prev_safe(pos2, tmp2, &evfd -> u.task.close_tasks) {
             struct Task* task = list_entry(pos2, struct Task, list);
             task -> cb.close(evfd, task -> opaque);
@@ -2365,10 +2599,10 @@ bool evcore_clearTimer2(EvFD* evfd) {
 
 bool evcore_clearTimer(int timer_fd) {
     // 在链表中查找定时器
-    struct list_head *pos, *tmp;
+    struct list_head* pos, * tmp;
     list_for_each_prev_safe(pos, tmp, &timer_list) {
         struct EvFD* evfd = list_entry(pos, struct EvFD, link);
-        if(evfd -> fd[0] == timer_fd){
+        if (evfd -> fd[0] == timer_fd) {
             return evcore_clearTimer2(evfd);
         }
     }
@@ -2399,7 +2633,7 @@ EvFD* evcore_inotify(EvINotifyCallback callback, void* user_data) {
         return NULL;
     }
     memset(inotify, 0, sizeof(struct InotifyContext));
-    evfd -> inotify = inotify;
+    evfd -> proto.inotify = inotify;
 
     // inotify is task-based
     evfd -> task_based = true;
@@ -2450,7 +2684,7 @@ bool evcore_stop_inotify(EvFD* evfd) {
     close(evfd -> fd[0]);
 
     // 清理任务队列
-    struct list_head *pos, *tmp;
+    struct list_head* pos, * tmp;
     list_for_each_prev_safe(pos, tmp, &evfd -> u.task.read_tasks) {
         struct Task* task = list_entry(pos, struct Task, list);
         list_del(pos);
@@ -2459,11 +2693,11 @@ bool evcore_stop_inotify(EvFD* evfd) {
     }
 
     // free evfd
-    for(int i = 0; i < MAX_EVENTS; i ++){
-        if(evfd -> inotify -> paths[i])
-            free2(evfd -> inotify -> paths[i]);
+    for (int i = 0; i < MAX_EVENTS; i++) {
+        if (evfd -> proto.inotify -> paths[i])
+            free2(evfd -> proto.inotify -> paths[i]);
     }
-    free2(evfd -> inotify);
+    free2(evfd -> proto.inotify);
     free2(evfd);
 
     return true;
@@ -2473,7 +2707,7 @@ bool evcore_stop_inotify(EvFD* evfd) {
 bool evcore_inotify_watch(EvFD* evfd, const char* path, uint32_t mask, int* wd) {
     tassert(evfd -> type == EVFD_INOTIFY);
     int _wd;
-    if(!wd) wd = &_wd;
+    if (!wd) wd = &_wd;
 
     *wd = inotify_add_watch(evfd -> fd[0], path, mask);
     if (*wd == -1) {
@@ -2484,7 +2718,7 @@ bool evcore_inotify_watch(EvFD* evfd, const char* path, uint32_t mask, int* wd) 
     }
 
     // save path
-    evfd -> inotify -> paths[*wd] = strdup2(path);
+    evfd -> proto.inotify -> paths[*wd] = strdup2(path);
 
     return true;
 }
@@ -2501,16 +2735,16 @@ bool evcore_inotify_unwatch(EvFD* evfd, int wd) {
         return false;
     }
 
-    free2(evfd -> inotify -> paths[wd]);
-    evfd -> inotify -> paths[wd] = NULL;
+    free2(evfd -> proto.inotify -> paths[wd]);
+    evfd -> proto.inotify -> paths[wd] = NULL;
 
     return true;
 }
 
 int evcore_inotify_find(EvFD* evfd, const char* path) {
     tassert(evfd -> type == EVFD_INOTIFY);
-    for(int i = 0; i < MAX_EVENTS; i ++){
-        if(evfd -> inotify -> paths[i] && strcmp(evfd -> inotify -> paths[i], path) == 0){
+    for (int i = 0; i < MAX_EVENTS; i++) {
+        if (evfd -> proto.inotify -> paths[i] && strcmp(evfd -> proto.inotify -> paths[i], path) == 0) {
             return i;
         }
     }
@@ -2518,35 +2752,42 @@ int evcore_inotify_find(EvFD* evfd, const char* path) {
 }
 
 int evfd_getfd(EvFD* evfd, int* timer_fd) {
-    if(evfd -> type == EVFD_AIO){
-        if(timer_fd) *timer_fd = evfd -> fd[0];
+    if (evfd -> type == EVFD_AIO) {
+        if (timer_fd) *timer_fd = evfd -> fd[0];
         return evfd -> fd[1];
-    }else{
-        if(timer_fd)*timer_fd = -1;
+    }
+    else {
+        if (timer_fd)*timer_fd = -1;
         return evfd -> fd[0];
     }
 }
 
-bool evfd_seek(EvFD* evfd, int seek_type, off_t pos){
+int evfd_ssl_errno(EvFD* evfd) {
+    if(evfd -> type != EVFD_SSL && evfd -> type != EVFD_DTLS)
+        return 0;
+    return evfd -> ssl -> mb_errno;
+}
+
+bool evfd_seek(EvFD* evfd, int seek_type, off_t pos) {
     tassert(!evfd -> destroy && evfd -> type == EVFD_AIO && evfd -> task_based);
 
-    switch (seek_type){
-        case SEEK_CUR:
-            evfd -> u.task.offset += pos;
+    switch (seek_type) {
+    case SEEK_CUR:
+        evfd -> u.task.offset += pos;
         break;
 
-        case SEEK_END:
-            // Note: seek from end requires fstat which is not async
-            errno = ENOTSUP;
-            return false;
-            // evfd -> u.task.offset = 
+    case SEEK_END:
+        // Note: seek from end requires fstat which is not async
+        errno = ENOTSUP;
+        return false;
+        // evfd -> u.task.offset = 
 
-        case SEEK_SET:
-            evfd -> u.task.offset = pos;
+    case SEEK_SET:
+        evfd -> u.task.offset = pos;
         break;
 
-        default:
-            abort();
+    default:
+        abort();
     }
 
     return true;

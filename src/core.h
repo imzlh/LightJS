@@ -42,7 +42,7 @@ enum {
 #define PIPE_SOCKET (1 << 3)
 #define MAX_MESSAGE_COUNT 10
 #define EV_REMOVE_ALL (EV_REMOVE_READ | EV_REMOVE_WRITE | EV_REMOVE_EOF)
-#define EVFD_BUFSIZE 16 * 1024
+#define EVFD_BUFSIZE 4 * 1024
 #define MAX_HEADER_COUNT 64
 
 #ifndef countof
@@ -62,7 +62,7 @@ typedef void (*EvINotifyCallback)(EvFD* fd, const char* path, uint32_t evtype, c
 typedef void (*EvSyncCallback)(EvFD* evfd, bool success, void* user_data);
 typedef void (*EvFinalizerCallback)(EvFD* evfd, struct Buffer* buffer, void* user_data);
 typedef void (*EvTimerCallback)(uint64_t count, void* user_data);
-typedef void (*EvSSLHandshakeCallback)(EvFD* evfd, void* user_data);
+typedef void (*EvSSLHandshakeCallback)(EvFD* evfd, bool success, void* user_data);
 typedef bool (*EvPipeToFilter)(struct Buffer* buf, void* user_data);
 typedef void (*EvPipeToNotify)(struct EvFD* from, struct EvFD* to, EvPipeToNotifyType type, void* user_data);
 typedef void (*JSPromiseCallback)(JSContext* ctx, bool is_error, JSValue result, void* user_data);
@@ -265,7 +265,7 @@ typedef void (*DnsResponseCallback)(int total_records, dns_record** records, voi
 typedef void (*DnsErrorCallback)(const char* error_msg, void* user_data);
 
 // Core events
-bool js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data);
+bool js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data, bool cancelable);
 
 // console
 void js_dump(JSContext *ctx, JSValueConst val, EvFD* target_fd);
@@ -290,8 +290,8 @@ bool LJS_init_socket(JSContext* ctx);
 void LJS_init_timer(JSContext* ctx);
 
 // Core I/O Pipe
-JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, uint32_t buf_size, bool iopipe, EvFD** ref);
-JSValue LJS_NewU8Pipe(JSContext *ctx, uint32_t flag, uint32_t buf_size, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
+JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, bool iopipe, EvFD** ref);
+JSValue LJS_NewU8Pipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
 JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
 EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj);
 
@@ -319,6 +319,7 @@ bool evfd_clearbuf(EvFD* evfd);
 bool evfd_onclose(EvFD* fd, EvCloseCallback callback, void* user_data);
 bool evfd_finalizer(EvFD* evfd, EvFinalizerCallback callback, void* user_data);
 int evfd_getfd(EvFD* evfd, int* timer_fd);
+int evfd_ssl_errno(EvFD* evfd);
 bool evfd_seek(EvFD* evfd, int seek_type, off_t pos);
 bool evfd_yield(EvFD* evfd, bool yield_read, bool yield_write);
 bool evfd_consume(EvFD* evfd, bool consume_read, bool consume_write);
@@ -361,7 +362,7 @@ char* LJS_resolve_path(const char* path, const char* base);
 bool LJS_parse_url(const char *url, URL_data *url_struct, URL_data *base);
 void LJS_free_url(URL_data *url_struct);
 char* LJS_format_url(URL_data *url_struct);
-JSValue LJS_NewResponse(JSContext *ctx, LHTTPData *data, bool readonly);
+JSValue LJS_NewResponse(JSContext *ctx, LHTTPData *data, bool readonly, bool keepalive);
 void LJS_parse_from_fd(EvFD* fd, LHTTPData *data, bool is_client, HTTP_ParseCallback callback, void *userdata);
 JSValue LJS_NewWebSocket(JSContext *ctx, EvFD* fd, bool enable_mask);
 JSValue LJS_NewWebSocket(JSContext *ctx, EvFD* fd, bool enable_mask);
@@ -417,6 +418,13 @@ void __js_reject2(struct promise* proxy, JSValue value, const char* __debug__);
 #define js_reject2(proxy, value) __js_reject2(proxy, value, __FILE__ ":" STRINGIFY(__LINE__))
 JSValue js_get_promise(Promise* promise);
 JSContext* js_get_promise_context(struct promise* proxy);
+
+#define js_reject3(proxy, ...) { \
+    char snprint_buf[1024]; \
+    snprintf(snprint_buf, sizeof(snprint_buf), __VA_ARGS__); \
+    js_reject(proxy, snprint_buf); \
+}
+
 
 JSValue JS_CallSafe(JSContext *ctx, JSValueConst func_obj, JSValueConst this_val, int argc, JSValueConst *argv, bool* is_exception);
 #define JS_CallOrHandle(ctx, func_obj, this_val, argc, argv) if(!JS_IsUninitialized(JS_CallSafe(ctx, func_obj, this_val, argc, argv, NULL))

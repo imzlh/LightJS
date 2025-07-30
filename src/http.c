@@ -44,6 +44,11 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 
+#ifdef LJS_MBEDTLS
+#include <mbedtls/ssl.h>
+#include <mbedtls/error.h>
+#endif
+
 #define BUFFER_SIZE 1024
 
 // trim the start of a string
@@ -123,6 +128,9 @@ static char* normalize_path(const char* path) {
         strcat(result, parts[i]);
         free2(parts[i]);
     }
+
+    // dir: add trailing slash
+    if(path[strlen(path) -1] == '/') strcat(result, "/");
     
     free2(parts);
     free2(copy);
@@ -470,6 +478,7 @@ skip_up:
             *host_end = '\0';
             char *port_str = host_end + 1;
             char *port_end = strpbrk(port_str, "/?#");
+            char port_end_chr = port_end ? *port_end : '/';
             if (port_end) *port_end = '\0';
 
             if(strlen(port_str) > 5){
@@ -483,8 +492,11 @@ skip_up:
             }
             url_struct -> port = (uint16_t)port;
             if(port_end){
-                *port_end = '/';
+                *port_end = port_end_chr;
                 url = port_end;
+            }else{
+                url_struct -> host = strdup2(host);
+                goto final; // no path field
             }
         } else if(url_struct -> protocol) {                        // use default port
             if(strcmp(url_struct -> protocol, "http") == 0){
@@ -502,31 +514,35 @@ skip_up:
             }
         }
 
-        url_struct -> host = strdup2(host);
+        url_struct -> host = strndup2(host, host_end ? host_end - host : strlen(host));
+        if(host_end) url = host_end;
     }
 
 skip_host:
     if (!url_struct -> path) {
         char *path_start = url;
-        char *query_start = strchr(path_start, '?');
-        char *hash_start = strchr(query_start ? query_start : path_start, '#');
+        char *hp_start = strpbrk(url, "?#");
 
-        if (hash_start) {
-            *hash_start = '\0';
-            url_struct -> hash = url_decode(strdup2(hash_start + 1));
-        }
-
-        if (query_start) {
-            *query_start = '\0';
-            char *query_str = query_start + 1;
-            if (!url_parse_query(query_str, &url_struct -> query)) {
-                goto error;
+        if (hp_start){
+            if (*hp_start == '#') {
+                url_struct -> hash = url_decode(strdup2(hp_start + 1));
+            } else {
+                char* hash_start = strchr(hp_start, '#');
+                if(hash_start){
+                    *hash_start = '\0';
+                    url_struct -> hash = url_decode(strdup2(hash_start + 1));
+                }
+                char *query_str = hp_start + 1;
+                if (!url_parse_query(query_str, &url_struct -> query)) {
+                    goto error;
+                }
             }
+            *hp_start = '\0';
         }
 
         if (*path_start != '/') {
             // Note: LJS_resolve_path will motify input path
-            char* bpath = strdup2(base -> path ? base -> path : ".");
+            char* bpath = strdup2(base -> path ? base -> path : "");
             url_struct -> path = LJS_resolve_path(url_decode(path_start), bpath);
             free2(bpath);
             if (!url_struct -> path) {
@@ -536,7 +552,7 @@ skip_host:
             url_struct -> path = url_decode(strdup2(path_start));
         }
     }
-
+final:
     free2(__url);
     return true;
 
@@ -602,7 +618,12 @@ char* LJS_format_url(URL_data *url_struct){
         
     }
     
-    PUT(url_struct -> path);
+    if(url_struct -> path){
+        PUT(url_struct -> path);
+    }else{
+        PUT("/");
+    }
+
     if(!list_empty(&url_struct -> query)){
         PUT("?");
         struct list_head *cur, *tmp;
@@ -886,9 +907,9 @@ static int parse_evloop_chunk_callback(EvFD* evfd, uint8_t* chunk_data, uint32_t
     if (data -> state == HTTP_BODY && data -> chunked){
         data -> cb(data, chunk_data, len, data -> userdata);
         data -> content_resolved += len;
+    }else{
+        free2(chunk_data);
     }
-
-    free2(chunk_data);
     
     if(data -> __read_all){
         uint8_t* buf = malloc2(BUFFER_SIZE);
@@ -916,7 +937,7 @@ static int parse_evloop_body_callback(EvFD* evfd, uint8_t* buffer, uint32_t len,
         if (chunk_size == 0) goto done;
 
         // chunk read
-        uint8_t* buf = malloc2(chunk_size);
+        uint8_t* buf = malloc2(chunk_size +1);
         evfd_readsize(evfd, chunk_size, buf, parse_evloop_chunk_callback, data);
 
         free2(line_data);
@@ -992,19 +1013,33 @@ static int parse_evloop_callback(EvFD* evfd, uint8_t* _line_data, uint32_t len, 
         }else{
             data -> version = parse_http_version (param1);
             data -> status = atoi (param2);
+            if (data -> version < 1.0 || data -> status < 100){
+                goto error;
+            }
         }
         data -> state = HTTP_HEADER;
     }else if (data -> state == HTTP_HEADER){
         STRTRIM (line_data);
         if (line_data[0] == '\0'){
             // POST PUT definitely have body content
-            if(data -> content_length == 0 && !strcmp(data -> method, "POST") && !strcmp(data -> method, "PUT"))
+            // also: chunked?
+            if(data -> content_length == 0 && !data -> chunked)
                 data -> state = HTTP_DONE;
             else
                 data -> state = HTTP_BODY;
             data -> cb(data, NULL, 0, data -> userdata);
             free2(line_data);
             data -> cb = NULL;
+
+            // Connection: close ???
+            // if(data -> is_client){
+            //     FIND_HEADERS(data, "Connection", value, {
+            //         if(strcmp(value -> value, "close") == 0){
+            //             evfd_close(data -> fd);
+            //         }
+            //     });
+            // }
+
             return EVCB_RET_DONE;
         }
 
@@ -1117,6 +1152,7 @@ struct HTTP_Response{
 
     bool locked;
     bool owned;     // if false, will not free data
+    bool keepalive;
 };
 static thread_local JSClassID response_class_id;
 
@@ -1151,9 +1187,10 @@ static void callback_tou8(LHTTPData *data, uint8_t *buffer, uint32_t len, void *
 // for U8Pipe
 static JSValue response_poll(JSContext* ctx, void* ptr, JSValue __){
     Promise *promise = js_promise(ctx);
+    JSValue ret = js_get_promise(promise);
     struct HTTP_Response *response = ptr;
     read_body(response -> data, callback_tou8, promise, false);
-    return js_get_promise(promise);
+    return ret;
 }
 
 struct buf_link {
@@ -1241,6 +1278,13 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
         js_resolve(task -> promise, res);
         JS_FreeValue(ctx, res);
         free2(merged_buf);
+
+        // then close the response if not keepalive
+        if(!task -> response -> keepalive){
+            evfd_close(task -> response -> data -> fd);
+            task -> response -> data -> fd = false;
+        }
+
         // after this, buffer=NULL will be passed to this again
     }else if(data -> state == HTTP_BODY){
         // push to u8arrs
@@ -1464,11 +1508,11 @@ end:
     if(!var) return JS_EXCEPTION; \
     if(var -> locked) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Body is locked", NULL);
 
-static JSValue js_response_get_body(JSContext *ctx, JSValueConst this_val) {
+static JSValue js_response_body(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     RESPONSE_GET_OPAQUE(response, this_val);
 
     response -> locked = true;
-    JSValue pipe = LJS_NewU8Pipe(ctx, PIPE_READ, BUFFER_SIZE, response_poll, NULL, NULL, response);
+    JSValue pipe = LJS_NewU8Pipe(ctx, PIPE_READ, response_poll, NULL, NULL, response);
     return pipe;
 }
 
@@ -1482,26 +1526,27 @@ static JSValue js_response_get_locked(JSContext *ctx, JSValueConst this_val) {
     RESPONSE_GET_OPAQUE(response, this_val); \
     if(response -> data -> state != HTTP_BODY) return JS_ThrowTypeError(ctx, "Body is not available"); \
     Promise *promise = js_promise(ctx); \
+    JSValue retval = js_get_promise(promise); \
     struct readall_promise* data = init_tou8_merge_task(promise, response);
 
 static JSValue js_response_buffer(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     INIT_TOU8_TASK
     read_body(response -> data, response_merge_cb, data, true);
-    return js_get_promise(promise);
+    return retval;
 }
 
 static JSValue js_response_text(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     INIT_TOU8_TASK
     data -> tostr = true;
     read_body(response -> data, response_merge_cb, data, true);
-    return js_get_promise(promise);
+    return retval;
 }
 
 static JSValue js_response_json(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     INIT_TOU8_TASK
     data -> tojson = true;
     read_body(response -> data, response_merge_cb, data, true);
-    return js_get_promise(promise);
+    return retval;
 }
 
 static JSValue js_response_formData(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
@@ -1535,14 +1580,15 @@ main:
     struct formdata_addition_data* task = init_formdata_parse_task(promise, response);
     task -> boundary = boundary;
     uint8_t* buf = js_malloc(ctx, BUFFER_SIZE);
+    JSValue ret = js_get_promise(promise);
     evfd_readline(response -> data -> fd, BUFFER_SIZE, buf, callback_formdata_parse, task);
-    return js_get_promise(promise);
+    return ret;
 
 urlform:{
     INIT_TOU8_TASK;
     data -> urlform = true;
     read_body(response -> data, response_merge_cb, data, true);
-    return js_get_promise(promise);
+    return retval;
 }
 }
 
@@ -1585,18 +1631,21 @@ static JSValue js_response_constructor(JSContext *ctx, JSValueConst new_target, 
     response -> data = NULL;
     response -> locked = false;
     response -> owned = true;
+    response -> keepalive = false;
     JS_SetOpaque(obj, response);
     return obj;
 }
 
 // create Response object
 // Note: header object will be defined internally
-JSValue LJS_NewResponse(JSContext *ctx, LHTTPData *data, bool readonly){
+// Note: if keepalive=false, the connection will be closed after readed whole response
+JSValue LJS_NewResponse(JSContext *ctx, LHTTPData *data, bool readonly, bool keepalive){
     JSValue obj = JS_NewObjectClass(ctx, response_class_id);
     struct HTTP_Response *response = js_malloc(ctx, sizeof(struct HTTP_Response));
     response -> data = data;
     response -> locked = readonly;
     response -> owned = false;
+    response -> keepalive = keepalive;
     JS_SetOpaque(obj, response);
 
     JSValue header_el = LJS_NewHeaders(ctx, data);
@@ -1611,7 +1660,6 @@ static JSClassDef response_class = {
 };
 static JSCFunctionListEntry response_proto_funcs[] = {
     JS_CGETSET_DEF("status", js_response_get_status, NULL),
-    JS_CGETSET_DEF("body", js_response_get_body, NULL),
     JS_CGETSET_DEF("locked", js_response_get_locked, NULL),
     JS_CGETSET_DEF("ok", js_response_get_ok, NULL),
     
@@ -1619,6 +1667,7 @@ static JSCFunctionListEntry response_proto_funcs[] = {
     JS_CFUNC_DEF("text", 0, js_response_text),
     JS_CFUNC_DEF("json", 0, js_response_json),
     JS_CFUNC_DEF("formData", 0, js_response_formData),
+    JS_CFUNC_DEF("body", 0, js_response_body),
 
     // not standard
     JS_CGETSET_DEF("method", js_response_get_method, NULL),
@@ -1654,13 +1703,14 @@ void fetch_resolve(LHTTPData *data, uint8_t *buffer, uint32_t len, void* ptr){
     JSContext *ctx = js_get_promise_context(promise);
 
     // closed connection
-    if(!buffer && len == 0){
+    if(data -> state == HTTP_ERROR){
         // will be rejected in fetch_close_cb
         return;
     }
 
-    JSValue obj = LJS_NewResponse(ctx, data, true);
+    JSValue obj = LJS_NewResponse(ctx, data, false, fr -> keepalive);
     js_resolve(promise, obj);
+    JS_FreeValue(ctx, obj);
     // del onclose callback
     evfd_onclose(data -> fd, NULL, NULL);
     
@@ -1702,7 +1752,13 @@ bool body_chunked_filter(struct Buffer* buf, void* user_data){
 // reject on fd close
 static void fetch_close_cb(EvFD* evfd, void* user_data){
     Promise *promise = user_data;
-    js_reject(promise, "Connection closed or failed");
+    if(evfd_ssl_errno(evfd) != 0){
+        char ebuf[512] = {0};
+        mbedtls_strerror(evfd_ssl_errno(evfd), ebuf, sizeof(ebuf));
+        js_reject3(promise, "TLS connection error: %s", ebuf);
+    }else{
+        js_reject(promise, "Connection closed or failed");
+    }
 }
 
 // free after write
@@ -1732,9 +1788,13 @@ static inline char* ws_random_key(){
 
 #define WS_KEY "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+static inline void path_basic_fill(URL_data* data){
+    if(!data -> path) data -> path = strdup2("/");
+}
+
 static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(unlikely(argc == 0))
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Fetch requires at least 1 argument", "fetch(url: string, options?: FetchInit): Promise<Response>");
+        LJS_ThrowInAsync(ctx, EXCEPTION_TYPEERROR, "Fetch requires at least 1 argument", "fetch(url: string, options?: FetchInit): Promise<Response>");
     
     // parse URL
     const char *urlstr = JS_ToCString(ctx, argv[0]);
@@ -1742,13 +1802,14 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     URL_data url = {};
     if(unlikely(!LJS_parse_url(urlstr, &url, NULL) || url.protocol == NULL || url.host == NULL)){
         JS_FreeCString(ctx, urlstr);
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid URL", NULL);
+        LJS_ThrowInAsync(ctx, EXCEPTION_TYPEERROR, "Invalid URL", NULL);
     }
+    path_basic_fill(&url);
     JS_FreeCString(ctx, urlstr);
     
     if(unlikely(strstr(url.protocol, "http") == NULL && strstr(url.protocol, "ws") == NULL)){
         LJS_free_url(&url);
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Unsupported protocol %s", NULL, url.protocol);
+        LJS_ThrowInAsync(ctx, EXCEPTION_TYPEERROR, "Unsupported protocol %s", NULL, url.protocol);
     }
 
     JSValue obj = argc >= 2 ? JS_DupValue(ctx, argv[1]) : JS_NewObject(ctx);
@@ -1760,8 +1821,10 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     jsobj = JS_GetPropertyStr(ctx, obj, "keepalive");
     bool keep_alive = JS_IsBool(jsobj) ? JS_ToBool(ctx, jsobj) : true;
     JS_FreeValue(ctx, jsobj);
-    if(unlikely(!keep_alive && websocket))
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "WebSocket connection requires keepalive option", NULL);
+    if(unlikely(!keep_alive && websocket)){
+        JS_FreeValue(ctx, obj);
+        LJS_ThrowInAsync(ctx, EXCEPTION_TYPEERROR, "WebSocket connection requires keepalive option", NULL);
+    }
     if(keep_alive){
         pthread_mutex_lock(&keepalive_mutex);
         struct list_head *cur, *tmp;
@@ -1777,21 +1840,22 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
         }
         pthread_mutex_unlock(&keepalive_mutex);
     }
-    if(!fd){
+    if(!fd || evfd_closed(fd)){
         // open new connection
         // ws -> tcp, wss -> ssl
-        bool ssl = strlen(url.protocol) >= 3 && url.protocol[strlen(url.protocol) - 1] == 's';
-        if(ssl){
-#ifdef LJS_MBEDTLS
-            fd = LJS_open_ssl_socket(url.host, url.port, BUFFER_SIZE);
-#else
-            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "SSL is not supported", NULL);
-#endif
-        }else{
-            fd = LJS_open_socket(url.protocol, url.host, url.port, BUFFER_SIZE);
+        fd = LJS_open_socket(url.protocol, url.host, url.port, BUFFER_SIZE);
+        if(!fd || evfd_closed(fd)){
+            JS_FreeValue(ctx, obj);
+            if(errno == ENOTSUP)
+                LJS_ThrowInAsync(ctx, EXCEPTION_INTERNAL, "Unsupported protocol %s", 
+                    "if you are using TLS-based protocol, make sure you have enabled MbedTLS in build time"
+                    , url.protocol)
+            else if(errno == EADDRNOTAVAIL)
+                LJS_ThrowInAsync(ctx, EXCEPTION_IO, "Failed to resolve host %s", NULL, url.host)
+            else
+                LJS_ThrowInAsync(ctx, EXCEPTION_IO, "Failed to open connection", NULL);
         }
     }
-    if(unlikely(!fd)) return LJS_Throw(ctx, EXCEPTION_IO, "Failed to open connection", NULL);
 
     // bind close event
     Promise *promise = js_promise(ctx);
@@ -1806,9 +1870,9 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
 
     // keep-alive
     if (keep_alive) {
-        evfd_write(fd, (uint8_t*) "Connection: keep-alive\r\n", 25, NULL, NULL);
+        evfd_write(fd, (uint8_t*) "Connection: keep-alive\r\n", 24, NULL, NULL);
     } else {
-        evfd_write(fd, (uint8_t*) "Connection: close\r\n", 20, NULL, NULL);
+        evfd_write(fd, (uint8_t*) "Connection: close\r\n", 19, NULL, NULL);
     }
 
     // referer
@@ -1819,15 +1883,15 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
 
     // host
     if(JS_IsUndefined(jsobj = JS_GetPropertyStr(ctx, obj, "host")))
-        FORMAT_WRITE("Host: %s:%u", strlen(url.host) + 16, url.host, url.port);
+        FORMAT_WRITE("Host: %s", strlen(url.host) + 16, url.host);
     JS_FreeValue(ctx, jsobj);
     
     // websocket?
     if(websocket){
         // connection upgrade
-        evfd_write(fd, (uint8_t*) "Connection: Upgrade\r\n", 22, NULL, NULL);
-        evfd_write(fd, (uint8_t*) "Upgrade: websocket\r\n", 21, NULL, NULL);
-        evfd_write(fd, (uint8_t*) "Sec-WebSocket-Version: 13\r\n", 31, NULL, NULL);
+        evfd_write(fd, (uint8_t*) "Connection: Upgrade\r\n", 21, NULL, NULL);
+        evfd_write(fd, (uint8_t*) "Upgrade: websocket\r\n", 20, NULL, NULL);
+        evfd_write(fd, (uint8_t*) "Sec-WebSocket-Version: 13\r\n", 27, NULL, NULL);
         char* key = ws_random_key();
         FORMAT_WRITE("Sec-WebSocket-Key: %s", 64, key);
         free2(key);
@@ -1870,7 +1934,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
             ? (uint8_t*) JS_ToCStringLen(ctx, &data_len, body) 
             : JS_GetArrayBuffer(ctx, &data_len, body);
         if (data) {
-            size_t len = 22 + sizeof(size_t);
+            size_t len = 21 + sizeof(size_t);
             char* buf = malloc2(len);
             snprintf(buf, len, "Content-Length: %lu\r\n\r\n", data_len);
             evfd_write(fd, (uint8_t*) buf, len, write_then_free, buf);
@@ -1914,10 +1978,11 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
 
     // parse response
     LHTTPData *data = js_malloc(ctx, sizeof(LHTTPData));
+    JSValue ret = js_get_promise(promise);
     LJS_parse_from_fd(fd, data, false, websocket ? ws_resolve : fetch_resolve, websocket ? (void*)promise : (void*)fr);
     LJS_free_url(&url);
     JS_FreeValue(ctx, obj);
-    return js_get_promise(promise);
+    return ret;
 }
 
 // --------------------- JAVASCRIPT WebSocket API -------------------
@@ -1965,7 +2030,7 @@ static int event_ws_readable(EvFD* evfd, uint8_t* buffer, uint32_t read_size, vo
         bool completed = false;
         uint32_t payload_end_offset = 0;
         uint8_t payload_len[8];
-        BUFFER_FOREACH_BYTE(&ws -> rbuffer, index, byte){
+        BUFFER_UNSAFE_FOREACH_BYTE(&ws -> rbuffer, index, byte){
             // TODO: cache the result in previous call?
             if(index == 0){
                 // meta
@@ -2147,7 +2212,7 @@ static JSValue js_ws_send(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     build_ws_frame(&ws -> wbuffer, true, opcode, data, len, ws -> enable_mask);
     if(JS_IsString(argv[0])) JS_FreeCString(ctx, (void*)data);
     evfd_consume(ws -> fd, false, true);
-    return js_get_promise(promise);;
+    return js_get_promise(promise);
 }
 
 static JSValue js_ws_set_onmessage(JSContext *ctx, JSValueConst this_val, JSValueConst value){
@@ -3064,7 +3129,7 @@ struct JSEventStreamData {
 
 // define headers and request in class
 #define DEF_RESPONSE(obj, handler) { \
-    JSValue response_obj = LJS_NewResponse(ctx, &handler -> request, false); \
+    JSValue response_obj = LJS_NewResponse(ctx, &handler -> request, false, true); \
     JS_SetPropertyStr(ctx, obj, "request", response_obj); \
     JSValue headers_obj = LJS_NewHeaders(ctx, &handler -> response); \
     JS_SetPropertyStr(ctx, obj, "headers", headers_obj); \
@@ -3611,9 +3676,10 @@ static JSValue js_handler_reuse(JSContext* ctx, JSValueConst this_val, int argc,
     if(!async_result) return JS_ThrowOutOfMemory(ctx);
 
     async_result -> reusing_obj = this_val;
+    JSValue ret = js_get_promise(async_result -> promise);
     LJS_parse_from_fd(handler -> response.fd, &handler -> request, true, handler_parse_cb, async_result);
     handler -> response.state = HTTP_INIT;
-    return js_get_promise(async_result -> promise);
+    return ret;
 }
 
 #ifndef LJS_MBEDTLS         // polyfill for mbedtls SHA
@@ -3861,9 +3927,10 @@ param_err:
 
     // AsyncResult
     struct JSClientAsyncResult* async_result = init_async_result(handler);
+    JSValue ret = js_get_promise(async_result -> promise);
     LJS_parse_from_fd(fd, &handler -> request, true, handler_parse_cb, async_result);
     
-    return js_get_promise(async_result -> promise);
+    return ret;
 }
 
 static void handler_finalizer(JSRuntime *rt, JSValue val){

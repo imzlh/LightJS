@@ -70,8 +70,13 @@ declare module 'http' {
         json(): Promise<any>;
         formData(): Promise<FormData[]>;
 
+        /**
+         * 小心！与WebAPI的`body`属性不一样，获取U8Pipe后Response会locked，<br>
+         * 此时其他读取操作（如`text()`）都会报错，无法继续使用流
+         */
+        pipe(): U8Pipe;
+
         get locked(): boolean;
-        get body(): U8Pipe;
         get status(): number;
         get ok(): boolean;
 

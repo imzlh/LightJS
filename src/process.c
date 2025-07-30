@@ -562,7 +562,7 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
         evfd_pipeTo(pstdin, evfd, NULL, NULL, NULL, NULL);
         evfd_pipeTo(evfd, pstdout, NULL, NULL, NULL, NULL);
     }else{
-        JSValue pipe = LJS_NewFDPipe(ctx, master_fd, PIPE_READ | PIPE_WRITE, PIPE_BUF, true, &evfd);
+        JSValue pipe = LJS_NewFDPipe(ctx, master_fd, PIPE_READ | PIPE_WRITE, true, &evfd);
         JS_SetPropertyStr(ctx, class_obj, "pipe", pipe);
     }
     obj -> evfd = evfd;
@@ -815,9 +815,9 @@ bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv
 
     // init stdpipe
     if(LJS_IsMainContext(ctx)){
-        stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, PIPE_BUF, true, &pstdin);
-        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, PIPE_BUF, true, &pstdout);
-        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, PIPE_BUF, true, &pstderr);
+        stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, true, &pstdin);
+        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, true, &pstdout);
+        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, true, &pstderr);
         if(!pstderr) pstderr = pstdout;
     }
 

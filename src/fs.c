@@ -947,7 +947,7 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
         piped -> size = fstat(fd, &st) == 0 ? st.st_size : -1;
         return pipe;
     }else{
-        return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, PIPE_BUF, false, NULL);
+        return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, false, NULL);
     }
 
     error:{

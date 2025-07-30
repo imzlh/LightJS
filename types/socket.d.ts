@@ -15,7 +15,6 @@ declare module 'socket'{
     export const bind: (addr: string, handler: (client: IOPipe, addr: IAddr) => void, settings?: {
         reuseaddr?: boolean,
         backlog?: number,
-        bufferSize?: number,
         timeout?: number,
         nodelay?: boolean,
         keepalive?: boolean,
@@ -24,7 +23,6 @@ declare module 'socket'{
     }) => CloseFunction;
 
     export const connect: (addr: string, settings?: {
-        bufferSize?: number,
         timeout?: number,
         // nodelay?: boolean
     }) => IOPipe;

@@ -35,6 +35,8 @@ setVMOptions({
     }
 });
 
+events.on('unhandledrejection', e => e.preventDefault());
+
 /**
  * @type {Record<string, string>}
  */
@@ -659,6 +661,12 @@ function control_c() {
     writeToStdout(colors.red + " ^C" + colors.none + "\n");
     reset();
     readline_print_prompt();
+    
+    // restart repl
+    currentSession.stop();
+    currentSession = new ReplSession();
+    currentSession.run();
+
     // }
 }
 
@@ -1632,7 +1640,43 @@ load_history();
 termInit();
 cmd_readline_start();
 
-while(true){
-    const data = await stdin.read();
-    data && await Promise.all(Array.from(data).map(c => handle_byte(c)));
+// read co
+const handle_buffer = /** @type {Array<number>} */ ([]);
+let handle_promise = /** @type {null | ((val: any) => void)} */ (null);
+(async () => {
+    while(true) try{
+        const data = await stdin.read();
+        if(data) handle_buffer.push(...data);
+        if(handle_promise){
+            handle_promise(undefined);
+            handle_promise = null;
+        }
+    }catch{}
+})();
+
+// handle co
+class ReplSession {
+    #stop = false;
+
+    stop(){
+        this.#stop = true;
+    }
+
+    async run(){
+        while(true){
+            if(handle_buffer.length){
+                for(let i = 0; i < handle_buffer.length; i++){
+                    if(this.#stop) return;
+                    await handle_byte(handle_buffer[i]);
+                    handle_buffer.splice(0, i);
+                }
+            }else{
+                await new Promise(rs => handle_promise = rs);
+            }
+            console.log('tick');
+        }
+    }
 }
+
+let currentSession = new ReplSession();
+currentSession.run();
