@@ -22,6 +22,11 @@ declare function delay(time_ms: number): Promise<void>;
 // QuickJS internal API
 declare function queueMicrotask(func: (this: typeof globalThis) => void): void;
 
+/**
+ * 解码base64。
+ * 注意：此方法支持各类字符，即使不是base64字符也不会报错，请小心处理字符串内容
+ * 如果需要输出为Uint8Array，请使用`crypto.b64decode`
+ */
 declare function atob(encoded: string): string;
 declare function btoa(raw: string): string;
 

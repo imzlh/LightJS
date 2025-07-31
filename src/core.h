@@ -36,14 +36,24 @@ enum {
 
 #define MAX_EVENTS 64
 #define MAX_QUERY_COUNT 32
-#define PIPE_READ 1
-#define PIPE_WRITE (1 << 1)
-#define PIPE_AIO (1 << 2)
-#define PIPE_SOCKET (1 << 3)
+
 #define MAX_MESSAGE_COUNT 10
 #define EV_REMOVE_ALL (EV_REMOVE_READ | EV_REMOVE_WRITE | EV_REMOVE_EOF)
 #define EVFD_BUFSIZE 4 * 1024
 #define MAX_HEADER_COUNT 64
+
+#define PIPE_READ 1
+#define PIPE_WRITE (1 << 1)
+#define PIPE_AIO (1 << 2)
+#define PIPE_SOCKET (1 << 3)
+#define PIPE_THREADSAFE (1 << 4)
+#define PIPE_PTY (1 << 5)
+
+#define SSL_VERIFY (1)
+#define SSL_PRESET_SUITEB (1 << 1)
+#define SSL_USE_TLS1_3 (1 << 2)
+#define SSL_IS_SERVER (1 << 3)
+#define SSL_USE_SNI (1 << 4)
 
 #ifndef countof
 #define countof(x) (sizeof(x)/sizeof((x)[0]))
@@ -55,7 +65,7 @@ typedef JSValue (*PipeCallback)(JSContext* ctx, void* ptr, JSValueConst data);
 
 /* forward */ typedef struct EvFD EvFD;
 /* forward */ typedef enum EvPipeToNotifyType EvPipeToNotifyType;
-typedef int (*EvReadCallback)(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data);
+typedef int (*EvReadCallback)(EvFD* evfd, bool success, uint8_t* buffer, uint32_t read_size, void* user_data);
 typedef void (*EvWriteCallback)(EvFD* evfd, bool success, void* opaque);
 typedef void (*EvCloseCallback)(EvFD* fd, void* opaque);
 typedef void (*EvINotifyCallback)(EvFD* fd, const char* path, uint32_t evtype, const char* move_to, void* user_data);
@@ -126,6 +136,7 @@ struct LHTTPData {
     void* userdata;
 
     bool __header_owned; // internal use only
+    char* __target_host; // internal use only
 };
 
 #define PUT_HEADER(hdstruct, _key, _value) { \
@@ -259,6 +270,31 @@ typedef struct {
     } data;
 } dns_record;
 
+
+typedef struct  {
+    // --- client options ---
+    // used in client, specific what host to connect
+    const char* server_name;
+    // verify server certificate, same as 
+    int (*verify)(void *opaque, mbedtls_x509_crt *cert_info, int size, uint32_t *cert_buffer);
+    void* verify_opaque;
+    // override default certificate to identify server
+    mbedtls_x509_crt* ca_cert;
+
+    // --- server options ---
+    // used in server if SNI is disabled, specific what cert to use
+    mbedtls_x509_crt* server_cert;
+    mbedtls_pk_context* server_key;
+#ifdef MBEDTLS_SSL_EARLY_DATA
+    // if early data>0, will enable TLS1.3 early data feature
+    size_t early_data_len;
+#endif
+
+    // --- common options ---
+    const char** alpn_protocols;
+    const int *ciphersuites;
+} InitSSLOptions;
+
 typedef void (*HTTP_Callback)(LHTTPData* data, uint8_t* buffer, uint32_t size, void* userdata);
 typedef void (*HTTP_ParseCallback)(LHTTPData *data, uint8_t *buffer, uint32_t len, void* ptr);
 typedef void (*DnsResponseCallback)(int total_records, dns_record** records, void* user_data);
@@ -269,6 +305,7 @@ bool js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data, b
 
 // console
 void js_dump(JSContext *ctx, JSValueConst val, EvFD* target_fd);
+void js_dump_promise(JSContext *ctx, JSValueConst val, EvFD* target_fd);
 void js_handle_promise_reject(
     JSContext *ctx, JSValue promise,
     JSValue reason,
@@ -300,7 +337,7 @@ bool evcore_init();
 bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data);
 void evcore_destroy();
 EvFD* evcore_attach(int fd, bool use_aio, EvReadCallback rcb, void* read_opaque, EvWriteCallback wcb, void* write_opaque, EvCloseCallback ccb, void* close_opaque);
-EvFD* evfd_new(int fd, bool use_aio, bool readable, bool writeable, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
+EvFD* evfd_new(int fd, int flag, uint32_t bufsize, EvCloseCallback close_callback, void* close_opaque);
 void evfd_setup_udp(EvFD* evfd);
 bool evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
@@ -328,10 +365,9 @@ void* evfd_get_opaque(EvFD* evfd);
 void evfd_set_opaque(EvFD* evfd, void* opaque);
 bool evfd_syncexec(EvFD* pipe);
 #ifdef LJS_MBEDTLS
-bool evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, bool is_client, int preset, EvSSLHandshakeCallback handshake_cb, void* user_data);
+bool evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, int flag, InitSSLOptions* options, EvSSLHandshakeCallback handshake_cb, void* user_data);
 void evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
 bool evfd_remove_sni(const char* name);
-bool evfd_initdtls(EvFD* evfd, mbedtls_ssl_config** _config);
 #endif
 EvFD* evcore_setTimeout(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
 EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* cbopaque, EvCloseCallback close_cb, void* close_opaque);
@@ -355,7 +391,7 @@ bool LJS_dns_resolve(
     JSContext* ctx, const char* hostname, const char* dns_server, 
     DnsResponseCallback callback, DnsErrorCallback error_callback, void* user_data
 );
-EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int bufsize);
+EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int bufsize, InitSSLOptions* ssl_options);
 
 // HTTP module
 char* LJS_resolve_path(const char* path, const char* base);

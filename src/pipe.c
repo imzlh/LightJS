@@ -457,11 +457,12 @@ static inline bool u8pipe_fill(JSContext* ctx, struct U8Pipe_T* pipe, Promise* p
     return true;
 }
 
-static int evread_callback(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data){
+static int evread_callback(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_size, void* user_data){
     struct PipeRWTask* task = user_data;
     struct U8Pipe_T* piperaw = task -> pipe;
     struct FDPipe_T* pipe = piperaw -> pipe.fdpipe;
-    if(read_size == 0 && NULL == buffer){// note: read_size == 0 is not always means EOF
+    if(!ok){// note: read_size == 0 is not always means EOF
+        js_free(pipe -> ctx, buffer);
         js_reject(task -> promise, "Pipe reached EOF");
     }else{
         JSValue data = JS_NewUint8Array(pipe -> ctx, buffer, read_size, free_js_malloc, NULL, false);
@@ -759,7 +760,7 @@ static JSValue pipeto_init_fd2fd(JSContext* ctx, JSValue from, JSValue to, JSVal
 
 // predef
 static void pipeto_promisecb2(JSContext* ctx, bool is_error, JSValue val, void* user_data);
-static int pipeto_evloopcb(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data);
+static int pipeto_evloopcb(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_size, void* user_data);
 
 // write promise callback(continue poll)
 static void pipeto_promisecb(JSContext* ctx, bool is_error, JSValue val, void* user_data){
@@ -821,9 +822,16 @@ _false:
     }
 }
 
-static int pipeto_evloopcb(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data){
+static int pipeto_evloopcb(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_size, void* user_data){
     struct U8PipeTransfer* t = user_data;
     JSContext* ctx = js_get_promise_context(t -> promise);
+    if(!ok){
+        JSContext* ctx = js_get_promise_context(t -> promise);
+        js_resolve(t -> promise, JS_UNDEFINED);
+        t -> pipe[1] -> pipe.pipe -> write_lock = false; // release lock
+        FREE_TRANSFER(ctx, t -> pipe[0], t -> pipe[1]);
+        return EVCB_RET_DONE;   // always stop the current task
+    }
     if(read_size > 0){
         JSValue data = JS_NewUint8Array(ctx, buffer, read_size, free_js_malloc, NULL, false);
         JSValue write = t -> pipe[1] -> pipe.pipe -> write_func;
@@ -1309,7 +1317,7 @@ JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, bool iopipe, EvFD**
         return JS_ThrowOutOfMemory(ctx);
     }
 
-    EvFD* evfd = evfd_new(fd, flag & PIPE_AIO, flag & PIPE_READ, flag & PIPE_WRITE, PIPE_u8_buf_size, evclose_callback, pipe);
+    EvFD* evfd = evfd_new(fd, flag, PIPE_u8_buf_size, evclose_callback, pipe);
     
     if (!evfd){
         js_free(ctx, pipe);

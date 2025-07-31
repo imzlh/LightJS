@@ -150,6 +150,23 @@ static inline bool measure_wrap_disp2(JSContext *ctx, JSValue val, bool also_pro
     return measure_wrap_display(ctx, val, visited, 0, also_proto);
 }
 
+static void __print_stack(JSContext* ctx, JSValueConst stack, int depth, DynBuf* output) {
+    const char* js_stack_str = LJS_ToCString(ctx, stack, NULL);
+    const char* indent = getBlank(depth);
+    char* stack_str_raw = js_stack_str ? js_strdup(ctx, js_stack_str) : NULL;
+    char* stack_str = stack_str_raw;
+    char* wrap_pos = strchr(stack_str, '\n');
+    while (wrap_pos != NULL) {
+        *wrap_pos = '\0';
+        dbuf_printf(output, "%s%s\n", indent, stack_str);
+        stack_str = wrap_pos + 1;
+        wrap_pos = strchr(stack_str, '\n');
+    }
+    dbuf_printf(output, "%s%s\n", indent, stack_str);
+    js_free(ctx, stack_str_raw);
+    JS_FreeCString(ctx, js_stack_str);
+}
+
 static void print_jserror(JSContext* ctx, JSValue val, int depth, DynBuf* output) {
     if(JS_IsInternalError(ctx, val)){
         dbuf_putstr(output, ANSI_RED "InternalError" ANSI_RESET);
@@ -164,34 +181,20 @@ static void print_jserror(JSContext* ctx, JSValue val, int depth, DynBuf* output
     JSValue stack = JS_GetProperty(ctx, val, JS_ATOM_stack);
     const char* name_str = JS_ToCString(ctx, name);
     const char* message_str = LJS_ToCString(ctx, message, NULL);
-    const char* js_stack_str = LJS_ToCString(ctx, stack, NULL);
-
+    
     if (JS_IsString(help)) {
         const char* help_str = JS_ToCString(ctx, help);
         dbuf_printf(output,
-            ANSI_RED "%s" ANSI_RESET ": %s\n" \
-            ANSI_GREEN " help: " ANSI_RESET "%s\n",
-            name_str, message_str, help_str);
+            ANSI_RED "%s%s" ANSI_RESET ": %s\n" \
+            ANSI_GREEN "%s help: " ANSI_RESET "%s\n",
+            indent ,name_str, message_str, indent, help_str);
         JS_FreeCString(ctx, help_str);
     } else {
-        dbuf_printf(output, ANSI_RED "%s" ANSI_RESET ": %s\n", name_str, message_str);
+        dbuf_printf(output, ANSI_RED "%s%s" ANSI_RESET ": %s\n", indent, name_str, message_str);
     }
 
     // print stack
-    if (js_stack_str) {
-        char* stack_str_raw = js_stack_str ? js_strdup(ctx, js_stack_str) : NULL;
-        char* stack_str = stack_str_raw;
-        char* wrap_pos = strchr(stack_str, '\n');
-        while (wrap_pos != NULL) {
-            *wrap_pos = '\0';
-            dbuf_printf(output, "%s%s\n", indent, stack_str);
-            stack_str = wrap_pos + 1;
-            wrap_pos = strchr(stack_str, '\n');
-        }
-        dbuf_printf(output, "%s%s\n", indent, stack_str);
-        js_free(ctx, stack_str_raw);
-        JS_FreeCString(ctx, js_stack_str);
-    }
+    if (JS_IsString(stack)) __print_stack(ctx, stack, depth, output);
 
     JS_FreeCString(ctx, name_str);
     JS_FreeCString(ctx, message_str);
@@ -632,6 +635,31 @@ void js_dump(JSContext *ctx, JSValueConst val, EvFD* target_fd){
     DynBuf output;
     dbuf_init2(&output, JS_GetRuntime(ctx), dalloc);
     print_jsvalue(ctx, val, JS_UNDEFINED, 0, visited, &output);
+#ifndef LJS_DEBUG
+    if(evfd_closed(target_fd)) {
+#endif
+        write(evfd_getfd(target_fd, NULL), output.buf, output.size);
+        dbuf_free(&output);
+#ifndef LJS_DEBUG
+    }else {
+        evfd_write(target_fd, output.buf, output.size, __write_cb, output.buf);
+    }
+#endif
+}
+
+// dump LightJS special promise(with promise stack)
+void js_dump_promise(JSContext *ctx, JSValueConst val, EvFD* target_fd){
+    static JSValue visited[64];
+    DynBuf output;
+    dbuf_init2(&output, JS_GetRuntime(ctx), dalloc);
+    JSValue reject = JS_PromiseResult(ctx, val);
+    print_jsvalue(ctx, reject, JS_UNDEFINED, 0, visited, &output);
+    JSValue stack = JS_GetProperty(ctx, val, JS_ATOM_stack);
+    if(JS_PromiseState(ctx, val) == JS_PROMISE_PENDING && JS_IsString(stack)){
+        dbuf_putstr(&output, "    " ANSI_BOLD "---- promise ----" ANSI_RESET "\n");
+        __print_stack(ctx, stack, 0, &output);
+    }
+    JS_FreeValue(ctx, stack);
 #ifndef LJS_DEBUG
     if(evfd_closed(target_fd)) {
 #endif

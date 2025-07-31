@@ -151,7 +151,7 @@ __attribute__((constructor)) void init_signal_handler() {
 }
 
 extern void __js_dump_not_resolved_promises();
-
+char* __progpath;
 int main(int argc, char **argv) {
 
     int optind = 1;
@@ -162,6 +162,7 @@ int main(int argc, char **argv) {
 #endif
 
     runtime = JS_NewRuntime();
+    __progpath = realpath(argv[0], NULL);
 
     while (optind < argc && *argv[optind] == '-') {
         char *arg = argv[optind] + 1;
@@ -496,6 +497,7 @@ finalize:
     
     LJS_DestroyApp(app);
     JS_FreeRuntime(runtime);
+    free(__progpath);
 #ifndef __LJSC
     if(!eval_code) free(script_path);
 #endif

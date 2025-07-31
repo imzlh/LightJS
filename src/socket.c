@@ -40,8 +40,9 @@ JSValue js_server_close(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     return JS_UNDEFINED;
 }
 
-int server_handle_accept(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data) {
+int server_handle_accept(EvFD* evfd, bool success, uint8_t* buffer, uint32_t read_size, void* user_data) {
     struct JS_Server_Data* data = (struct JS_Server_Data*)user_data;
+    if(!success) return EVCB_RET_DONE;    // finalized in handle_close
 
     // accept
     struct sockaddr_storage client_addr = { 0 };
@@ -394,9 +395,14 @@ void dns_free_record(dns_record** record, int count) {
     free2(record);
 }
 
-int dns_response_handler(EvFD* evfd, uint8_t* buffer, uint32_t read_size, void* user_data) {
+int dns_response_handler(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_size, void* user_data) {
     DnsQueryContext* ctx = (DnsQueryContext*)user_data;
     struct dns_header* header = (struct dns_header*)buffer;
+
+    if(!ok){
+        ctx -> error_callback("DNS request failed", ctx -> user_data);
+        goto cleanup;
+    }
 
     // 基础校验
     if (!buffer || read_size < sizeof(struct dns_header) || ntohs(header -> id) != ctx -> transaction_id) {
@@ -453,7 +459,7 @@ static inline bool async_dns_resolve(const char* dns_server, const char* domain,
     if(sockfd < 0) return false;
 
     // 创建evfd
-    EvFD* evfd = evfd_new(sockfd, false, true, false, 512, NULL, NULL);
+    EvFD* evfd = evfd_new(sockfd, PIPE_READ | PIPE_WRITE, 512, NULL, NULL);
     evfd_setup_udp(evfd);
     
     // 准备DNS服务器地址
@@ -641,6 +647,8 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     int sockfd = socket_create(addr.protocol);
     if(sockfd <= 0){
         LJS_free_url(&addr);
+        if(errno == EADDRNOTAVAIL)
+            return LJS_Throw(ctx, EXCEPTION_IO, "invaild protocol: %s", NULL, addr.protocol);
         return LJS_Throw(ctx, EXCEPTION_IO, "failed to create socket: %s", NULL, strerror(errno));
     }
     int con = socket_connect(sockfd, addr.protocol, addr.host, addr.port, addr.path);
@@ -694,10 +702,9 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
         );
     }
 
-    bool is_client = true;
-    int preset = MBEDTLS_SSL_PRESET_DEFAULT;
-    int* ciphers = NULL;
+    int flag = 0;
     int cipher_count = 0;
+    InitSSLOptions options = {0};
     EvFD* fd = LJS_GetPipeFD(ctx, argv[0]);
     if(fd == NULL) {
         return JS_ThrowTypeError(ctx, "handshake_ssl: invalid socket");
@@ -707,43 +714,42 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
         JSValue obj = argv[1];
         JSValue val;
         if(JS_IsBool(val = JS_GetPropertyStr(ctx, obj, "server"))){
-            is_client = !JS_ToBool(ctx, val);
+            flag |= SSL_IS_SERVER;
+
+            // server features
+            JS_FreeValue(ctx, val);
+            // TODO: server crt&key
+            // if(JS_IsUint)
         }
         JS_FreeValue(ctx, val);
         if(JS_IsArray(val = JS_GetPropertyStr(ctx, obj, "ciphers"))) {
             int64_t count;
             if(JS_GetLength(ctx, val, &count) > 0){
-                ciphers = malloc2((count +1) * sizeof(int));
+                options.ciphersuites = malloc2((count +1) * sizeof(int));
                 for(int i = 0; i < count; i++){
                     JSValue item = JS_GetPropertyUint32(ctx, val, i);
                     int cipher;
                     if(JS_ToInt32(ctx, &cipher, item)){
-                        ciphers[cipher_count++] = cipher;
+                        ((int*)options.ciphersuites)[cipher_count++] = cipher;
                     }
                     JS_FreeValue(ctx, item);
                 }
-                ciphers[cipher_count] = 0;
+                ((int*)options.ciphersuites)[cipher_count] = 0;
             }
         }
         JS_FreeValue(ctx, val);
         if(JS_IsBool(val = JS_GetPropertyStr(ctx, obj, "suiteb"))){
             bool suiteb = JS_ToBool(ctx, val);
             if(suiteb){
-                preset = MBEDTLS_SSL_PRESET_SUITEB;
+                flag |= SSL_PRESET_SUITEB;
             }
         }
         JS_FreeValue(ctx, val);
     }
 
     Promise* promise = js_promise(ctx);
-    mbedtls_ssl_config* config = NULL;
-    evfd_initssl(fd, &config, is_client, preset, ssl_handshake_callback, promise);
-
-    // chipers
-    if(ciphers){
-        mbedtls_ssl_conf_ciphersuites(config, ciphers);
-        free2(ciphers);
-    }
+    evfd_initssl(fd, NULL, flag, &options, ssl_handshake_callback, promise);
+    free((void*)options.ciphersuites);
 
     return js_get_promise(promise);
 #else
@@ -955,7 +961,7 @@ bool LJS_dns_resolve(
     return async_dns_resolve(dns_server, hostname, callback, error_callback, user_data);
 }
 
-EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int bufsize) {
+EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int bufsize, InitSSLOptions* ssl_options) {
     bool ssl = protocol[strlen(protocol) - 1] == 's';
     const char* host4 = NULL, *host6 = NULL;
     // unix domain socket is not required to resolve DNS
@@ -997,7 +1003,7 @@ retry:
     int fd = socket_create(protocol);
     if(fd < 0) return NULL;
     socket_connect(fd, protocol, hostname, port, hostname);
-    EvFD* evfd = evfd_new(fd, false, true, true, bufsize, NULL, NULL);
+    EvFD* evfd = evfd_new(fd, PIPE_READ | PIPE_WRITE, bufsize, NULL, NULL);
     if(evfd == NULL || evfd_closed(evfd)){
         // also try ipv6 address if ipv4 fails for non-unix socket
         if(try_ipv4 && host4 && memcmp(protocol, "unix", 4)){
@@ -1011,7 +1017,7 @@ retry:
     if(ssl){
 #ifdef LJS_MBEDTLS
         mbedtls_ssl_config* config = NULL;
-        evfd_initssl(evfd, &config, true, MBEDTLS_SSL_PRESET_DEFAULT, NULL, NULL);
+        evfd_initssl(evfd, &config, SSL_USE_TLS1_3, ssl_options, NULL, NULL);
 #else
         errno = ENOTSUP;
         evfd_close(evfd);

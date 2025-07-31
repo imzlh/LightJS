@@ -4,6 +4,10 @@
 #include "polyfill.h"
 
 #include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <errno.h>
+#include <sys/random.h>
 
 #ifdef LJS_MBEDTLS
 #include <mbedtls/aes.h>
@@ -11,24 +15,33 @@
 #include <mbedtls/cipher.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
+#include <mbedtls/base64.h>
 
-// 全局随机数上下文
 static mbedtls_ctr_drbg_context ctr_drbg;
-static mbedtls_entropy_context entropy;
 
-// 初始化随机数生成器（模块加载时调用）
+// The function is thread-safe
+static int mb_random(void *data, unsigned char *output, size_t len) {
+    static char noise[] = "LightJS " LJS_VERSION; 
+
+    // system random
+    int ret = getrandom(output, len, GRND_NONBLOCK);
+    if(ret == -1){
+        // use random to fill the buffer
+        for(int i = 0; i < len; i++)
+            output[i] = (rand() & noise[i % sizeof(noise)]) % 256;
+    }
+    return 0;
+}
+
 __attribute__((constructor)) static void init_rng() {
-    mbedtls_entropy_init(&entropy);
     mbedtls_ctr_drbg_init(&ctr_drbg);
     const char* pers = "quickjs_crypto";
-    mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+    mbedtls_ctr_drbg_seed(&ctr_drbg, mb_random, NULL,
                          (const uint8_t*)pers, strlen(pers));
 }
 
-// 清理资源（模块卸载时调用）
 __attribute__((destructor)) static void cleanup_rng() {
     mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
 }
 
 #define GET_BUF(ctx, val, ptr, len) ptr = JS_GetUint8Array(ctx, &len, val); \
@@ -214,12 +227,47 @@ static JSValue crypto_random(JSContext *ctx, JSValueConst this_val,
     return ret;
 }
 
+static JSValue crypto_b64decenc(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic){
+    if(argc == 0 || !JS_IsUint8Array(ctx, argv[0]))
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Missing or invalid argument", 
+            magic ? "crypto.b64encode(data: Uint8Array): string" : "crypto.b64decode(data: Uint8Array): Uint8Array"
+        );
+
+    uint8_t *input, *output;
+    size_t len, output_len;
+    GET_BUF(ctx, argv[0], input, len);
+
+    output_len = magic ? (len * 4 / 3 + 4) : (len * 3 / 4 + 4);
+realloc:
+    output = js_malloc(ctx, output_len);
+    if (!output) return JS_EXCEPTION;
+
+    // mbedtls base64
+    int ret;
+    if(magic){
+        ret = mbedtls_base64_encode(output, output_len, &output_len, input, len);
+    }else{
+        ret = mbedtls_base64_decode(output, output_len, &output_len, input, len);
+    }
+    if(ret == MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL){
+        js_free(ctx, output);
+        output_len *= 1.5;
+        goto realloc;
+    }else if(ret != 0){
+        js_free(ctx, output);
+        return LJS_Throw(ctx, EXCEPTION_INTERNAL, "Base64 encoding/decoding failed", NULL);
+    }
+    return JS_NewUint8Array(ctx, output, output_len, free_js_malloc, NULL, true);
+}
+
 const JSCFunctionListEntry crypto_funcs[] = {
     JS_CFUNC_DEF("sha", 1, crypto_sha),
     JS_CFUNC_DEF("md5", 1, crypto_md5),
     JS_CFUNC_DEF("aes", 3, crypto_aes),
     JS_CFUNC_DEF("hmac", 3, crypto_hmac),
     JS_CFUNC_DEF("random", 1, crypto_random),
+    JS_CFUNC_MAGIC_DEF("b64encode", 1, crypto_b64decenc, 1),
+    JS_CFUNC_MAGIC_DEF("b64decode", 1, crypto_b64decenc, 0),
     JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Crypto", JS_PROP_CONFIGURABLE),
 };
 #else

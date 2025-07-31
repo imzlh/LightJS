@@ -25,6 +25,7 @@ declare module 'process'{
         readonly pid: number,
         readonly args: string[],
         readonly entry: string,
+        readonly binary: string,
 
         /**
          * 当前工作目录<br>

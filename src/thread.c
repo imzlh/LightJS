@@ -837,7 +837,7 @@ static inline void call_delay(JSContext* ctx, JSValue func, JSValue arg){
 }
 
 // for worker thread
-static int worker_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* user_data){
+static int worker_message_callback(EvFD* __, bool _, uint8_t* buffer, uint32_t read_size, void* user_data){
     App* app = (App*)user_data;
     uint64_t value;
     // Alert: main2worker eventfs should be closed by worker thread
@@ -872,7 +872,7 @@ static void worker_close_callback(EvFD* fd, void* user_data){
 }
 
 // for main thread
-static int main_message_callback(EvFD* __, uint8_t* buffer, uint32_t read_size, void* opaque){
+static int main_message_callback(EvFD* __, bool _, uint8_t* buffer, uint32_t read_size, void* opaque){
     App* app = (App*)opaque;    // worker APP, not main!
     uint64_t value;
     if(read(app -> worker -> fd_worker2main, &value, sizeof(uint64_t)) != sizeof(uint64_t))
@@ -990,6 +990,16 @@ int js_interrupt_handler(JSRuntime *rt, void *opaque){
     App* app = JS_GetRuntimeOpaque(rt);
     if(app -> interrupt <= 0){
         return !!app -> interrupt;
+    }
+
+    if(!JS_IsUndefined(app -> tick_func)){
+        JSValue ret = JS_Call(app -> ctx, app -> tick_func, JS_UNDEFINED, 0, NULL);
+        if(JS_ToBool(app -> ctx, ret)){
+            // return true to break code execution
+            JS_FreeValue(app -> ctx, ret);
+            return true;
+        }
+        return false;
     }
 
     // time
@@ -2258,6 +2268,11 @@ static JSValue js_vm_setvmopts(JSContext* ctx, JSValueConst this_val, int argc, 
             event_notifier = JS_DupValue(ctx, valtmp);
         });
     }
+    EACHOPT2("tickCallback", JS_IsFunction, {
+        App* app = JS_GetContextOpaque(ctx);
+        JS_FreeValue(ctx, app -> tick_func);
+        app -> tick_func = JS_DupValue(ctx, valtmp);
+    })
 
     return JS_UNDEFINED;
 }
@@ -2576,7 +2591,7 @@ void js_handle_promise_reject(
         JS_SetPropertyStr(ctx, dobj, "reason", JS_DupValue(ctx, reason));
         if(!catch_error && js_dispatch_global_event(ctx, "unhandledrejection", dobj, true)){
             __fprintf(pstderr, "Uncaught (in promise) ");
-            js_dump(ctx, reason, pstderr);
+            js_dump_promise(ctx, promise, pstderr);
         }
         JS_FreeValue(ctx, dobj);
         // JS_FreeValue(ctx, reason);

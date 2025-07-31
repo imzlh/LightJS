@@ -270,7 +270,7 @@ static inline bool buffer_realloc(struct Buffer* buffer, uint32_t new_size, bool
 }
 
 /**
- * 导出缓冲区数据副本
+ * 导出全部缓冲区数据，然后清空源Buffer
  * @param buffer 缓冲区指针
  * @param size 导出数据大小
  * @return 导出数据指针
@@ -295,7 +295,8 @@ static inline uint8_t* buffer_export(struct Buffer* buffer, uint32_t* size) {
 }
 
 /**
- * 将缓冲区数据拷贝到指定位置
+ * 将缓冲区数据拷贝到指定位置，不修改原Buffer位置
+ * 如果你希望取出数据，请使用buffer_pop或自带内存分配的buffer_export
  * @param buffer 缓冲区指针
  * @param dest 目标指针
  * @param dest_size 目标大小

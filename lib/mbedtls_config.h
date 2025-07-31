@@ -12,6 +12,9 @@
  *  SPDX-License-Identifier: Apache-2.0 OR GPL-2.0-or-later
  */
 
+// Note: This file is used to build mbedtls library, never include it in user code.
+#ifndef LJS_VERSION
+
 /**
  * This is an optional version symbol that enables compatibility handling of
  * config files.
@@ -1295,3 +1298,5 @@
 #define MBEDTLS_SSL_EARLY_DATA
 #define MBEDTLS_PSA_CRYPTO_CLIENT
 #define MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG
+
+#endif

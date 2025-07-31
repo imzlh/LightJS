@@ -22,7 +22,7 @@ async function snakeGame(stdin, stdout) {
     const EXIT_ALT_SCREEN = `${ESC}[?1049l`;
 
     // 确保TTY环境
-    if (!stdin.isTTY || !stdout.isTTY) {
+    if (!(stdin instanceof IOPipe) || !(stdout instanceof IOPipe)) {
         throw new Error('需要TTY终端环境');
     }
 

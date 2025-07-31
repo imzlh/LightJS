@@ -25,8 +25,9 @@
 #define MAX_SIGNAL_SIZE 1024
 
 extern char **environ;
-static JSValue* argv;
-static size_t argc;
+extern char* __progpath;    // XXX: define a function to set this?
+static JSValue* js_argv;
+static size_t js_argc;
 
 // --- class ReactiveEnviron --- thread_safe
 struct ReactiveEnviron {
@@ -164,6 +165,10 @@ __attribute__((constructor)) void init_env_class(void) {
 }
 
 __attribute__((destructor)) void free_env_class(void) {
+    for(size_t i = 0; i < env -> env_count; i++){
+        free(env -> env_names[i]);
+        free(env -> env_values[i]);
+    }
     free(env -> env_names);
     free(env -> env_values);
     free(env);
@@ -334,8 +339,9 @@ static JSValue js_get_self(JSContext* ctx){
     char* entry = app -> script_path;
     JSValue ret = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, ret, "pid", JS_NewInt32(ctx, getpid()));
-    JS_SetPropertyStr(ctx, ret, "args", JS_NewArrayFrom(ctx, argc, argv));
+    JS_SetPropertyStr(ctx, ret, "args", JS_NewArrayFrom(ctx, js_argc, js_argv));
     JS_SetPropertyStr(ctx, ret, "entry", JS_NewString(ctx, entry));
+    JS_SetPropertyStr(ctx, ret, "binary", JS_NewString(ctx, __progpath));
     JS_SetPropertyStr(ctx, ret, "env", JS_NewObjectClass(ctx, js_reactive_environ_class_id));
     
 #ifdef LJS_DEBUG
@@ -491,12 +497,9 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
 #define ioassert(cond) if(-1 == (cond)){ perror(#cond); exit(1); }
         ioassert(setsid());
         ioassert(ioctl(slave_fd, TIOCSCTTY, NULL));
-        close(STDIN_FILENO);
-        close(STDOUT_FILENO);
-        close(STDERR_FILENO);
-        fcntl(STDIN_FILENO, F_DUPFD, slave_fd); 
-        fcntl(STDOUT_FILENO, F_DUPFD, slave_fd);
-        fcntl(STDERR_FILENO, F_DUPFD, slave_fd);
+        dup2(slave_fd, STDIN_FILENO);
+        dup2(slave_fd, STDOUT_FILENO);
+        dup2(slave_fd, STDERR_FILENO);
         setbuf(stdin, NULL);
         setbuf(stdout, NULL);
         setbuf(stderr, NULL);
@@ -558,11 +561,11 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
 
     if(inherit){
         // Note: This will block stdin but not stdout
-        evfd = evfd_new(master_fd, false, true, true, EVFD_BUFSIZE, NULL, NULL);
+        evfd = evfd_new(master_fd, PIPE_WRITE | PIPE_READ | PIPE_PTY, EVFD_BUFSIZE, NULL, NULL);
         evfd_pipeTo(pstdin, evfd, NULL, NULL, NULL, NULL);
         evfd_pipeTo(evfd, pstdout, NULL, NULL, NULL, NULL);
     }else{
-        JSValue pipe = LJS_NewFDPipe(ctx, master_fd, PIPE_READ | PIPE_WRITE, true, &evfd);
+        JSValue pipe = LJS_NewFDPipe(ctx, master_fd, PIPE_READ | PIPE_WRITE | PIPE_PTY, true, &evfd);
         JS_SetPropertyStr(ctx, class_obj, "pipe", pipe);
     }
     obj -> evfd = evfd;
@@ -776,13 +779,13 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
 
 bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv
 ){
-    argc = _argc;
+    js_argc = _argc;
 
     // parse argv
-    argv = _argc == 0 ? NULL : js_malloc(ctx, sizeof(JSValue) * _argc);
+    js_argv = _argc == 0 ? NULL : js_malloc(ctx, sizeof(JSValue) * _argc);
     if(_argc != 0)
         for(int i = 0; i < _argc; i++){
-            argv[i] = JS_NewString(ctx, _argv[i]);
+            js_argv[i] = JS_NewString(ctx, _argv[i]);
         }
 
     // init module
@@ -815,9 +818,9 @@ bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv
 
     // init stdpipe
     if(LJS_IsMainContext(ctx)){
-        stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, true, &pstdin);
-        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, true, &pstdout);
-        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, true, &pstderr);
+        stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, isatty(STDIN_FILENO), &pstdin);
+        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, isatty(STDOUT_FILENO), &pstdout);
+        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, isatty(STDERR_FILENO), &pstderr);
         if(!pstderr) pstderr = pstdout;
     }
 

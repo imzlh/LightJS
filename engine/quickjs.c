@@ -50623,6 +50623,9 @@ static JSValue js_promise_constructor(JSContext *ctx, JSValueConst new_target,
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, args[0]);
     JS_FreeValue(ctx, args[1]);
+
+    // create stack
+    build_backtrace(ctx, obj, JS_UNDEFINED, NULL, 0, 0, 0);
     return obj;
  fail1:
     JS_FreeValue(ctx, args[0]);

@@ -48,11 +48,6 @@ declare module 'vm' {
 
     export class Sandbox {
         constructor(opts?: {
-            /**
-             * 注意：谨慎返回ArrayBuffer，不正确的内容将导致崩溃
-             * @param input 
-             * @returns 
-             */
             loader?: (this: void, input: string) => string | Module;
             format?: (this: void, modulename: string) => string
             // init: Array<IModule>;
@@ -115,6 +110,10 @@ declare module 'vm' {
         memoryLimit: bigint,
         stackLimit: number,
         codeExecutionTimeout: number,
-        eventNotifier: (event: string, data: any) => void
+        eventNotifier: (event: string, data: any) => void,
+        /**
+         * 手动接管代码是否取消执行，返回任何可以认作`true`的值将结束代码执行
+         */
+        tickCallback: (this: void) => any,
     }>): void;
 }
