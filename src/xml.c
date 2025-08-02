@@ -105,7 +105,7 @@ static void char_data(void* user_data, const XML_Char* s, int len) {
     struct JSXMLParserCtx* jsxmlctx = (struct JSXMLParserCtx*)user_data;
     struct XMLElement* el = FETCH(&jsxmlctx -> stack);
 
-    buffer_realloc(&el -> content, el -> content.size + len, true);
+    buffer_realloc(&el -> content, el -> content.size + len +1, true);
     buffer_push(&el -> content, (void*)s, len);
 }
 
@@ -170,18 +170,22 @@ param_error:
     return root_obj;
 
 error:
-    struct list_head* pos;
-    list_for_each(pos, &jsxmlctx -> stack) {
+    struct list_head* pos, *tmp;
+    list_for_each_safe(pos, tmp, &jsxmlctx -> stack) {
         struct XMLElement* el = list_entry(pos, struct XMLElement, link);
-        JS_FreeValue(ctx, el -> name);
-        JS_FreeValue(ctx, el -> attrs);
-        JS_FreeValue(ctx, el -> obj);
-        JS_FreeValue(ctx, el -> children);
+        if(JS_IsUndefined(el -> obj)){
+            JS_FreeValue(ctx, el -> name);
+            JS_FreeValue(ctx, el -> attrs);
+            JS_FreeValue(ctx, el -> children);
+        }else{
+            // elements in el already give ownership to obj
+            JS_FreeValue(ctx, el -> obj);
+        }
         buffer_free(&el -> content);
         js_free(ctx, el);
     }
 
-    xml_end(parser, jsxmlctx);
+    free_jsxmlctx(jsxmlctx);
     JS_FreeCString(ctx, xmlstr);
     const char* error_msg = XML_ErrorString(XML_GetErrorCode(parser));
     return JS_ThrowTypeError(ctx, "Failed to parse XML: %s", error_msg);

@@ -10,10 +10,19 @@ type FetchOptions<WebSocket> = {
     referer?: string;
     host?: string;  // 当URL为unix或ip地址时，需要用于指定请求的Host头
     body?: Uint8Array | U8Pipe | string;
-    compress?: boolean; // deflate压缩
     websocket?: WebSocket;
 };
 
+/**
+ * 使用类似于WebAPI的fetch方法发起HTTP请求<br>
+ * 注意
+ *  - 不支持压缩，如果需要请自行通过`compress`模块实现
+ *  - 支持WebSocket，但需要指定`websocket: true`选项或者`ws://`协议，返回`WebSocket`
+ *  - 支持内建的MbedTLS加密库，但需要指定`https/wss://`协议
+ *  - 由于使用C实现，某些方面会与JS实现(如nodejs)有差异
+ * @param url 
+ * @param options 
+ */
 declare function fetch(url: string, options?: FetchOptions<false | undefined>): Promise<import('http').Response>;
 declare function fetch(url: string, options: FetchOptions<true>): Promise<import('http').WebSocket>;
 
@@ -31,7 +40,8 @@ declare module 'http' {
         append(key: string, value: string): void;
         delete(key: string): boolean;
         get(key: string): string | null;
-        getall(key?: string): string[];
+        getAll(key: string): string[];
+        getAll(): Record<string, string[]>;
         set(key: string, value: string): void;
         has(key: string): boolean;
     }

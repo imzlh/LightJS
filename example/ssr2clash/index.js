@@ -13,6 +13,7 @@ if (!textSSR) {
 const fe = await fetch(textSSR);
 console.log('Got', fe.status, fe.ok);
 const js = await fe.text();
+console.log(js);
 console.log('Got', js.length, 'bytes from server');
 
 // 2. parse Content

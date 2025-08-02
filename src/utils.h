@@ -408,7 +408,6 @@ end:
  */
 static inline bool buffer_flat(struct Buffer* buffer) {
     if (!buffer -> is_dynamic) return false;
-
     uint32_t used = buffer_used(buffer);
     if (used == 0 || buffer_is_empty(buffer)) {
         buffer -> start = 0;
@@ -432,6 +431,14 @@ static inline bool buffer_flat(struct Buffer* buffer) {
     buffer -> buffer = new_buf;
     buffer -> start = 0;
     buffer -> end = used;
+    return true;
+}
+
+/**
+ * 只在需要展开时展开
+ */
+static inline bool buffer_flat2(struct Buffer* buffer){
+    if( buffer -> end > buffer -> start) return buffer_flat(buffer);
     return true;
 }
 

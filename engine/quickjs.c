@@ -6728,7 +6728,7 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
     has_filter_func = backtrace_flags & JS_BACKTRACE_FLAG_FILTER_FUNC;
     i = 0;
 
-    if (!JS_IsNull(ctx->error_ctor)) {
+    if (!JS_IsPromise(error_val) && !JS_IsNull(ctx->error_ctor)) {
         prepare = js_dup(ctx->error_prepare_stack);
         has_prepare = JS_IsFunction(ctx, prepare);
     }

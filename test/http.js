@@ -24,7 +24,7 @@ import { bind } from "socket";
 await test('fetch', async () => {
     // await delay(3000);  // wait async bind syscall
     console.log("fetch start");
-    const response = await fetch('https://cp.cloudflare.com/generate_204', {
+    const response = await fetch('https://captive.apple.com/', {
         // note: keepalive会导致fd被占用测试完无法自动退出
         keepalive: false,
         method: 'GET'
@@ -39,7 +39,7 @@ await test('fetch', async () => {
     const text = await response.text();
     console.log(text);
     console.log("fetch end");
-    assert(text == 'Microsoft Connect Test');
+    assert(text.includes('Success'));
 })
 
 // await test('ws-server', async () => {

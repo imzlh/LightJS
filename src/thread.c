@@ -25,6 +25,22 @@
 #include <sys/stat.h>
 #include <sys/eventfd.h>
 
+#ifdef LJS_LIBFFI
+#include <ffi.h>
+#endif
+
+#ifdef LJS_MBEDTLS
+#include <mbedtls/version.h>
+#endif
+
+#ifdef LJS_LIBEXPAT
+#include <expat.h>
+#endif
+
+#ifdef LJS_ZLIB
+#include <zlib.h>
+#endif
+
 #define BUFFER_SIZE 64 * 1024
 #define HASH_TABLE_SIZE 26
 #define EVENT_MAX_LISTENER 16
@@ -865,7 +881,7 @@ static int worker_message_callback(EvFD* __, bool _, uint8_t* buffer, uint32_t r
 }
 
 // for worker thread
-static void worker_close_callback(EvFD* fd, void* user_data){
+static void worker_close_callback(EvFD* fd, bool _, void* user_data){
     struct Worker_Props* wel = ((App*)user_data) -> worker;
     evfd_close(wel -> efd_worker2main);
     worker_exit((App*)user_data, 0, "worker closed");
@@ -904,7 +920,7 @@ static int main_message_callback(EvFD* __, bool _, uint8_t* buffer, uint32_t rea
 }
 
 // for main thread
-static void main_close_callback(EvFD* fd, void* user_data){
+static void main_close_callback(EvFD* fd, bool _, void* user_data){
     App* app = (App*)user_data; // worker APP, not main!
     JSContext* ctx = app -> worker -> parent -> ctx;
 
@@ -1376,7 +1392,7 @@ static void timer_callback(uint64_t count, void* ptr){
     }
 }
 
-static void timer_free_callback(EvFD* fd, void* ptr){
+static void timer_free_callback(EvFD* fd, bool _, void* ptr){
     struct Timer_T* timer = (struct Timer_T*)ptr;
     js_free(timer -> ctx, timer);
 }
@@ -2460,6 +2476,31 @@ static JSClassDef js_sandbox_def = {
     .finalizer = js_sandbox_finalizer,
 };
 
+static inline JSValue get_version_info(JSContext* ctx){
+    JSValue obj = JS_NewObject(ctx);
+
+    JS_SetPropertyStr(ctx, obj, "version", JS_NewString(ctx, LJS_VERSION));
+    JS_SetPropertyStr(ctx, obj, "quickjs", JS_NewString(ctx, JS_GetVersion()));
+
+#ifdef LJS_MBEDTLS
+    JS_SetPropertyStr(ctx, obj, "mbedtls", JS_NewString(ctx, MBEDTLS_VERSION_STRING));
+#endif
+
+#ifdef LJS_ZLIB
+    JS_SetPropertyStr(ctx, obj, "zlib", JS_NewString(ctx, ZLIB_VERSION));
+#endif
+
+#ifdef LJS_LIBEXPAT
+    JS_SetPropertyStr(ctx, obj, "expat", JS_NewString(ctx, XML_ExpatVersion()));
+#endif
+
+#ifdef LJS_LIBFFI
+    JS_SetPropertyStr(ctx, obj, "ffi", JS_NULL);
+#endif
+
+    return obj;
+}
+
 static int vm_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetModuleExportList(ctx, m, js_vm_funcs, countof(js_vm_funcs));
 
@@ -2474,6 +2515,8 @@ static int vm_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetConstructor(ctx, module_ctor, module);
     JS_SetModuleExport(ctx, m, "Module", module_ctor);
     JS_FreeValue(ctx, module);
+
+    JS_SetModuleExport(ctx, m, "version", get_version_info(ctx));
 
     return 0;
 }
@@ -2495,6 +2538,8 @@ bool LJS_init_vm(JSContext *ctx) {
     JS_SetPropertyFunctionList(ctx, module_proto, js_module_proto_funcs, countof(js_module_proto_funcs));
     JS_SetClassProto(ctx, js_module_class_id, module_proto);
     JS_AddModuleExport(ctx, m, "Module");
+
+    JS_AddModuleExport(ctx, m, "version");
 
     return JS_AddModuleExportList(ctx, m, js_vm_funcs, countof(js_vm_funcs));
 }

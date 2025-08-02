@@ -67,7 +67,7 @@ typedef JSValue (*PipeCallback)(JSContext* ctx, void* ptr, JSValueConst data);
 /* forward */ typedef enum EvPipeToNotifyType EvPipeToNotifyType;
 typedef int (*EvReadCallback)(EvFD* evfd, bool success, uint8_t* buffer, uint32_t read_size, void* user_data);
 typedef void (*EvWriteCallback)(EvFD* evfd, bool success, void* opaque);
-typedef void (*EvCloseCallback)(EvFD* fd, void* opaque);
+typedef void (*EvCloseCallback)(EvFD* fd, bool rdhup, void* opaque);
 typedef void (*EvINotifyCallback)(EvFD* fd, const char* path, uint32_t evtype, const char* move_to, void* user_data);
 typedef void (*EvSyncCallback)(EvFD* evfd, bool success, void* user_data);
 typedef void (*EvFinalizerCallback)(EvFD* evfd, struct Buffer* buffer, void* user_data);
@@ -364,6 +364,7 @@ bool evfd_isAIO(EvFD* evfd);
 void* evfd_get_opaque(EvFD* evfd);
 void evfd_set_opaque(EvFD* evfd, void* opaque);
 bool evfd_syncexec(EvFD* pipe);
+void evfd_enable_rac(EvFD* evfd, bool enable);
 #ifdef LJS_MBEDTLS
 bool evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, int flag, InitSSLOptions* options, EvSSLHandshakeCallback handshake_cb, void* user_data);
 void evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
@@ -452,6 +453,10 @@ void __js_reject2(struct promise* proxy, JSValue value, const char* __debug__);
 #define js_resolve(proxy, value) __js_resolve(proxy, value, __FILE__ ":" TOSTRING((__LINE__)))
 #define js_reject(proxy, msg) __js_reject(proxy, msg, __FILE__ ":" TOSTRING(__LINE__))
 #define js_reject2(proxy, value) __js_reject2(proxy, value, __FILE__ ":" STRINGIFY(__LINE__))
+#define js_reject2_free(proxy, value) {\
+    js_reject2(proxy, value); \
+    JS_FreeValue(js_get_promise_context(proxy), value); \
+}
 JSValue js_get_promise(Promise* promise);
 JSContext* js_get_promise_context(struct promise* proxy);
 

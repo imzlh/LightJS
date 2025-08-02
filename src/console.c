@@ -28,6 +28,24 @@
 #define ANSI_UNDERLINE "\x1b[4m"
 #define ANSI_ITALIC "\x1b[3m"
 
+#undef LJS_DEBUG
+
+void __free(EvFD* evfd, bool is_error, void* data){
+    free2(data);
+}
+
+__attribute((format(printf, 2, 3)))
+static inline void ev_printf(EvFD* evfd, const char* fmt, ...){
+    va_list args;
+    char* buf = malloc2(MAX_OUTPUT_LEN);
+    
+    va_start(args, fmt);
+    vsnprintf(buf, MAX_OUTPUT_LEN, fmt, args);
+    va_end(args);
+    
+    evfd_write(evfd, (void*)buf, strlen(buf), __free, buf);
+}
+
 static const char* getClassName(JSContext *ctx, JSValue prototype) {
     JSValue constructor, name;
 
@@ -391,7 +409,7 @@ main:
                 break;
             }
         }
-        if(wrap_display) printf("\n%s", getBlank(depth) +1);
+        if(wrap_display) dbuf_printf(output, "\n%s", getBlank(depth) +1);
         dbuf_putstr(output, ANSI_GREEN " ]" ANSI_RESET);
 
     end:
@@ -654,6 +672,7 @@ void js_dump_promise(JSContext *ctx, JSValueConst val, EvFD* target_fd){
     dbuf_init2(&output, JS_GetRuntime(ctx), dalloc);
     JSValue reject = JS_PromiseResult(ctx, val);
     print_jsvalue(ctx, reject, JS_UNDEFINED, 0, visited, &output);
+    JS_FreeValue(ctx, reject);
     JSValue stack = JS_GetProperty(ctx, val, JS_ATOM_stack);
     if(JS_PromiseState(ctx, val) == JS_PROMISE_PENDING && JS_IsString(stack)){
         dbuf_putstr(&output, "    " ANSI_BOLD "---- promise ----" ANSI_RESET "\n");
@@ -710,7 +729,7 @@ static JSValue js_console_debug(JSContext *ctx, JSValueConst this_val, int argc,
         return JS_UNDEFINED;
     }
     
-    printf(ANSI_WHITE " debug " ANSI_RESET);
+    ev_printf(pstdout, ANSI_WHITE " debug " ANSI_RESET);
     printval_internal(ctx, argc, argv, pstdout);
     return JS_UNDEFINED;
 }
@@ -719,27 +738,26 @@ static JSValue js_console_debug(JSContext *ctx, JSValueConst this_val, int argc,
 static JSValue js_console_assert(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(argc < 2){
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Assertion failed: at least 2 arguments required, but only %d present", 
-                "console.assert(condition: any, ...)"
-            , argc);
+            "console.assert(condition: any, ...)" , argc);
     }
 
     if (!JS_ToBool(ctx, argv[0])) {
-        printf(ANSI_RED " assert " ANSI_RESET);
-        printval_internal(ctx, argc - 1, argv + 1, pstdout);
+        ev_printf(pstderr, ANSI_RED " assert " ANSI_RESET);
+        printval_internal(ctx, argc - 1, argv + 1, pstderr);
     }
     return JS_UNDEFINED;
 }
 
 // console.warn 实现
 static JSValue js_console_warn(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    printf(ANSI_YELLOW " warn " ANSI_RESET);
+    ev_printf(pstdout, ANSI_YELLOW " warn " ANSI_RESET);
     printval_internal(ctx, argc, argv, pstdout);
     return JS_UNDEFINED;
 }
 
 // console.clear 实现
 static JSValue js_console_clear(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    printf("\033[2J\033[1;1H");
+    ev_printf(pstdout, "\033[2J\033[1;1H");
     return JS_UNDEFINED;
 }
 

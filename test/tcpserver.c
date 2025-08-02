@@ -69,6 +69,11 @@ int main() {
         // 回显数据
         // send(client_fd, buffer, valread, 0);
         memset(buffer, 0, BUFFER_SIZE);
+
+        if(buffer[strlen(buffer)-1] == '\n' && buffer[strlen(buffer)-3] == '\n'){
+            send(client_fd, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Hello, World!</h1></body></html>\r\n", 94, 0);
+            printf("HTTP response sent\n");
+        }
     }
     printf("Server closed\n");
     

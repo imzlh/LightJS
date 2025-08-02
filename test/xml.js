@@ -14,3 +14,9 @@ test('xml', () => {
     console.log(compileXML(xml));
     // console.log(xml);
 })
+
+test2('xml', () => {
+    let file = read('xmltest.xml', true);
+    file = file.substring(Math.random() * file.length, 2); // throws error
+    console.log(parse(file));
+})

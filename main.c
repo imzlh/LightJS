@@ -490,6 +490,8 @@ run_evloop: // note: unused in LJSC cmdline mode
     // dispatch exit event
 finalize:
     js_dispatch_global_event(app -> ctx, "exit", JS_UNDEFINED, false);
+    evfd_syncexec(pstdout);
+    evfd_syncexec(pstderr);
     evcore_destroy();
     run_jobs();
     JS_FreeValue(app -> ctx, ret_val);

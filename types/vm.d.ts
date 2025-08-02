@@ -116,4 +116,14 @@ declare module 'vm' {
          */
         tickCallback: (this: void) => any,
     }>): void;
+
+    export const version: {
+        mbedtls?: string,        
+        ffi?: null, // note: FFI没有版本信息
+        zlib?: string,
+        expat?: string,
+
+        quickjs: string,
+        version: string,
+    };
 }

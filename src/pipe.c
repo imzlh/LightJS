@@ -31,8 +31,6 @@ struct FDPipe_T{
     bool is_socket; // 为socket优化
 
     Promise* close;
-    uint8_t* data_before_eof;   // read buffer before EOF
-    size_t eofbuf_size;
 };
 struct U8PipeTransfer {
     struct U8Pipe_T* pipe[2];
@@ -466,6 +464,7 @@ static int evread_callback(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_s
         js_reject(task -> promise, "Pipe reached EOF");
     }else{
         JSValue data = JS_NewUint8Array(pipe -> ctx, buffer, read_size, free_js_malloc, NULL, false);
+        if(JS_IsException(data)) js_reject2_free(task -> promise, JS_GetException(pipe -> ctx));
         js_resolve(task -> promise, data);
         JS_FreeValue(pipe -> ctx, data);
     }
@@ -473,15 +472,6 @@ static int evread_callback(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_s
     U8PIPE_UNREF(piperaw);
     js_free(ctx, task);
     return EVCB_RET_DONE;
-}
-
-#define U8PIPE_FD_EOFCHECK(pipe, promise, blk) if(u8pipe_closed(pipe)){ \
-    JSValue ret_promise = js_get_promise(promise); \
-    if(pipe -> pipe.fdpipe -> data_before_eof) blk \
-    else{ \
-        js_reject(promise, "U8Pipe has already been closed"); \
-        return ret_promise; \
-    } \
 }
 
 #define EXPORT_EOF(pipe, buf, size) JSValue buf = JS_NewUint8Array(ctx, pipe -> pipe.fdpipe -> data_before_eof, size, free_js_malloc, NULL, false);
@@ -512,18 +502,6 @@ static JSValue js_U8Pipe_read(JSContext *ctx, JSValueConst this_val, int argc, J
     }
 
     if(pipe -> fdpipe){
-        U8PIPE_FD_EOFCHECK(pipe, promise, {
-            EXPORT_EOF(pipe, buf, expected_size == 0 ? pipe -> pipe.fdpipe -> eofbuf_size : MIN(pipe -> pipe.fdpipe -> eofbuf_size, expected_size));
-            if(expected_size == 0 || expected_size >= pipe -> pipe.fdpipe -> eofbuf_size){
-                U8PIPE_FD_EOF(pipe);
-            }else{
-                // rest data
-                memmove(pipe -> pipe.fdpipe -> data_before_eof, pipe -> pipe.fdpipe -> data_before_eof + expected_size, pipe -> pipe.fdpipe -> eofbuf_size - expected_size);
-            }
-            js_resolve(promise, buf);
-            return ret_promise;
-        });
-
         NEW_TASK(promise, pipe);
         u8pipe_ref(pipe);
 
@@ -639,34 +617,10 @@ static JSValue js_U8Pipe_readline(JSContext *ctx, JSValueConst this_val, int arg
             return JS_ThrowTypeError(ctx, "Failed to fill buffer");
     }
 
-    U8PIPE_FD_EOFCHECK(pipe, promise, {
-        // XXX: todo: add "\r" support for some edge case
-        uint8_t* buf = pipe -> pipe.fdpipe -> data_before_eof;
-        uint32_t size = pipe -> pipe.fdpipe -> eofbuf_size;
-        uint8_t* pos = (uint8_t*)memchr(buf, '\n', size);
-        uint32_t avsize = pos == NULL? size : pos - buf;
-        EXPORT_EOF(pipe, jsbuf, avsize);
-        if(avsize == size){
-            U8PIPE_FD_EOF(pipe);
-        }else{
-            // rest data
-            memmove(buf, buf + avsize, size - avsize);
-        }
-        js_resolve(promise, jsbuf);
-        return ret_promise;
-    });
-
     JSValue ret = js_get_promise(promise);
     uint32_t expected_size = 16 * 1024;
     if(argc == 1) JS_ToUint32(ctx, &expected_size, argv[0]);
     uint8_t* buffer = js_malloc(ctx, expected_size);
-
-    U8PIPE_FD_EOFCHECK(pipe, promise, {
-        EXPORT_EOF(pipe, buf, pipe -> pipe.fdpipe -> eofbuf_size);
-        js_resolve(promise, buf);
-        U8PIPE_FD_EOF(pipe);
-        return ret;
-    });
 
     NEW_TASK(promise, pipe);
 
@@ -889,22 +843,6 @@ static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc,
         to_data -> pipe.pipe -> write_lock = true;
     }
 
-    if(from -> fdpipe && from -> pipe.fdpipe -> closed && from -> pipe.fdpipe -> data_before_eof){
-        // write to target
-        JSValue data = JS_NewUint8Array(ctx, from -> pipe.fdpipe -> data_before_eof, from -> pipe.fdpipe -> eofbuf_size, free_js_malloc, NULL, false);
-        js_U8Pipe_write(ctx, to, 1, (JSValueConst[]){data});
-        from -> pipe.fdpipe -> data_before_eof = NULL;
-        js_resolve(from -> pipe.fdpipe -> close, JS_UNDEFINED);
-        JS_FreeValue(ctx, data);
-
-        JSValue prom[2];
-        JSValue ret = JS_NewPromiseCapability(ctx, prom);
-        JS_FreeValue(ctx, prom[1]);
-        JS_Call(ctx, prom[0], JS_NULL, 1, (JSValueConst[]){ JS_NewBool(ctx, true) });
-        JS_FreeValue(ctx, prom[0]);
-        return ret;
-    }
-
     // Note: use ref to control lifetime, -- to release
     CHECK_U8PIPE_CLOSED(from);
     u8pipe_ref(from);
@@ -919,16 +857,16 @@ static JSValue js_U8Pipe_pipeTo(JSContext *ctx, JSValueConst this_val, int argc,
     return ret;
 }
 
-static void evclose_callback(EvFD* fd, void* opaque){
+static void evclose_callback(EvFD* fd, bool rdhup, void* opaque){
+    if(rdhup) return;
+
     struct U8Pipe_T* pipe = (struct U8Pipe_T*)opaque;
     struct FDPipe_T* fdpipe = pipe -> pipe.fdpipe;
     JSContext* ctx = fdpipe -> ctx;
     U8PIPE_UNREF(pipe);
     fdpipe -> closed = true;
 
-    if(!fdpipe -> data_before_eof){
-        js_resolve(fdpipe -> close, JS_UNDEFINED);
-    }
+    js_resolve(fdpipe -> close, JS_UNDEFINED);
 }
 
 static JSValue js_U8Pipe_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
@@ -1279,7 +1217,6 @@ static inline JSValue u8pipe_new(JSContext *ctx, bool fdpipe, struct U8Pipe_T *p
         
         pipe -> pipe.fdpipe -> closed = false;
         // not locked check
-        pipe -> pipe.fdpipe -> data_before_eof = NULL;
         pipe -> pipe.fdpipe -> is_socket = false;
         pipe -> pipe.fdpipe -> ctx = ctx;
     }else{
@@ -1290,16 +1227,6 @@ static inline JSValue u8pipe_new(JSContext *ctx, bool fdpipe, struct U8Pipe_T *p
     }
 
     return obj;
-}
-
-void u8pipe_finalizer_cb(EvFD* fd, struct Buffer* buf, void* opaque){
-    struct U8Pipe_T* pipe = opaque;
-    struct FDPipe_T* fdp = pipe -> pipe.fdpipe;
-    if(!buffer_is_empty(buf)){
-        uint8_t* buf2 = js_malloc(fdp -> ctx, buffer_used(buf));
-        fdp -> eofbuf_size = buffer_copyto(buf, buf2, UINT32_MAX);
-        fdp -> data_before_eof = buf2;
-    }
 }
 
 /**
@@ -1324,15 +1251,13 @@ JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, bool iopipe, EvFD**
         return LJS_Throw(ctx, EXCEPTION_IO, "Failed to bind FD: %s", NULL, strerror(errno));
     }
 
+    evfd_enable_rac(evfd, true);    // read after close feature
     JSValue obj = u8pipe_new(ctx, true, pipe);
     if(iopipe){
         JSValue proto = JS_GetClassProto(ctx, iopipe_class_id);
         JS_SetPrototype(ctx, obj, proto);   // override prototype
         JS_FreeValue(ctx, proto);           // it's strange that setproto will not take own of ref
     }
-
-    if((flag & PIPE_READ) && !(flag & PIPE_AIO))
-        evfd_finalizer(evfd, u8pipe_finalizer_cb, pipe);
 
 #ifdef LJS_DEBUG
     if (flag & PIPE_SOCKET)

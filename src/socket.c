@@ -92,7 +92,7 @@ int server_handle_accept(EvFD* evfd, bool success, uint8_t* buffer, uint32_t rea
     return EVCB_RET_DONE;
 }
 
-static void server_handle_close(EvFD* fd, void* user_data) {
+static void server_handle_close(EvFD* fd, bool _, void* user_data) {
     struct JS_Server_Data* data = (struct JS_Server_Data*)user_data;
     JS_FreeValue(data -> ctx, data -> on_connection);
     if(!JS_IsUndefined(data -> on_close)){

@@ -48,6 +48,6 @@ server.callback = async (client, addr) => {
 server.run();
 console.log("Server running at http://localhost:8000");
 
-// setInterval(() => {
-//     console.log(`Connections: ${server.connecions}`);
-// }, 10000);
+setInterval(() => {
+    console.log(`Connections: ${server.connecions}`);
+}, 10000);

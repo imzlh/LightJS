@@ -500,9 +500,13 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
         dup2(slave_fd, STDIN_FILENO);
         dup2(slave_fd, STDOUT_FILENO);
         dup2(slave_fd, STDERR_FILENO);
+        // disable pipe buffering
         setbuf(stdin, NULL);
         setbuf(stdout, NULL);
         setbuf(stderr, NULL);
+        setvbuf(stdin, NULL, _IONBF, 0);
+        setvbuf(stdout, NULL, _IONBF, 0);
+        setvbuf(stderr, NULL, _IONBF, 0); 
         close(slave_fd);
 #undef ioassert
         
