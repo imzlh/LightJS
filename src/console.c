@@ -28,8 +28,6 @@
 #define ANSI_UNDERLINE "\x1b[4m"
 #define ANSI_ITALIC "\x1b[3m"
 
-#undef LJS_DEBUG
-
 void __free(EvFD* evfd, bool is_error, void* data){
     free2(data);
 }
@@ -150,6 +148,8 @@ static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MA
         }
         for(uint32_t i = 0; i < prop_count; i++){
             JSAtom atom = props[i].atom;
+            if(atom == JS_ATOM_prototype || atom == JS_ATOM_Symbol_species)
+                continue;
             JSValue prop = JS_GetProperty(ctx, val, atom);
             if(measure_wrap_display(ctx, prop, visited, depth + 1, also_proto)){
                 JS_FreeValue(ctx, prop);
@@ -169,10 +169,10 @@ static inline bool measure_wrap_disp2(JSContext *ctx, JSValue val, bool also_pro
 }
 
 static void __print_stack(JSContext* ctx, JSValueConst stack, int depth, DynBuf* output) {
-    const char* js_stack_str = LJS_ToCString(ctx, stack, NULL);
     const char* indent = getBlank(depth);
-    char* stack_str_raw = js_stack_str ? js_strdup(ctx, js_stack_str) : NULL;
-    char* stack_str = stack_str_raw;
+    const char* stack_str = LJS_ToCString(ctx, stack, NULL);
+
+    if(!stack_str) return;
     char* wrap_pos = strchr(stack_str, '\n');
     while (wrap_pos != NULL) {
         *wrap_pos = '\0';
@@ -181,8 +181,7 @@ static void __print_stack(JSContext* ctx, JSValueConst stack, int depth, DynBuf*
         wrap_pos = strchr(stack_str, '\n');
     }
     dbuf_printf(output, "%s%s\n", indent, stack_str);
-    js_free(ctx, stack_str_raw);
-    JS_FreeCString(ctx, js_stack_str);
+    JS_FreeCString(ctx, stack_str);
 }
 
 static void print_jserror(JSContext* ctx, JSValue val, int depth, DynBuf* output) {
@@ -362,7 +361,6 @@ main:
             if (JS_IsConstructor(ctx, val)){
                 dbuf_printf(output, ANSI_RED ANSI_ITALIC "f" ANSI_RESET ANSI_MAGENTA " class(" ANSI_RESET "%s" ANSI_MAGENTA ")" ANSI_RESET, name_str);
                 obj_showproto = false;
-                goto obj_restart;
             } else {
                 dbuf_printf(output, ANSI_RED ANSI_ITALIC "f" ANSI_RESET ANSI_MAGENTA " (" ANSI_RESET "%s" ANSI_MAGENTA ")" ANSI_RESET, name_str);
             }
@@ -371,6 +369,53 @@ main:
             dbuf_putstr(output, ANSI_RED "Function" ANSI_RESET);
         }
         JS_FreeValue(ctx, name);
+
+        // Properites
+        JSPropertyEnum *props;
+        uint32_t prop_count;
+        if(-1 != JS_GetOwnPropertyNames(ctx, &props, &prop_count, val, JS_GPN_STRING_MASK | JS_GPN_SYMBOL_MASK)){
+        //     dbuf_putstr(output, " {");
+        //     // meraure wrap first
+        //     bool wrap = false;
+        //     if(prop_count >= MAX_OBJECT_PROP_LEN) wrap = true;
+        //     else
+        //         for(uint32_t i = 0; i < prop_count; i++)
+        //             if(measure_wrap_disp2(ctx, JS_GetPropertyNoDup(ctx, val, props[i].atom), false))
+        //                 wrap = true;
+
+        //     const char* indent = getBlank(depth + 1);
+        //     if(wrap) dbuf_printf(output, "\n%s", indent);
+        //     for(uint32_t i = 0; i < MIN(prop_count, MAX_OBJECT_PROP_LEN); i++){
+        //         print_jsvalue(ctx, JS_GetPropertyNoDup(ctx, val, props[i].atom), val, depth + 1, visited, output);
+        //         if(i != prop_count - 1) dbuf_putstr(output, ", ");
+        //         if(i == MAX_OBJECT_PROP_LEN){
+        //             dbuf_printf(output, "\n%s...\n%s", indent, indent + 4);
+        //             break;
+        //         }else if(wrap){
+        //             if(i == MAX_OBJECT_PROP_LEN - 1) dbuf_printf(output, "\n%s", indent + 4);
+        //             else dbuf_printf(output, "\n%s", indent);
+        //         }
+        //     }
+            uint32_t pcount = 0;
+            static const JSAtom ignore_atom_list[] = {
+                JS_ATOM_length,
+                JS_ATOM_name,
+                JS_ATOM_prototype,
+                JS_ATOM_Symbol_species,
+                JS_ATOM_Symbol_toStringTag,
+                JS_ATOM_Symbol_toPrimitive,
+            };
+            for(uint32_t i = 0; i < prop_count; i++){
+                for(int j = 0; j < countof(ignore_atom_list); j++){
+                    if(props[i].atom == ignore_atom_list[j]) goto __function_break;
+                }
+                pcount++;
+__function_break:
+            }
+            JS_FreePropertyEnum(ctx, props, prop_count);
+            if(pcount > 0) goto obj_restart;
+        //     dbuf_printf(output, "%s}", indent - 4);
+        }
     } else if (JS_IsSymbol(val)) {
         JSAtom atom = JS_ValueToAtom(ctx, val);
         const char* str = JS_AtomToCString(ctx, atom);
@@ -547,6 +592,13 @@ obj_restart:
                 }
             }else if(props[i].atom == JS_ATOM_Symbol_toStringTag){
                 continue;
+            }else if(props[i].atom == JS_ATOM_Symbol_species){
+                const char* cname = getClassName(ctx, val);
+                if(cname){
+                    dbuf_printf(output, ",\n%s" ANSI_RED ANSI_BOLD "[species]" ANSI_RESET ": " ANSI_MAGENTA "%s" ANSI_RESET, indent, cname);
+                    JS_FreeCString(ctx, cname);
+                }
+                continue;
             }
 
             if (-1 == JS_GetOwnProperty(ctx, &desc, val, props[i].atom)) {
@@ -562,7 +614,7 @@ obj_restart:
             if(props[i].is_enumerable || !JS_IsSymbol(atom_val))
                 dbuf_printf(output, ANSI_YELLOW "%s" ANSI_RESET ": ", key_str);
             else if(*key_str)
-                dbuf_printf(output, ANSI_RED "Symbol(" ANSI_RESET "%s" ANSI_RED ")" ANSI_RESET ": ", key_str);
+                dbuf_printf(output, ANSI_RED "[" ANSI_RESET "%s" ANSI_RED "] " ANSI_RESET ": ", key_str);
             else
                 dbuf_putstr(output, ANSI_RED "Symbol" ANSI_RESET ": ");
             JS_FreeCString(ctx, key_str);
@@ -668,6 +720,7 @@ void js_dump(JSContext *ctx, JSValueConst val, EvFD* target_fd){
 // dump LightJS special promise(with promise stack)
 void js_dump_promise(JSContext *ctx, JSValueConst val, EvFD* target_fd){
     static JSValue visited[64];
+    if(evfd_closed(target_fd)) return;
     DynBuf output;
     dbuf_init2(&output, JS_GetRuntime(ctx), dalloc);
     JSValue reject = JS_PromiseResult(ctx, val);
@@ -698,6 +751,7 @@ static JSValue js_console_log(JSContext *ctx, JSValueConst this_val, int argc, J
 }
 
 static inline void print2(EvFD* fd, char* msg){
+    if(evfd_closed(fd)) return;
 #ifdef LJS_DEBUG
     write(evfd_getfd(fd, NULL), msg, strlen(msg));
 #else

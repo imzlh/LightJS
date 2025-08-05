@@ -251,11 +251,14 @@ static inline bool buffer_realloc(struct Buffer* buffer, uint32_t new_size, bool
     // 安全复制数据
     uint32_t used = buffer_used(buffer);
     uint32_t safe_used = MIN(used, new_size - 1);
-    uint32_t first_chunk = MIN(buffer -> size - buffer -> start, safe_used);
-    
-    memcpy(new_buf, old_buf + buffer -> start, first_chunk);
-    if (safe_used > first_chunk) {
-        memcpy(new_buf + first_chunk, old_buf, safe_used - first_chunk);
+
+    if(old_buf){
+        uint32_t first_chunk = MIN(buffer -> size - buffer -> start, safe_used);
+        
+        memcpy(new_buf, old_buf + buffer -> start, first_chunk);
+        if (safe_used > first_chunk) {
+            memcpy(new_buf + first_chunk, old_buf, safe_used - first_chunk);
+        }
     }
 
     // 原子化更新缓冲区状态
@@ -265,7 +268,7 @@ static inline bool buffer_realloc(struct Buffer* buffer, uint32_t new_size, bool
     buffer -> size = new_size;
 
     // 最后释放旧内存
-    free(old_buf);
+    if(old_buf) free(old_buf);
     return true;
 }
 

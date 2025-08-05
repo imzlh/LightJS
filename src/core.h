@@ -46,8 +46,9 @@ enum {
 #define PIPE_WRITE (1 << 1)
 #define PIPE_AIO (1 << 2)
 #define PIPE_SOCKET (1 << 3)
-#define PIPE_THREADSAFE (1 << 4)
-#define PIPE_PTY (1 << 5)
+#define PIPE_RDHUP (1 << 4)
+#define PIPE_THREADSAFE (1 << 5)
+#define PIPE_PTY (1 << 6)
 
 #define SSL_VERIFY (1)
 #define SSL_PRESET_SUITEB (1 << 1)
@@ -330,7 +331,7 @@ void LJS_init_timer(JSContext* ctx);
 JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, bool iopipe, EvFD** ref);
 JSValue LJS_NewU8Pipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
 JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
-EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj);
+EvFD* LJS_OverrideFDPipe(JSContext *ctx, JSValueConst obj);
 
 // Core event loop
 bool evcore_init();
@@ -343,6 +344,7 @@ bool evfd_read(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback ca
 bool evfd_readsize(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool evfd_readline(EvFD* evfd, uint32_t buf_size, uint8_t* buffer, EvReadCallback callback, void* user_data);
 bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size, EvWriteCallback callback, void* user_data);
+bool evfd_write2(EvFD* evfd, const uint8_t* data, uint32_t size, EvWriteCallback callback, void* user_data);
 bool evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size, const struct sockaddr *addr, socklen_t addr_len, EvWriteCallback callback, void* user_data);
 bool evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvPipeToNotify notify, void* nopaque);
 bool evfd_close(EvFD* evfd);
@@ -433,6 +435,22 @@ bool LJS_init_crypto(JSContext *ctx);
 // finalizer
 void __js_destroy_process(JSContext* ctx);
 
+// sourcemap api
+#ifdef LJS_FEATURE_SOURCE_MAP
+typedef struct {
+    const char *original_file;
+    int original_line;
+    int original_column;
+    const char *function_name;
+    int found;
+} MappingResult;
+
+bool js_has_sourcemap(const char *file_path);
+int js_load_sourcemap(JSContext *ctx, const char *file_path, JSValue sourcemap_obj);
+int js_load_sourcemap_cjson(JSContext *ctx, const char *file_path, const char *json_str);
+MappingResult js_get_source_mapping(const char *file_path, int generated_line, int generated_column);
+#endif
+
 // --------------- HELPER FUNCTIONS ------------------------
 void free_js_malloc(JSRuntime *rt, void *opaque, void *ptr);
 void free_malloc(JSRuntime* rt, void* opaque, void* ptr);
@@ -499,6 +517,7 @@ static __maybe_unused void __write_cb(EvFD* evfd, bool success, void* opaque){
 }
 
 static inline int __fputs(const char* str, EvFD* fd){
+    if(!fd) return -1;  // note! pstdout/err can be null
     char* str2 = strdup2(str);
     if(!str2) return -1;
 #ifdef LJS_DEBUG

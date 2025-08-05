@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <threads.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,7 @@
 
 #ifdef LJS_MBEDTLS
 #include <mbedtls/version.h>
+#include <mbedtls/base64.h>
 #endif
 
 #ifdef LJS_LIBEXPAT
@@ -200,12 +202,18 @@ static char* js_module_format(JSContext *ctx,
     const char *module_base_name, const char *module_name, void *opaque)
 {
     App* app = JS_GetContextOpaque(ctx);
+
+#ifdef LJS_DEBUG
+    printf("resolve module: %s, base=%s\n", module_name, module_base_name);
+#endif
+
     if(JS_IsFunction(ctx, app -> module_format)){
         JSValue argv[2] = {
-            JS_NewString(ctx, module_base_name),
             JS_NewString(ctx, module_name),
+            JS_NewString(ctx, module_base_name)
         };
         JSValue ret = JS_Call(ctx, app -> module_format, JS_UNDEFINED, 2, argv);
+        for(int i = 0; i < 2; i ++) JS_FreeValue(ctx, argv[i]);
         if(JS_IsException(ret)){
             LJS_ThrowWithError(ctx, "failed to resolve module format", NULL);
             return NULL;
@@ -214,16 +222,21 @@ static char* js_module_format(JSContext *ctx,
             const char* modpath = JS_ToCString(ctx, ret);
             char* modpath_dup = js_strdup(ctx, modpath);
             JS_FreeCString(ctx, modpath);
+            JS_FreeValue(ctx, ret);
             return modpath_dup;
         }else{
             LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild return value of custom module format",
                 "return value must be a string(module name or path) contains module format.");
+            JS_FreeValue(ctx, ret);
             return NULL;
         }
     }else if(module_name[0] == '.'){
         char* module_name_path = LJS_resolve_path(module_name, module_base_name);
         if(!resolve_module_path(&module_name_path)){
-            LJS_Throw(ctx, EXCEPTION_IO, "Stat file failed: %s", NULL, strerror(errno));
+#ifdef LJS_DEBUG
+            printf("resolve module path: E: %s\n", module_name);
+#endif
+            LJS_Throw(ctx, EXCEPTION_IO, "failed to resolve module %s: %s", NULL, module_name, strerror(errno));
             free(module_name_path);
             return NULL;
         }
@@ -390,15 +403,75 @@ read_body:
     return body;
 }
 
+static inline size_t urldecode(const char *src, size_t src_len, uint8_t *dst) {
+    size_t i, j = 0;
+    for (i = 0; i < src_len; i++) {
+        if (src[i] == '%' && i + 2 < src_len && isxdigit(src[i+1]) && isxdigit(src[i+2])) {
+            uint8_t hi = src[i+1];
+            uint8_t lo = src[i+2];
+            hi = hi <= '9' ? hi - '0' : (hi & 0x0F) + 9; // 处理16进制
+            lo = lo <= '9' ? lo - '0' : (lo & 0x0F) + 9;
+            dst[j++] = (hi << 4) | lo;
+            i += 2;
+        } else if (src[i] == '+') {
+            dst[j++] = ' ';
+        } else {
+            dst[j++] = src[i];
+        }
+    }
+    return j;
+}
+
+static int parse_data_url(const char *url, 
+                   char **mime_type, 
+                   uint8_t **data, 
+                   size_t *data_len) {
+    if (strncmp(url, "data:", 5) != 0) return -1;
+    const char *comma = strchr(url, ',');
+    if (!comma) return -1;
+
+    const char *header_start = url + 5;
+    size_t header_len = comma - header_start;
+    char *header = malloc(header_len + 1);
+    memcpy(header, header_start, header_len);
+    header[header_len] = '\0';
+
+    int is_base64 = 0;
+    char *base64_ptr = strstr(header, ";base64");
+    if (base64_ptr) {
+        is_base64 = 1;
+        *base64_ptr = '\0'; // 截断base64标记
+    }
+    *mime_type = header[0] ? strdup(header) : strdup("text/plain;charset=US-ASCII");
+    free(header);
+
+    const char *data_part = comma + 1;
+    size_t data_part_len = strlen(data_part);
+
+    if (is_base64) {
+        size_t max_len = (data_part_len + 3) / 4 * 3;
+        *data = malloc(max_len +1);
+        *data_len = max_len; // 输入输出参数
+        base64_decode(data_part, data_part_len, *data, data_len);
+        (*data)[*data_len] = '\0';
+    } else {
+        *data = malloc(data_part_len +1);
+        *data_len = urldecode(data_part, data_part_len, *data);
+        (*data)[*data_len] = '\0';
+    }
+
+    return 0;
+}
+
 static JSModuleDef *js_module_loader(JSContext *ctx,
                               const char *_modname, void *opaque)
 {
     JSModuleDef *m;
-    char* buf;
+    char* buf = NULL;
     uint32_t buf_len;
     App* app = JS_GetContextOpaque(ctx);
     bool use_loader = JS_IsFunction(ctx, app -> module_loader);
-    const char* module_name;
+    const char* module_name = NULL;
     bool free_url = false;
 
     if(use_loader){
@@ -411,9 +484,12 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
         module_name = _modname;
         if(JS_IsString(ret)){
             size_t __len;
-            buf = (char*)JS_ToCStringLen(ctx, &__len, ret);
+            const char* tmp = JS_ToCStringLen(ctx, &__len, ret);
+            buf = strdup(tmp);
             buf_len = __len;
             JS_FreeValue(ctx, ret);
+            JS_FreeCString(ctx, tmp);
+            use_loader = false; // use default meta loader
             goto compile;
         }else if((m = module_getdef2(ctx, ret)) != NULL){
             goto set_meta;
@@ -456,7 +532,6 @@ compile:
     /* compile the module */
     func_val = JS_Eval(ctx, buf, buf_len, _modname,
         JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-    free(buf);
     if (JS_IsException(func_val))
         return NULL;
 
@@ -486,6 +561,64 @@ set_meta:
     }
     JS_FreeValue(ctx, meta_obj);
 
+    // load source mapping?
+#ifdef LJS_FEATURE_SOURCE_MAP
+    if(use_loader){
+        char* mname = NULL;
+        if(module_name){
+            mname = js_strdup(ctx, module_name);
+        }else{
+            JSValue meta = JS_MKPTR(JS_TAG_MODULE, m);
+            JSValue name = JS_GetPropertyStr(ctx, meta, "name");
+            const char* modname = JS_ToCString(ctx, name);
+            JS_FreeValue(ctx, name);
+            if(modname){
+                module_name = js_strdup(ctx, modname);
+                JS_FreeCString(ctx, modname);
+            }
+        }
+
+        if(js_has_sourcemap(mname)) goto finalizer;
+
+        // find sourcemap url
+        // find last sourceMappingURL comment
+        char* last_comment = NULL;
+        char* p = buf;
+        while((p = strstr(p, "//# sourceMappingURL=")) != NULL) last_comment = p;
+        if(last_comment){
+            last_comment += 21;
+
+            // parse
+            char* sourcemap = NULL;
+            if(memcmp(last_comment, "data:", 5) == 0){
+                // parse data url
+                char* mime_type = NULL;
+                size_t data_len = 0;
+                if(parse_data_url(last_comment, &mime_type, (void*)&sourcemap, &data_len) != 0){
+                    goto finalizer;
+                }
+            }else{
+                URL_data url = {0}, base = {0};
+                LJS_parse_url(mname, &base, NULL);
+                if(!LJS_parse_url(last_comment, &url, &base)){
+                    goto finalizer;
+                }
+                if(!url.protocol || memcmp(url.protocol, "file", 5) == 0){
+                    // read from file
+                    sourcemap = (char*)read_file(url.path, &buf_len);
+                }else{
+                    sourcemap = simple_sync_http_request(ctx, &url, &buf_len);
+                }
+            }
+            js_load_sourcemap_cjson(ctx, mname, sourcemap);
+        }
+
+finalizer:
+        js_free(ctx, mname);
+    }
+#endif
+
+    if(buf) free(buf);
     if(free_url) LJS_free_url(&url);
     return m;
 }
@@ -502,18 +635,6 @@ char* js_resolve_module(JSContext* ctx, const char* module_name){
             return NULL;
         }
     }
-}
-
-static JSValue js_module_set_handler(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
-    if(argc != 1 || !JS_IsFunction(ctx, argv[0]))
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "module.setHandler(handler: function): void");
-
-    App* app = JS_GetContextOpaque(ctx);
-
-    if(!JS_IsUndefined(app -> module_loader))
-        JS_FreeValue(ctx, app -> module_loader);
-    app -> module_loader = JS_DupValue(ctx, argv[0]);
-    return JS_UNDEFINED;
 }
 
 // static inline char* resolve_module(JSContext *ctx, const char *module_name, const char *base_dir) {
@@ -546,16 +667,12 @@ static JSValue js_require(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     // free(resolved_path);
     // if(base) JS_FreeCString(ctx, base);
     // return ret;
-    return JS_EXCEPTION;
+    return JS_ThrowReferenceError(ctx, "require() is not supported in LightJS");
 }
 
 bool LJS_init_module(JSContext *ctx){
     JSValue global_obj = JS_GetGlobalObject(ctx);
-    JSValue proto_sethandler = JS_NewCFunction(ctx, js_module_set_handler, "setModuleResolver", 1);
     JSValue func_require = JS_NewCFunction(ctx, js_require, "require", 1);
-    // require.prototype.setHandler = setModuleResolver;
-    JS_DefinePropertyValueStr(ctx, func_require, "setHandler", proto_sethandler, JS_PROP_C_W_E);
-    // globalThis.require = require;
     JS_SetPropertyStr(ctx, global_obj, "require", func_require);
     
     JS_FreeValue(ctx, global_obj);
@@ -1002,7 +1119,7 @@ static void worker_main_loop(App* app, JSValue func){
     worker_exit(app, 0, "worker thread exited");
 }
 
-int js_interrupt_handler(JSRuntime *rt, void *opaque){
+static int js_interrupt_handler(JSRuntime *rt, void *opaque){
     App* app = JS_GetRuntimeOpaque(rt);
     if(app -> interrupt <= 0){
         return !!app -> interrupt;
@@ -1023,6 +1140,15 @@ int js_interrupt_handler(JSRuntime *rt, void *opaque){
     return current >= app -> interrupt;
 }
 
+#ifdef LJS_FEATURE_SOURCE_MAP
+static void js_backtrace_filter(int* row, int* col, const char* fname){
+    MappingResult mr = js_get_source_mapping(fname, *row, *col);
+    if(!mr.found) return;
+    *row = mr.original_line;
+    *col = mr.original_column;
+}
+#endif
+
 void LJS_init_runtime(JSRuntime* rt){
     // Promise logger
     JS_SetHostPromiseRejectionTracker(rt, js_handle_promise_reject, NULL);
@@ -1035,6 +1161,10 @@ void LJS_init_runtime(JSRuntime* rt){
 
     // tick function
     JS_SetInterruptHandler(rt, js_interrupt_handler, NULL);
+    
+#ifdef LJS_FEATURE_SOURCE_MAP
+    JS_SetBackTraceFilter(rt, js_backtrace_filter);
+#endif
 
 #ifdef LJS_DEBUG
     JS_SetDumpFlags(rt, JS_DUMP_LEAKS | JS_DUMP_OBJECTS | JS_DUMP_SHAPES);
@@ -1793,6 +1923,18 @@ bool js_dispatch_global_event(JSContext *ctx, const char * name, JSValue data, b
 
 // ------- base64 --------
 
+#ifdef LJS_MBEDTLS
+void base64_encode(const uint8_t *input, size_t len, char *output) {
+    size_t olen = 0;
+    mbedtls_base64_encode((void*)output, len * 4, &olen, (void*)input, len);
+    output[olen] = '\0';
+}
+
+void base64_decode(const char *input, size_t len, uint8_t *output, size_t *output_len) {
+    size_t olen = 0;
+    mbedtls_base64_decode((void*)output, len * 4, &olen, (void*)input, len);
+}
+#else
 static const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 void base64_encode(const uint8_t *input, size_t len, char *output) {
@@ -1833,6 +1975,7 @@ void base64_decode(const char *input, size_t len, uint8_t *output, size_t *outpu
     }
     *output_len = j; // 更新真实输出长度
 }
+#endif
 
 static JSValue js_atob(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     
@@ -2040,6 +2183,25 @@ static JSValue js_module_dump(JSContext *ctx, JSValueConst this_val, int argc, J
     return JS_NewUint8Array(ctx, data, len, free_js_malloc, NULL, false);
 }
 
+static JSValue js_module_set_meta(JSContext* ctx, JSValueConst this_val, JSValueConst value){
+    JSModuleDef *def = (JSModuleDef*)JS_GetOpaque2(ctx, this_val, js_module_class_id);
+    if(!def) return JS_EXCEPTION;
+
+    JSValue meta = JS_MKPTR(JS_TAG_MODULE, def);
+    JS_CopyObject(ctx, value, meta, UINT32_MAX);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_module_get_meta(JSContext* ctx, JSValueConst this_val){
+    JSModuleDef *def = (JSModuleDef*)JS_GetOpaque2(ctx, this_val, js_module_class_id);
+    if(!def) return JS_EXCEPTION;
+
+    JSValue meta = JS_MKPTR(JS_TAG_MODULE, def);
+    JSValue ret = JS_NewObject(ctx);
+    JS_CopyObject(ctx, meta, ret, UINT32_MAX);
+    return ret;
+}
+
 static inline JSModuleDef* module_getdef(JSValueConst this_val){
     return (JSModuleDef*)JS_GetOpaque(this_val, js_module_class_id);
 }
@@ -2064,7 +2226,8 @@ static const JSClassDef js_module_class = {
 
 static const JSCFunctionListEntry js_module_proto_funcs[] = {
     JS_CGETSET_DEF("ptr", js_module_get_ptr, NULL),
-    JS_CFUNC_DEF("dump", 0, js_module_dump)
+    JS_CFUNC_DEF("dump", 0, js_module_dump),
+    JS_CGETSET_DEF("meta", js_module_get_meta, js_module_set_meta),
 };
 
 //  ---------- VM features ----------
@@ -2275,9 +2438,12 @@ static JSValue js_vm_setvmopts(JSContext* ctx, JSValueConst this_val, int argc, 
             JS_SetMaxStackSize(JS_GetRuntime(ctx), stack);
         }
     });
-    EACHOPT("enablePromiseReport", JS_IsBool, {
+    EACHOPT("disablePromiseReport", JS_IsBool, {
         bool disable = JS_ToBool(ctx, valtmp);
         catch_error = disable;
+#ifdef LJS_DEBUG
+        printf("Promise report %s by user\n", disable ? "disabled" : "enabled");
+#endif
     });
     if(JS_GetContextOpaque(ctx) == JS_GetRuntimeOpaque(JS_GetRuntime(ctx))){
         EACHOPT2("eventNotifier", JS_IsFunction, {
@@ -2289,12 +2455,44 @@ static JSValue js_vm_setvmopts(JSContext* ctx, JSValueConst this_val, int argc, 
         JS_FreeValue(ctx, app -> tick_func);
         app -> tick_func = JS_DupValue(ctx, valtmp);
     })
+    EACHOPT2("moduleResolver", JS_IsFunction, {
+        App* app = JS_GetContextOpaque(ctx);
+        JS_FreeValue(ctx, app -> module_format);
+        app -> module_format = JS_DupValue(ctx, valtmp);
+    })
+    EACHOPT2("moduleLoader", JS_IsFunction, {
+        App* app = JS_GetContextOpaque(ctx);
+        JS_FreeValue(ctx, app -> module_loader);
+        app -> module_loader = JS_DupValue(ctx, valtmp);
+    })
 
     return JS_UNDEFINED;
 }
 
 #undef EACHOPT
 #undef EACHOPT2
+
+static JSValue js_vm_loadSourceMap(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+    if(argc < 2 || !JS_IsString(argv[0]) || (!JS_IsString(argv[1]) && !JS_IsObject(argv[1]))){
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "loadSourceMap() requires 2 string argument",
+            "loadSourceMap(module_name: string, source_map: string | Object): boolean"
+        );
+    }
+
+    const char* module_name = JS_ToCString(ctx, argv[0]);
+    if(!module_name) return JS_EXCEPTION;
+
+    JSValue ret;
+    if(JS_IsString(argv[1])){
+        const char* source_map = JS_ToCString(ctx, argv[1]);
+        ret = JS_NewBool(ctx, js_load_sourcemap_cjson(ctx, module_name, source_map));
+        JS_FreeCString(ctx, source_map);
+    }else{
+        ret = JS_NewBool(ctx, js_load_sourcemap(ctx, module_name, argv[1]));
+    }
+    JS_FreeCString(ctx, module_name);
+    return ret;
+}
 
 const JSCFunctionListEntry js_vm_funcs[] = {
     JS_CFUNC_DEF("gc", 0, js_vm_gc),
@@ -2304,6 +2502,7 @@ const JSCFunctionListEntry js_vm_funcs[] = {
     JS_CFUNC_DEF("pack", 1, js_vm_pack),
     JS_CFUNC_DEF("unpack", 1, js_vm_unpack),
     JS_CFUNC_DEF("setVMOptions", 1, js_vm_setvmopts),
+    JS_CFUNC_DEF("loadSourceMap", 2, js_vm_loadSourceMap),
     // JS_CFUNC_DEF("compileModule", 1, js_vm_compileModule)
 };
 

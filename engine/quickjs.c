@@ -236,6 +236,7 @@ struct JSRuntime {
 
     JSModuleNormalizeFunc *module_normalize_func;
     JSModuleLoaderFunc *module_loader_func;
+    JSStackFilterFunc *stack_filter;
     void *module_loader_opaque;
     /* timestamp for internal use in module evaluation */
     int64_t module_async_evaluation_next_timestamp;
@@ -6674,6 +6675,10 @@ static bool can_add_backtrace(JSValueConst obj)
     return true;
 }
 
+void JS_SetBackTraceFilter(JSRuntime* rt, JSStackFilterFunc* filter){
+    rt->stack_filter = filter;
+}
+
 #define JS_BACKTRACE_FLAG_SKIP_FIRST_LEVEL (1 << 0)
 /* only taken into account if filename is provided */
 #define JS_BACKTRACE_FLAG_SINGLE_LEVEL     (1 << 1)
@@ -6745,6 +6750,7 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
             goto done;
         if (filename) {
             i++;
+            if(rt->stack_filter) rt->stack_filter(&line_num, &col_num, filename);
             dbuf_printf(&dbuf, "    at %s", filename);
             if (line_num != -1)
                 dbuf_printf(&dbuf, ":%d:%d", line_num, col_num);
@@ -6805,6 +6811,7 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
                 atom_str = b->filename ? JS_AtomToCString(ctx, b->filename) : NULL;
                 dbuf_printf(&dbuf, " (%s", atom_str ? atom_str : "<null>");
                 JS_FreeCString(ctx, atom_str);
+                if(rt->stack_filter) rt->stack_filter(&line_num, &col_num, filename);
                 if (line_num1 != -1)
                     dbuf_printf(&dbuf, ":%d:%d", line_num1, col_num1);
                 dbuf_putc(&dbuf, ')');

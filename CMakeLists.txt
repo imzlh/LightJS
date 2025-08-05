@@ -127,6 +127,7 @@ xoption(QJS_ENABLE_ASAN "Enable AddressSanitizer (ASan)" OFF)
 xoption(QJS_ENABLE_MSAN "Enable MemorySanitizer (MSan)" OFF)
 xoption(QJS_ENABLE_TSAN "Enable ThreadSanitizer (TSan)" OFF)
 xoption(QJS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (UBSan)" OFF)
+xoption(LJS_ENABLE_SOURCE_MAP "Enable source map support" ON)
 
 if(QJS_ENABLE_ASAN)
 message(STATUS "Building with ASan")
@@ -182,6 +183,11 @@ add_link_options(
     -fno-sanitize-recover=all
     -fno-omit-frame-pointer
 )
+endif()
+
+if(LJS_ENABLE_SOURCE_MAP)
+    message(STATUS "Building with source map support")
+    add_compile_definitions(LJS_FEATURE_SOURCE_MAP)
 endif()
 
 # QuickJS library

@@ -17,13 +17,16 @@ type FetchOptions<WebSocket> = {
  * 使用类似于WebAPI的fetch方法发起HTTP请求<br>
  * 注意
  *  - 不支持压缩，如果需要请自行通过`compress`模块实现
- *  - 支持WebSocket，但需要指定`websocket: true`选项或者`ws://`协议，返回`WebSocket`
+ *  - 支持WebSocket，但需要指定`ws://`协议，返回`WebSocket`
  *  - 支持内建的MbedTLS加密库，但需要指定`https/wss://`协议
  *  - 由于使用C实现，某些方面会与JS实现(如nodejs)有差异
- * @param url 
- * @param options 
+ *  - `websocket`选项不被LightJS理解，但是指定可以让TypeScript提示正确的类型
  */
 declare function fetch(url: string, options?: FetchOptions<false | undefined>): Promise<import('http').Response>;
+
+/**
+ * 发起WebSocket请求，请求成功后兑现已经连接成功的WebSocket对象
+ */
 declare function fetch(url: string, options: FetchOptions<true>): Promise<import('http').WebSocket>;
 
 interface FormData {
@@ -68,9 +71,14 @@ declare module 'http' {
         /**
          * Setter/ Getter for the onmessage event handler.
          */
-        onmessage: (data: Uint8Array | string, is_fin: boolean) => void;
+        onmessage: (data: Uint8Array, is_fin: boolean, is_binary: boolean) => void;
+        ping(data: string | Uint8Array): void;
     
-        readonly ended: Promise<void>;
+        /**
+         * 若兑现undefined，表示非正常关闭，否则为正常关闭，包含code和message字段<br>
+         * LightJS没有error事件或不会reject，请小心使用这个Promise
+         */
+        readonly closed: Promise<undefined | { code: number, message: string }>;
         readonly cookies: Cookies;
     }
 
@@ -115,11 +123,40 @@ declare module 'http' {
 
         private constructor();
 
-        send(data: string | Uint8Array | ArrayBuffer): this;
+        /**
+         * 等待所有数据流写入后关闭连接
+         */
         close(): void;
+
+        /**
+         * 复用HTTP/1.1连接<br>
+         * 复用需要`done()`后调用，只有HTTP请求完全结束后才能使用<br>
+         * 复用后仍旧使用调用`reuse()`的`Handler`实例
+         */
         reuse(): Promise<this>;
+
+        /**
+         * 升级为WebSocket请求
+         */
         ws(): WebSocket;
+
+        /**
+         * 标记状态码，默认200 OK
+         */
         status(code: number): this;
+        
+        /**
+         * 发送数据给客户端<br>
+         * 不建议一次性发大量数据，建议分批发送，或者使用`chunked()`开启chunked模式<br>
+         * 发送一个小包后使用`wait()`等待成功发送，防止OOM
+         * @param data 数据
+         */
+        send(data: string | Uint8Array | ArrayBuffer): this;
+
+        /**
+         * 等待写入任务完成，没有任务则立即兑现
+         */
+        wait(): Promise<void>;
 
         /**
          * 结束header内容，立即发送给客户端。之后就可以流式写入body了。<br>
@@ -177,5 +214,7 @@ declare module 'http' {
 
         readonly request: Response;
         readonly headers: Headers;
+
+        get finished(): boolean;
     }
 }

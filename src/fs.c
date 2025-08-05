@@ -56,9 +56,16 @@ static JSValue js_syncio_read(JSContext *ctx, JSValueConst this_val, int argc, J
 
     uint32_t len = 0;
     if(argc == 1) JS_ToUint32(ctx, &len, argv[0]);
-    uint8_t* buf = js_malloc(ctx, len ? BUFSIZ : len);
+    if(len == 0) len = BUFSIZ;
 
-    uint32_t recv = read(pipe -> fd, &buf, len);
+    uint8_t* buf = js_malloc(ctx, len);
+    ssize_t recv = read(pipe -> fd, buf, len);
+
+    if(recv == -1){
+        js_free(ctx, buf);
+        return LJS_Throw(ctx, EXCEPTION_IO, "failed to read: %s", NULL, strerror(errno));
+    }
+
     return JS_NewUint8Array(ctx, buf, recv, free_js_malloc, NULL, false);
 }
 
@@ -88,7 +95,6 @@ static JSValue js_syncio_close(JSContext *ctx, JSValueConst this_val, int argc, 
     if(!pipe) return JS_EXCEPTION;
 
     close(pipe -> fd);
-    js_free(ctx, pipe);
     return JS_UNDEFINED;
 }
 
@@ -139,7 +145,7 @@ static JSValue js_syncio_tell(JSContext *ctx, JSValueConst this_val, int argc, J
     return JS_NewInt64(ctx, pos);
 }
 
-static JSValue js_syncio_eof(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+static JSValue js_syncio_get_eof(JSContext *ctx, JSValueConst this_val){
     struct SyncPipe *pipe = JS_GetOpaque(this_val, js_syncpipe_class_id);
     if(!pipe) return JS_EXCEPTION;
     if(pipe -> size == -1) return JS_FALSE;
@@ -207,11 +213,11 @@ static const JSCFunctionListEntry js_syncpipe_funcs[] = {
     JS_CFUNC_DEF("close", 0, js_syncio_close),
     JS_CFUNC_DEF("seek", 2, js_syncio_seek),
     JS_CFUNC_DEF("tell", 0, js_syncio_tell),
-    JS_CFUNC_DEF("eof", 0, js_syncio_eof),
     JS_CFUNC_DEF("prealloc", 2, js_syncio_prealloc),
     JS_CGETSET_DEF("size", js_syncio_get_size, NULL),
     JS_CGETSET_DEF("block", js_syncio_get_block, js_syncio_set_block),
     JS_CGETSET_DEF("fd", js_syncio_get_fd, NULL),
+    JS_CGETSET_DEF("eof", js_syncio_get_eof, NULL),
     JS_PROP_STRING_DEF("[Symbol.toStringTag]", "SyncPipe", JS_PROP_CONFIGURABLE),
 };
 

@@ -247,7 +247,7 @@ else \
 #define CHECK_U8PIPE_CLOSED2(pipe, promise) if(u8pipe_closed(pipe)){ js_reject(promise, "U8Pipe is closed"); return js_get_promise(promise); }
 #define CHECK_U8PIPE_READABLE(pipe) if(!u8pipe_is(ctx, pipe, PIPE_READ)) return JS_ThrowTypeError(ctx, "U8Pipe is not readable");
 #define CHECK_U8PIPE_WRITEABLE(pipe) if(!u8pipe_is(ctx, pipe, PIPE_WRITE)) return JS_ThrowTypeError(ctx, "U8Pipe is not writable");
-#define CHECK_U8PIPE_LOCKED(pipe, read) if(u8pipe_locked(ctx, pipe, read)) return JS_ThrowTypeError(ctx, "U8Pipe is locked");
+#define CHECK_U8PIPE_LOCKED(pipe, read) if(u8pipe_locked(ctx, pipe, read)) return JS_ThrowTypeError(ctx, "%s of u8pipe is locked", read ? "read" : "write");
 
 #define U8PIPE_UNREF(pipe) if(u8pipe_unref(pipe)) u8pipe_free(JS_GetRuntime(ctx), pipe);
 #define U8PIPE_UNREF_RT(pipe) if(u8pipe_unref(pipe)) u8pipe_free(rt, pipe);
@@ -292,13 +292,17 @@ static void u8pipe_handle_close(JSRuntime *rt, struct U8Pipe_T* pipe){
                 if (getsockopt(evfd_getfd(fdpipe -> fd, NULL), SOL_SOCKET, SO_ERROR, &error, &errlen) == -1)
                     error = errno;
 
-                if(error == 0){
-                    js_resolve(fdpipe -> close, JS_UNDEFINED);
-                } else {
-                    js_reject(fdpipe -> close, strerror(error));
+                if(fdpipe -> close){
+                    if(error == 0){
+                        js_resolve(fdpipe -> close, JS_UNDEFINED);
+                    } else {
+                        js_reject(fdpipe -> close, strerror(error));
+                    }
+                    fdpipe -> close = NULL;
                 }
-            }else{
+            }else if(fdpipe -> close){
                 js_resolve(fdpipe -> close, JS_UNDEFINED);
+                fdpipe -> close = NULL;
             }
         }
         // pipe -> pipe.fdpipe  -> fd was freed by evfd
@@ -320,6 +324,10 @@ static inline void u8pipe_free(JSRuntime *rt, struct U8Pipe_T* pipe) {
     if(!u8pipe_closed(pipe)) u8pipe_handle_close(rt, pipe);
     if(pipe -> refcount == 0){
         if(pipe -> fdpipe){
+            // if(pipe -> pipe.fdpipe -> close){
+            //     js_resolve(pipe -> pipe.fdpipe -> close, JS_UNDEFINED);
+            //     pipe -> pipe.fdpipe -> close = NULL;
+            // }
             js_free_rt(rt, pipe -> pipe.fdpipe);
         }else{
             js_free_rt(rt, pipe -> pipe.pipe);
@@ -476,10 +484,10 @@ static int evread_callback(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_s
 
 #define EXPORT_EOF(pipe, buf, size) JSValue buf = JS_NewUint8Array(ctx, pipe -> pipe.fdpipe -> data_before_eof, size, free_js_malloc, NULL, false);
 
-#define U8PIPE_FD_EOF(pipe){ \
-    pipe -> pipe.fdpipe -> data_before_eof = NULL; \
+#define U8PIPE_FD_EOF(pipe) \
+    if(pipe -> pipe.fdpipe -> close) \
     js_resolve(pipe -> pipe.fdpipe -> close, JS_UNDEFINED); \
-}
+    pipe -> pipe.fdpipe -> close = NULL;
 
 #define NEW_TASK(_promise, _pipe) \
     struct PipeRWTask* task = js_malloc(ctx, sizeof(struct PipeRWTask)); \
@@ -863,10 +871,15 @@ static void evclose_callback(EvFD* fd, bool rdhup, void* opaque){
     struct U8Pipe_T* pipe = (struct U8Pipe_T*)opaque;
     struct FDPipe_T* fdpipe = pipe -> pipe.fdpipe;
     JSContext* ctx = fdpipe -> ctx;
-    U8PIPE_UNREF(pipe);
-    fdpipe -> closed = true;
 
-    js_resolve(fdpipe -> close, JS_UNDEFINED);
+    if(fdpipe -> close){
+        js_resolve(fdpipe -> close, JS_UNDEFINED);
+        fdpipe -> close = NULL;
+    }
+
+    fdpipe -> closed = true;
+    U8PIPE_FD_EOF(pipe);
+    U8PIPE_UNREF(pipe);
 }
 
 static JSValue js_U8Pipe_constructor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv) {
@@ -1362,8 +1375,16 @@ JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag,
     return obj;
 }
 
-EvFD* LJS_GetPipeFD(JSContext *ctx, JSValueConst obj){
+EvFD* LJS_OverrideFDPipe(JSContext *ctx, JSValueConst obj){
     struct U8Pipe_T* pipe = JS_GetOpaque(obj, u8pipe_class_id);
-    if(!pipe) return NULL;
-    return pipe -> pipe.fdpipe ? pipe -> pipe.fdpipe -> fd : NULL;
+    if(!pipe || !pipe -> pipe.fdpipe) return NULL;
+
+    // override
+    EvFD* evfd = pipe -> pipe.fdpipe -> fd;
+    evfd_onclose(evfd, NULL, NULL); // cleanup
+    evfd_enable_rac(evfd, false);   // read after close feature
+    pipe -> pipe.fdpipe -> closed = true;
+    U8PIPE_FD_EOF(pipe);
+    U8PIPE_UNREF(pipe);
+    return evfd;
 }

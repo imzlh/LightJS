@@ -47,20 +47,14 @@ static inline JSValue LJS_Throw(JSContext *ctx, ExceptionType type, const char *
     JSValue error_obj = JS_NewError(ctx);
 
     // Allocate the error message
-    size_t msg_len = strlen(msg) * 3;
-    char* msg2 = js_malloc(ctx, msg_len);   // guessed
-    if (!msg2) {
-        JS_FreeValue(ctx, error_obj);
-        return JS_ThrowOutOfMemory(ctx);
-    }
+    char msg2[1024];
 
     va_start(args, help);
-    vsnprintf(msg2, msg_len, msg, args);
+    vsnprintf(msg2, sizeof(msg2), msg, args);
     va_end(args);
 
     JS_DefinePropertyValue(ctx, error_obj, JS_ATOM_name, JS_NewString(ctx, __exception_type_str[type]), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_DefinePropertyValue(ctx, error_obj, JS_ATOM_message, JS_NewString(ctx, msg2), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
-    js_free(ctx, msg2);
 
     if (help) {
         JS_DefinePropertyValueStr(ctx, error_obj, "help", JS_NewString(ctx, help), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
@@ -79,25 +73,16 @@ static inline JSValue LJS_Throw(JSContext *ctx, ExceptionType type, const char *
 }
 
 static inline JSValue LJS_ThrowWithError(JSContext *ctx, const char *msg, const char *help){
-    char* error_str = js_malloc(ctx, 1024);
-    if(!error_str) return JS_ThrowOutOfMemory(ctx);
     JSValue error = JS_GetException(ctx);
     JSValue message = JS_GetPropertyStr(ctx, error, "message");
-    JSValue type = JS_GetPropertyStr(ctx, error, "name");
-    char* message_str = "Unknown Error";
-    char* type_str = "Error";
+    const char* message_str = "Unknown Error";
     if (JS_IsString(message)){
-        message_str = (char*)JS_ToCString(ctx, message);
+        message_str = JS_ToCString(ctx, message);
+        JS_FreeValue(ctx, message);
     }
-    if (JS_IsString(type)){
-        type_str = (char*)JS_ToCString(ctx, type);
-    }
-    snprintf(error_str, 1024, "%s: %s", type_str, message_str);
-    JS_Throw(ctx, LJS_Throw(ctx, EXCEPTION_ERROR, error_str, help));
-    js_free(ctx, error_str);
-    JS_FreeValue(ctx, error);
+    LJS_Throw(ctx, EXCEPTION_ERROR, "%s: %s", help, msg, message_str);
     JS_FreeValue(ctx, message);
-    JS_FreeValue(ctx, type);
+    JS_FreeValue(ctx, error);
     return JS_EXCEPTION;
 }
 

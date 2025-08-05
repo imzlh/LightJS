@@ -222,10 +222,12 @@ extern bool exiting;
 static void js_signal_handler(int sig){
     pthread_rwlock_rdlock(&signal_lock);
     struct list_head *el, *el1;
+    bool found_handler = false;
     list_for_each_safe(el, el1, &signal_list){
         struct signal_data* data = list_entry(el, struct signal_data, list);
         if(data -> sig == sig){
             App* app = (App*)JS_GetContextOpaque(data -> ctx);
+            found_handler = true;
             if(app -> thread == pthread_self()){
                 // exec in current thread
                 JSValue ret = JS_Call(data -> ctx, data -> handler, JS_UNDEFINED, 0, NULL);
@@ -245,6 +247,14 @@ static void js_signal_handler(int sig){
             }
         }
     }
+
+    if(!found_handler && (sig == SIGINT || sig == SIGTERM)){
+        // exit
+#ifdef LJS_DEBUG
+        printf("jsvm: exit with signal %d\n", sig);
+#endif
+        exiting = true;
+    }
     pthread_rwlock_unlock(&signal_lock);
 }
 
@@ -252,6 +262,14 @@ static struct sigaction default_sa = {
     .sa_flags = SA_RESTART,
     .sa_handler = js_signal_handler
 };
+
+__attribute__((constructor)) void init_process_class(void) {
+    // bind exiting signal
+    struct sigaction sa = default_sa;
+    sa.sa_flags |= SA_NODEFER;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
 
 static JSValue js_set_signal(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if (argc < 2 || !JS_IsFunction(ctx, argv[1]) || !JS_IsNumber(argv[0])) {
@@ -564,10 +582,12 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     }
 
     if(inherit){
-        // Note: This will block stdin but not stdout
-        evfd = evfd_new(master_fd, PIPE_WRITE | PIPE_READ | PIPE_PTY, EVFD_BUFSIZE, NULL, NULL);
-        evfd_pipeTo(pstdin, evfd, NULL, NULL, NULL, NULL);
-        evfd_pipeTo(evfd, pstdout, NULL, NULL, NULL, NULL);
+        if(!evfd_closed(pstdout) && !evfd_closed(pstderr)){
+            // Note: This will block stdin but not stdout
+            evfd = evfd_new(master_fd, PIPE_WRITE | PIPE_READ | PIPE_PTY, EVFD_BUFSIZE, NULL, NULL);
+            if(!evfd_closed(evfd)) evfd_pipeTo(pstdin, evfd, NULL, NULL, NULL, NULL);
+            if(!evfd_closed(evfd)) evfd_pipeTo(evfd, pstdout, NULL, NULL, NULL, NULL);
+        }
     }else{
         JSValue pipe = LJS_NewFDPipe(ctx, master_fd, PIPE_READ | PIPE_WRITE | PIPE_PTY, true, &evfd);
         JS_SetPropertyStr(ctx, class_obj, "pipe", pipe);
@@ -626,11 +646,11 @@ __attribute__((destructor)) void subproc_destructor(void){
     struct list_head* el, *el1;
     list_for_each_safe(el, el1, &process_list){
 #ifdef LJS_DEBUG
-        printf("Process %d is not exited, kill it with SIGINT\n", list_entry(el, struct process_class, link) -> pid);
+        printf("Process %d is not exited, kill it with SIGQUIT\n", list_entry(el, struct process_class, link) -> pid);
 #endif
         struct process_class* obj = list_entry(el, struct process_class, link);
         // kill force
-        kill(obj -> pid, SIGINT);
+        kill(obj -> pid, SIGQUIT);
     }
 }
 

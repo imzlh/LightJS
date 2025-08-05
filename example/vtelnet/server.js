@@ -58,8 +58,8 @@ export class TelnetServer {
 
                         switch(buf[0]){
                             case TP.NAWS:
-                                const [rows, cols] = [buf[1], buf[2]];
-                                pipe.ttySize = { rows, cols };
+                                const [, rows, cols] = buf;
+                                pipe.ttySize = [ rows, cols ];
                                 break;
                             case TP.LINEMODE:
                                 const mode = buf[1];
@@ -103,7 +103,7 @@ export class TelnetServer {
                 console.log(`Pty closed`);
             });
             pty.pipe.ttyTitle = "LightJS Telnet Server";
-            pty.pipe.ttySize = { rows: 24, cols: 80 };
+            pty.pipe.ttySize = [24, 80];
             console.log(`New client connected, pid=${pty.pid}, active=${pty.code}`)
         }catch(e){
             console.error('Handle client error', e);
@@ -119,6 +119,7 @@ export class TelnetServer {
     constructor(addr){
         this.#server_close = bind(addr, (client, addr) => {
             console.log(`New connection from`, addr);
+            TelnetServer.handle(client);
         });
     }
 

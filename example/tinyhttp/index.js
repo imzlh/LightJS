@@ -5,6 +5,7 @@ import { read, stat } from "fs";
 
 const server = new Server("0.0.0.0:8000");
 const indexPage = read(import.meta.dirname + "/index.html", true);
+const baseDir = import.meta.dirname;
 
 /**
  * 
@@ -21,6 +22,8 @@ server.callback = async (client, addr) => {
     if(url.path === '/'){
         client.status(200).send(indexPage).done();
         return;
+    }else if(url.path == '/show_error'){
+        throw new Error('Error');
     }
 
     if(client.request.method == 'POST'){
@@ -31,18 +34,19 @@ server.callback = async (client, addr) => {
     }
 
     try{
-        if(stat(url.path).isDirectory){
+        if(stat(baseDir + url.path).isDirectory){
             let rurl = url.toString() ;
             if(!rurl.endsWith('/')) rurl += '/';
             rurl += 'index.html';
             client.status(301).header("Location", rurl).done(true);
             return;
         }
-    }catch{
+    }catch(e){
+        console.error('E', baseDir + url.path, e);
         client.status(404).send("Not Found").done();
         return;
     }
-    serveFile(client, import.meta.dirname + url.path);
+    serveFile(client, baseDir + url.path);
 };
 
 server.run();

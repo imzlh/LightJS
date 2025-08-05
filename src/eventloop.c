@@ -35,7 +35,6 @@
 #include <netdb.h>
 #include <fcntl.h>
 #include <linux/aio_abi.h>
-#include <sys/ioctl.h>
 #include <sys/epoll.h>
 #include <sys/timerfd.h>
 #include <sys/eventfd.h>
@@ -78,6 +77,10 @@
 // unstable: thread-safe EvFD support
 // #define LJS_EVLOOP_THREADSAFE
 
+#ifndef LJS_EVLOOP_FEATURE_PTY
+#define EVFD_PTY EVFD_NORM
+#endif
+
 enum EvFDType {
     EVFD_NORM,
     EVFD_UDP,
@@ -86,7 +89,9 @@ enum EvFDType {
     EVFD_TIMER,
     EVFD_SSL,
     // diff: will attempt to read infinitely to avoid data lost when subprocess exiting
+#ifdef LJS_EVLOOP_FEATURE_PTY
     EVFD_PTY,
+#endif
     // DTLS removed since v1.1
 };
 
@@ -182,8 +187,13 @@ struct EvFD {
     } aio;
 
     int fd[2];  // if type==EVFD_AIO, fd[1] is the real fd
-    enum EvFDType type;
+    enum EvFDType type: 4;
 
+    bool task_based :1;    // task-based or raw EvFD
+    bool rdhup_feature :1; // whether to use RDHUP feature for socket-based EvFD
+    bool rdhup :1;         // already hup?
+    bool __reserved :1;    // reserved for future use
+                           
     // specific for each type
     union {
         struct UDPContext* udp;
@@ -194,9 +204,6 @@ struct EvFD {
 #endif
     } proto;
 
-    bool task_based;    // task-based or raw EvFD
-    bool rdhup_feature; // whether to use RDHUP feature for socket-based EvFD
-    bool rdhup;         // already hup?
     union {
         struct {
             struct list_head read_tasks;
@@ -234,7 +241,7 @@ struct EvFD {
     bool destroy;       // whether to destroy the fd before next loop
 
     uint32_t epoll_flags;
-    uint64_t modify_flag;    // target epoll_flags
+    uint32_t modify_flag;    // target epoll_flags
 
     void* opaque;
     struct list_head link;
@@ -264,10 +271,8 @@ static mbedtls_x509_crt tls_global_cert;
 static pthread_rwlock_t tls_cert_mod_lock;
 
 // for modified flag
-#define LOCK_FLAG(flags, flag)      ((flags) | (uint64_t)(flag) << 32)
-#define IS_LOCKED(flags, flag)      ((flags) & (uint64_t)(flag) << 32)
-#define UNLOCK_FLAG(flags, flag)    ((flags) & ~((uint64_t)(flag) << 32))
-#define ERASE_FLAG(flags, flag)     ((flags) & ~((uint64_t)(flag) << 32 | (flag)))
+#define LOCK_READ_FLAG (1 << 30)
+#define LOCK_WRITE_FLAG (1 << 31)
 
 // use system random to generate random numbers
 static int default_rng(void* userdata, unsigned char* output, size_t output_size) {
@@ -293,6 +298,10 @@ void __trace_debug(int events, int direction) {
 #endif
 
 #define TRACE_NSTDEVENTS(evfd, add) if((evfd) -> fd[0] > STDERR_FILENO){ TRACE_EVENTS(evfd, add); }
+
+static inline void __useless_call(void){
+    // no effect
+}
 
 // linux_kernel aio syscall
 static inline int io_setup(unsigned nr, aio_context_t* ctxp) {
@@ -383,6 +392,14 @@ static inline void evfd_ctl(struct EvFD* evfd, uint32_t epoll_flags) {
 #ifdef LJS_EVLOOP_THREADSAFE
     evfd_perform(evfd, 0);
 #endif
+
+#ifdef LJS_DEBUG
+    if(!(epoll_flags & (EPOLLHUP | EPOLLERR))){
+        // trigger trap
+        __useless_call();
+    }
+#endif
+
     if (epoll_flags == evfd -> epoll_flags) {
         if (evfd -> modify_flag) {
             // delete from modify_tasks
@@ -414,10 +431,6 @@ static inline void evfd_ctl(struct EvFD* evfd, uint32_t epoll_flags) {
     }
 
 end:
-#ifdef LJS_DEBUG
-    printf("evfd_ctl: fd=%d, r=%d, w=%d\n", evfd -> fd[0], epoll_flags & EPOLLIN, epoll_flags & EPOLLOUT);
-#endif
-
 #ifdef LJS_EVLOOP_THREADSAFE
     evfd_perform_end(evfd, 0);
 #else
@@ -427,10 +440,10 @@ end:
 
 // cautious when using this function
 // it may make the fd inaccessible but not closed
-static inline void evfd_mod(struct EvFD* evfd, bool add, int epoll_flags) {
-    int flag = evfd -> modify_flag ? evfd -> modify_flag : evfd -> epoll_flags;
-    if (add)    flag &= LOCK_FLAG(flag, epoll_flags);
-    else        flag &= ERASE_FLAG(flag, epoll_flags);
+static inline void evfd_mod(struct EvFD* evfd, bool add, uint32_t epoll_flags) {
+    uint64_t flag = evfd -> modify_flag ? evfd -> modify_flag : evfd -> epoll_flags;
+    if (add)    flag |= epoll_flags;
+    else        flag &= ~epoll_flags;
     evfd_ctl(evfd, flag);
 }
 
@@ -462,9 +475,11 @@ static inline void evfd_mod_start(bool force) {
 #endif
                 keepalive_evfd[keepalive_count++] = task;
             }
-        } else {
+        } else if(task -> modify_flag) {    // never == 0
             // process marked modify_flag
-            uint32_t flag = (task -> modify_flag >> 32) | (task -> modify_flag & 0xffffffff);
+            uint32_t flag = task -> modify_flag & (UINT32_MAX >> 2);
+            if(flag & LOCK_READ_FLAG) flag |= EPOLLIN;
+            if(flag & LOCK_WRITE_FLAG) flag |= EPOLLOUT;
             struct epoll_event ev = {
                .events = flag,
                .data.ptr = task
@@ -475,7 +490,9 @@ static inline void evfd_mod_start(bool force) {
 #endif
             } else {
 #ifdef LJS_DEBUG
-                printf("epoll_ctl: fd=%d, events=%ld, r=%ld, w=%ld\n", task -> fd[0], task -> modify_flag, task -> modify_flag & EPOLLIN, task -> modify_flag & EPOLLOUT);
+                printf("epoll_ctl: fd=%d, events=%d, r=%d, w=%d, c=%d, rh=%d\n", task -> fd[0], 
+                    task -> modify_flag, task -> modify_flag & EPOLLIN, task -> modify_flag & EPOLLOUT,
+                    task -> modify_flag & EPOLLHUP, task -> modify_flag & EPOLLRDHUP);
 #endif
                 task -> epoll_flags = task -> modify_flag;
             }
@@ -535,11 +552,11 @@ static inline void free_task(struct Task* task);
 
 // required to check whether fd should EPOLLIN/EPOLLOUT
 static void check_queue_status(EvFD* evfd) {
-    if (evfd -> destroy) return;
+    if (evfd -> destroy || !evfd -> task_based) return;
 
-    uint32_t new_events = evfd -> modify_flag | EPOLLLT;
+    uint32_t new_events = evfd -> modify_flag | EPOLLERR | EPOLLLT;
     if(evfd -> u.task.tcp_connected == 0){
-        new_events = EPOLLLT | EPOLLOUT | EPOLLHUP | EPOLLERR;
+        new_events = EPOLLOUT | EPOLLHUP | EPOLLERR;
         goto modify;
     }
 
@@ -765,7 +782,7 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
 #ifdef LJS_DEBUG
             perror("evfd_read");
 #endif
-            goto _return;
+            goto __sense_tcp;
         }    // error
 
         // strip_if_is_\n
@@ -846,7 +863,8 @@ start:
 mainloop:
     list_for_each_prev_safe(cur, tmp, &evfd -> u.task.read_tasks) {
         struct Task* task = list_entry(cur, struct Task, list);
-        // if(evfd -> destroy) return; // everything is destroyed
+        // if(evfd -> destroy) return;  // everything is destroyed
+        if(!evfd -> task_based) return; // overrided by event-based fd
 
         // linux inotify
         // XXX: use struct to compute before for better performance?
@@ -925,7 +943,7 @@ main:   // while loop
         uint32_t bufsize = buffer_used(evfd -> incoming_buffer);
         if (bufsize == 0) {
             // no data
-            list_add(&task -> list, &evfd -> u.task.read_tasks);
+            list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
             TRACE_EVENTS(evfd, +1);
             goto end;
         }
@@ -1020,7 +1038,7 @@ main:   // while loop
 
             case EV_TASK_READONCE: // readonce
                 // int available;
-                // ioctl(fd, FIONREAD, &available);
+                // fcntl(fd, FIONREAD, &available);
                 // available = available > task -> total_size ? task -> total_size : available;
 
                 buffer_pop(evfd -> incoming_buffer, task -> buffer -> buffer, n);
@@ -1049,19 +1067,29 @@ main:   // while loop
             goto _return;   // block task execution
 
             _continue:
-                if (evfd -> destroy) goto _return;   // task already destroyed
+                if (evfd -> destroy || !evfd -> task_based)
+                    goto _return;   // task already destroyed
                 free_task(task);
             continue;
 
             __break:
-                if (evfd -> destroy) goto _return;
-                list_add(&task -> list, &evfd -> u.task.read_tasks);
+                if (evfd -> destroy || !evfd -> task_based) goto _return;
+                list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
                 TRACE_EVENTS(evfd, +1);
             break;
 
             _break:
-                if (evfd -> destroy) goto _return;   // task already destroyed
+                if (evfd -> destroy || !evfd -> task_based)
+                    goto _return;// task already destroyed
                 free_task(task);
+            break;
+
+            __sense_tcp:
+                // sense whether tcp connection is closed or dead
+                char sense_buf;
+                if (recv(fd, &sense_buf, 1, MSG_PEEK | MSG_DONTWAIT) == 0)
+                    handle_close(fd, evfd, false);
+                goto _return;
             break;
 
             default:    // never reach here
@@ -1088,12 +1116,13 @@ end:
     }
     check_queue_status(evfd);
 _return:
-    evfd -> u.task.rw_state &= 0b01;   // set read state
+    if(evfd -> task_based)
+        evfd -> u.task.rw_state &= 0b01;   // set read state
 }
 
 static inline int blksize_get(int fd) {
     int blksize;
-    if (ioctl(fd, BLKSSZGET, &blksize) != 0) return 512;
+    if (fcntl(fd, BLKSSZGET, &blksize) != 0) return 512;
     return blksize;
 }
 
@@ -1193,10 +1222,10 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
         if(evfd -> destroy) goto _return;
     }
 
-    struct list_head* cur, * tmp;
+    struct list_head* current, *head = &evfd -> u.task.write_tasks;
     // loop:
-    list_for_each_prev_safe(cur, tmp, &evfd -> u.task.write_tasks) {
-        struct Task* task = list_entry(cur, struct Task, list);
+    while(evfd -> task_based && (current = head -> next) != head) {
+        struct Task* task = list_entry(current, struct Task, list);
 
         if (task -> type == EV_TASK_PIPETO) {
             struct PipeToTask* pt = task -> cb.pipeto;
@@ -1237,7 +1266,7 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
         } else if (task -> type == EV_TASK_NOOP) {
             list_del(&task -> list);
             TRACE_EVENTS(evfd, -1);
-            task -> cb.sync(evfd, true, task -> opaque);
+            task -> cb.sync(evfd, !evfd -> destroy, task -> opaque);
 
             free2(task);
             continue;
@@ -1301,6 +1330,7 @@ _return:
 }
 
 static void clear_tasks(EvFD* evfd, bool rdhup, bool call_close) {
+    assert(evfd -> task_based);
     struct list_head* cur, * tmp;
     bool has_data = evfd -> incoming_buffer && !buffer_is_empty(evfd -> incoming_buffer);
     // read queue
@@ -1320,14 +1350,15 @@ static void clear_tasks(EvFD* evfd, bool rdhup, bool call_close) {
 
             if (task -> cb.read) {
                 if (has_data) {
+                    struct Buffer* buf = task -> buffer;
                     // copy to user buffer
-                    uint32_t readed = buffer_copyto(evfd -> incoming_buffer, task -> buffer -> buffer, task -> buffer -> size - 1);
+                    uint32_t readed = buffer_copyto(evfd -> incoming_buffer, buf -> buffer, buf -> size - 1);
 
                     // Note: readline requires \0 terminator
-                    if (task -> buffer -> end < task -> buffer -> size - 1 && task -> type == EV_TASK_READLINE)
-                        task -> buffer -> buffer[task -> buffer -> end] = '\0';    // end with \0
+                    if (buf -> end < buf -> size - 1 && task -> type == EV_TASK_READLINE)
+                        buf -> buffer[buf -> end] = '\0';    // end with \0
 
-                    task -> cb.read(evfd, true, task -> buffer -> buffer, readed, task -> opaque);
+                    task -> cb.read(evfd, true, buf -> buffer, readed, task -> opaque);
                     has_data = false;
                 } else {
                     //     task -> cb.sync(evfd, task -> opaque);
@@ -1339,6 +1370,8 @@ _continue:
             free_task(task);
             TRACE_EVENTS(evfd, -1);
         }
+
+        init_list_head(&evfd -> u.task.read_tasks);
     }
     if(rdhup) return;   // only close read tasks
 
@@ -1364,22 +1397,25 @@ _continue:
             if (task -> type == EV_TASK_NOOP)
                 task -> cb.sync(evfd, true, task -> opaque);
             else
-                task -> cb.write(evfd, true, task -> opaque);
+                task -> cb.write(evfd, false, task -> opaque);
         }
 
 _continue2:
         free_task(task);
         TRACE_EVENTS(evfd, -1);
     }
+    init_list_head(&evfd -> u.task.write_tasks);
 
     // close queue
-    if (call_close)
+    if (call_close){
         list_for_each_prev_safe(cur, tmp, &evfd -> u.task.close_tasks) {
             struct Task* task = list_entry(cur, struct Task, list);
             task -> cb.close(evfd, false, task -> opaque);
             free2(task);
             TRACE_NSTDEVENTS(evfd, -1);
         }
+        init_list_head(&evfd -> u.task.close_tasks);
+    }
 }
 
 static void handle_close(int fd, EvFD* evfd, bool is_rdhup) {
@@ -1390,6 +1426,7 @@ static void handle_close(int fd, EvFD* evfd, bool is_rdhup) {
 
     if (evfd -> destroy || (is_rdhup && evfd -> rdhup)) return;
     evfd_ctl(evfd, EPOLL_CTL_FREE); // will free in next epoll loop
+    bool prev_destroy = evfd -> destroy;
     if(!is_rdhup) evfd -> destroy = true;
 
     // Note: SSL should read again after close, to clear SSL buffer
@@ -1409,9 +1446,11 @@ static void handle_close(int fd, EvFD* evfd, bool is_rdhup) {
         evfd -> u.cb.close(evfd, is_rdhup, evfd -> u.cb.close_opaque);
 
     // close fd
-    if (!evfd -> destroy && !is_rdhup) switch (evfd -> type) {
+    if (!prev_destroy && !is_rdhup) switch (evfd -> type) {
         case EVFD_NORM:
+#ifdef LJS_EVLOOP_FEATURE_PTY
         case EVFD_PTY:
+#endif
         case EVFD_TIMER:
         case EVFD_INOTIFY:
             close(fd);
@@ -1562,7 +1601,7 @@ bool evcore_init() {
 }
 
 #define CHECK_TO_BE_CLOSE(fd) if(fd -> destroy) goto _continue;
-
+#define CHECK_OVERRIDED(fd) if(!fd -> task_based) goto _continue;
 bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
     struct epoll_event events[MAX_EVENTS];
     uint8_t evloop_abort_loop = 0;
@@ -1614,7 +1653,8 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
             struct EvFD* evfd = events[i].data.ptr;
 
 #ifdef LJS_DEBUG
-            printf("epoll_wait: consumed, fd=%d, r=%d, w=%d, e=%d\n", evfd_getfd(evfd, NULL), events[i].events & EPOLLIN, events[i].events & EPOLLOUT, events[i].events & EPOLLERR);
+            printf("epoll_wait: consumed, fd=%d, r=%d, w=%d, e=%d, rh=%d\n", 
+                evfd_getfd(evfd, NULL), events[i].events & EPOLLIN, events[i].events & EPOLLOUT, events[i].events & EPOLLERR, events[i].events & EPOLLRDHUP);
 #endif
 
             if (evfd -> task_based) {
@@ -1632,9 +1672,10 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                 }
 
                 CHECK_TO_BE_CLOSE(evfd);
+                CHECK_OVERRIDED(evfd);
 
-//                 if (events[i].events & EPOLLOUT && 0 == evfd -> u.task.tcp_connected){
-//                     // check if connected
+                if (events[i].events & EPOLLOUT && 0 == evfd -> u.task.tcp_connected){
+                    // check if connected
 //                     int err = 0;
 //                     socklen_t len = sizeof(err);
 //                     getsockopt(evfd -> fd[0], SOL_SOCKET, SO_ERROR, &err, &len);
@@ -1645,15 +1686,17 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
 //                         handle_close(evfd_getfd(evfd, NULL), evfd);
 //                         goto _continue;
 //                     }
-//                     evfd -> u.task.tcp_connected = true;
-//                     if(evfd -> type == EVFD_SSL){
-//                         int _1 = 1;
-//                         setsockopt(evfd -> fd[0], IPPROTO_TCP, TCP_QUICKACK, &_1, sizeof(_1));
-//                         setsockopt(evfd -> fd[0], IPPROTO_TCP, TCP_NODELAY, &_1, sizeof(_1));
-//                     }
-//                 }
+                    evfd -> u.task.tcp_connected = true;
+                    // if(evfd -> type == EVFD_SSL){
+                    //     int _1 = 1;
+                    //     setsockopt(evfd -> fd[0], IPPROTO_TCP, TCP_QUICKACK, &_1, sizeof(_1));
+                    //     setsockopt(evfd -> fd[0], IPPROTO_TCP, TCP_NODELAY, &_1, sizeof(_1));
+                    // }
+                }
                 if (events[i].events & EPOLLIN) switch (evfd -> type) {
+#ifdef LJS_EVLOOP_FEATURE_PTY
                     case EVFD_PTY:
+#endif
                     case EVFD_NORM:
                     case EVFD_TIMER:
                     case EVFD_UDP:
@@ -1710,6 +1753,7 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                 }
 
                 CHECK_TO_BE_CLOSE(evfd);
+                CHECK_OVERRIDED(evfd);
 
                 if (events[i].events & EPOLLOUT) {
 #ifdef LJS_MBEDTLS
@@ -1731,11 +1775,11 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                         handle_write(evfd -> fd[0], evfd, NULL);
                     }
                 }
+                check_queue_status(evfd);
             } else {
                 if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
                     evfd -> rdhup = !!(events[i].events & EPOLLRDHUP);
-                    evfd -> u.cb.close(evfd, evfd -> rdhup, evfd -> u.cb.close_opaque);
-                    TRACE_NSTDEVENTS(evfd, -1);
+                    handle_close(evfd_getfd(evfd, NULL), evfd, evfd -> rdhup);
                 }
 
                 CHECK_TO_BE_CLOSE(evfd);
@@ -1815,13 +1859,17 @@ void evcore_destroy() {
 
 // Make async tasks synchronous(blocking)
 bool evfd_syncexec(EvFD* pipe) {
-    if (epoll_fd == -1) return false;
-    tassert(pipe -> type != EVFD_INOTIFY && pipe -> type != EVFD_TIMER && !pipe -> destroy);
+    if (epoll_fd == -1 || evfd_closed(pipe)) return false;
+    tassert(pipe -> type != EVFD_INOTIFY && pipe -> type != EVFD_TIMER);
 
     int fd = evfd_getfd(pipe, NULL);
-    int flags = ioctl(fd, F_GETFL, 0);
-    if (-1 == flags || -1 == ioctl(fd, F_SETFL, flags & ~O_NONBLOCK))
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (-1 == flags || -1 == fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)){
+#ifdef LJS_DEBUG
+        perror("fcntl");
+#endif
         return false;
+    }
 
     // XXX: this logic is not safe, but it's a workaround for now.
     if (pipe -> type == EVFD_AIO) {
@@ -1833,7 +1881,7 @@ bool evfd_syncexec(EvFD* pipe) {
     handle_read(fd, pipe, NULL, NULL);
     if (!pipe -> destroy) handle_write(fd, pipe, NULL);
 
-    ioctl(fd, F_SETFL, flags);
+    fcntl(fd, F_SETFL, flags);
     return true;
 }
 
@@ -1955,6 +2003,7 @@ EvFD* evfd_new(int fd, int flag, uint32_t bufsize,
     // is socket?
     if (flag & PIPE_SOCKET) {
         evfd -> u.task.tcp_connected = 0;
+        if(flag & PIPE_RDHUP) evfd -> rdhup_feature = true;
     }else{
         evfd -> u.task.tcp_connected = -1; // not a socket
     }
@@ -1964,7 +2013,7 @@ EvFD* evfd_new(int fd, int flag, uint32_t bufsize,
         struct Task* task = malloc2(sizeof(struct Task));
         task -> cb.close = close_callback;
         task -> opaque = close_opaque;
-        list_add(&task -> list, &evfd -> u.task.close_tasks);
+        list_add_tail(&task -> list, &evfd -> u.task.close_tasks);
         TRACE_NSTDEVENTS(evfd, +1);
     }
 
@@ -1999,7 +2048,12 @@ EvFD* evfd_new(int fd, int flag, uint32_t bufsize,
         }
         evfd -> u.task.offset = 0;
     } else {
-        fcntl(fd, F_SETFL, O_NONBLOCK | fcntl(fd, F_GETFL, 0));
+        if (fcntl(fd, F_SETFL, O_NONBLOCK | fcntl(fd, F_GETFL, 0))){
+#ifdef LJS_DEBUG
+            perror("fcntl");
+#endif
+            goto error;
+        }
     }
 
     // push to eventloop
@@ -2159,7 +2213,7 @@ bool evfd_remove_sni(const char* name) {
 void evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey) {
     struct SSL_data* data = malloc2(sizeof(struct SSL_data));
     evfd_remove_sni(name);  // remove old cert
-    list_add(&data -> link, &cert_list);
+    list_add_tail(&data -> link, &cert_list);
     data -> name = name;
     data -> server_name = server_name;
     data -> cacert = cacert;
@@ -2232,7 +2286,7 @@ startup:
         }
     }
     bool try_direct = list_empty(&evfd -> u.task.read_tasks);
-    list_add(&task -> list, &evfd -> u.task.read_tasks);
+    list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
     check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
 
@@ -2331,7 +2385,7 @@ startup:
     }
 
     bool try_direct = list_empty(&evfd -> u.task.read_tasks);
-    list_add(&task -> list, &evfd -> u.task.read_tasks);
+    list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
     check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
 
@@ -2402,7 +2456,7 @@ startup:
         }
     }
     bool try_direct = list_empty(&evfd -> u.task.read_tasks);
-    list_add(&task -> list, &evfd -> u.task.read_tasks);
+    list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
     check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
 
@@ -2446,9 +2500,9 @@ bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
             goto error;
 
         // add to list
-        list_add(&task -> list, &evfd -> u.task.write_tasks);
+        list_add_tail(&task -> list, &evfd -> u.task.write_tasks);
     } else {
-        list_add(&task -> list, &evfd -> u.task.write_tasks);
+        list_add_tail(&task -> list, &evfd -> u.task.write_tasks);
     }
 
     TRACE_EVENTS(evfd, +1);
@@ -2467,6 +2521,19 @@ error:
     buffer_free(buf);
     free2(task);
     return false;
+}
+
+// different from evfd_write, it will unshift data to buffer head
+// which can grand high priority to write
+bool evfd_write2(EvFD* evfd, const uint8_t* data, uint32_t size,
+    EvWriteCallback callback, void* user_data){
+    if(!evfd_write(evfd, data, size, callback, user_data))
+        return false;
+    // pop and unshift data to buffer head
+    struct list_head* task = evfd -> u.task.write_tasks.prev;
+    list_del(task);
+    list_add(task, &evfd -> u.task.write_tasks);    // high priority
+    return true;
 }
 
 // UDP write
@@ -2502,8 +2569,9 @@ bool evfd_onclose(EvFD* evfd, EvCloseCallback callback, void* user_data) {
     task -> type = EV_TASK_CLOSE;
     task -> cb.close = callback;
     task -> opaque = user_data;
-    list_add(&task -> list, &evfd -> u.task.close_tasks);
+    list_add_tail(&task -> list, &evfd -> u.task.close_tasks);
     TRACE_NSTDEVENTS(evfd, +1);
+    check_queue_status(evfd);
 
     return true;
 }
@@ -2540,8 +2608,8 @@ bool evfd_pipeTo(EvFD* from, EvFD* to, EvPipeToFilter filter, void* fopaque, EvP
     ptask -> notify = notify;
     ptask -> filter_opaque = fopaque;
     ptask -> notify_opaque = nopaque;
-    list_add(&task -> list, &from -> u.task.read_tasks);
-    list_add(&task2 -> list, &to -> u.task.write_tasks);
+    list_add_tail(&task -> list, &from -> u.task.read_tasks);
+    list_add_tail(&task2 -> list, &to -> u.task.write_tasks);
 
     TRACE_EVENTS(from, +1);
     TRACE_EVENTS(to, +1);
@@ -2575,6 +2643,7 @@ bool evfd_close2(EvFD* evfd) {
     if (evfd -> destroy) return false;
     if (evfd -> fd[0] <= STDERR_FILENO) close_stdpipe(evfd);
     if (evfd -> task_based) clear_tasks(evfd, false, false);
+    else if(evfd -> u.cb.close) evfd -> u.cb.close(evfd, false, evfd -> u.cb.close_opaque);
     if (evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
     evfd_ctl(evfd, EPOLL_CTL_FREE);
     evfd -> destroy = true;
@@ -2624,12 +2693,19 @@ bool evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCal
     if (evfd -> incoming_buffer) buffer_free(evfd -> incoming_buffer);
     TRACE_NSTDEVENTS(evfd, +1);   // force add task
     evfd -> incoming_buffer = NULL;
+    evfd -> task_based = false;
     evfd -> u.cb.read = rcb;
     evfd -> u.cb.write = wcb;
     evfd -> u.cb.close = ccb;
     evfd -> u.cb.read_opaque = read_opaque;
     evfd -> u.cb.write_opaque = write_opaque;
     evfd -> u.cb.close_opaque = close_opaque;
+
+    // active event
+    int ev = EPOLLLT | EPOLLHUP | EPOLLERR;
+    if(rcb) ev |= EPOLLIN;
+    if(wcb) ev |= EPOLLOUT;
+    evfd_mod(evfd, true, ev);
     return true;
 }
 
@@ -2638,12 +2714,15 @@ bool evfd_override(EvFD* evfd, EvReadCallback rcb, void* read_opaque, EvWriteCal
  * After this, cb will be called with opaque as argument.
  */
 bool evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque) {
-    tassert(!evfd -> destroy);
+    tassert(!evfd -> destroy && evfd -> task_based);
 
     if ( // already completed
         (wait_read && list_empty(&evfd -> u.task.read_tasks) && !(evfd -> u.task.rw_state & 0b10)) ||
         (!wait_read && list_empty(&evfd -> u.task.write_tasks) && !(evfd -> u.task.rw_state & 0b01))
-    ) cb(evfd, true, opaque);
+    ){
+        cb(evfd, true, opaque);
+        return true;
+    }
 
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
@@ -2653,9 +2732,9 @@ bool evfd_wait(EvFD* evfd, bool wait_read, EvSyncCallback cb, void* opaque) {
     task -> opaque = opaque;
     task -> buffer = NULL;
     if (wait_read) {
-        list_add(&task -> list, &evfd -> u.task.read_tasks);
+        list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
     } else {
-        list_add(&task -> list, &evfd -> u.task.write_tasks);
+        list_add_tail(&task -> list, &evfd -> u.task.write_tasks);
     }
     TRACE_EVENTS(evfd, +1);
     return true;
@@ -2671,12 +2750,13 @@ struct __sync_cb_arg {
 static void __sync_cb(EvFD* evfd, bool success, void* opaque) {
     struct __sync_cb_arg* arg = opaque;
     if (arg -> count++ == 1) {
-        evfd_close(evfd);
+        // evfd_close(evfd);
         arg -> cb(evfd, success, arg -> opaque);
         free2(arg);
     }
 }
 
+// wait read and write all completed
 bool evfd_wait2(EvFD* evfd, EvSyncCallback cb, void* opaque) {
     struct __sync_cb_arg* arg = malloc2(sizeof(struct __sync_cb_arg));
     if (!arg) return false;
@@ -2689,22 +2769,20 @@ bool evfd_wait2(EvFD* evfd, EvSyncCallback cb, void* opaque) {
 bool evfd_yield(EvFD* evfd, bool yield_read, bool yield_write) {
     tassert(!evfd -> destroy);
     if (yield_read)     evfd_mod(evfd, false, EPOLLIN);
-    if (yield_write)    evfd_mod(evfd, true, EPOLLOUT);
+    if (yield_write)    evfd_mod(evfd, false, EPOLLOUT);
     return true;
 }
 
 bool evfd_consume(EvFD* evfd, bool consume_read, bool consume_write) {
     tassert(!evfd -> destroy);
-    int events = evfd -> epoll_flags;
-    if (consume_read) events |= EPOLLIN;
-    if (consume_write) events |= EPOLLOUT;
-    evfd_ctl(evfd, events);
+    if (consume_read)   evfd_mod(evfd, true, EPOLLIN);
+    if (consume_write)  evfd_mod(evfd, true, EPOLLOUT);
     return true;
 }
 
 // Get whether the evfd is closed
 bool evfd_closed(EvFD* evfd) {
-    return evfd -> destroy;
+    return !evfd || evfd -> destroy;
 }
 
 static inline EvFD* timer_new(uint64_t milliseconds, EvTimerCallback callback, void* user_data, bool once) {
@@ -2788,7 +2866,7 @@ settime:
             return NULL;
         }
         // register to timer list
-        list_add(&evfd -> link, &timer_list);
+        list_add_tail(&evfd -> link, &timer_list);
 
 #ifdef LJS_DEBUG
         printf("new timer fd:%d, s:%ld, ns:%ld, once:%d\n", fd, itss.tv_sec, itss.tv_nsec, once);
@@ -2807,7 +2885,8 @@ static inline bool timer_task(struct EvFD* evfd, EvTimerCallback callback, void*
     task -> type = EV_TASK_SYNC;
     task -> cb.timer = callback;
     task -> opaque = user_data;
-    list_add(&task -> list, &evfd -> u.task.read_tasks);
+    list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
+    check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);   // Note: eventfd starts with 1 task
     return true;
 }
@@ -2826,7 +2905,7 @@ EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* cbo
 EvFD* evcore_setTimeout(uint64_t milliseconds, EvTimerCallback callback, void* user_data) {
     struct EvFD* evfd = timer_new(milliseconds, callback, user_data, true);
     if (timer_task(evfd, callback, user_data)) return evfd;
-    evfd_close(evfd);
+    if(evfd) evfd_close(evfd);
     return NULL;
 }
 
@@ -2950,7 +3029,7 @@ EvFD* evcore_inotify(EvINotifyCallback callback, void* user_data) {
     task -> type = EV_TASK_READ;
     task -> cb.inotify = callback;
     task -> opaque = user_data;
-    list_add(&task -> list, &evfd -> u.task.read_tasks);
+    list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
     TRACE_EVENTS(evfd, +1);   // Note: inotify starts with 1 task
 
     return evfd;

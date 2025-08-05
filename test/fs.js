@@ -1,4 +1,4 @@
-import { copy, open, read, rename, scandir, stat, unlink, write } from "fs";
+import { copy, open, read, rename, scandir, stat, SyncPipe, unlink, write } from "fs";
 
 console.log('test fs');
 
@@ -23,6 +23,18 @@ test('copy', () => {
     assert(read("test3.txt", true) === "Hello World");
     unlink("test3.txt");
 });
+
+await test('syncpipe', () => {
+    const pipe = open('test2.txt', 'r+', 0o777, true);
+    console.log(pipe, SyncPipe);
+    pipe.write("Hello World", true);
+    pipe.seek(0, SyncPipe.SEEK_SET);
+    const res = pipe.read(10);
+    if(!res) throw new Error("Read failed");
+    console.log("read() result:", decodeStr(res));
+    assert(isEqual(res, encodeStr("Hello World")), "Read mismatch with write");
+    pipe.close();
+})
 
 await test("open", async () => {
     const pipe = open("test2.txt", "r+");

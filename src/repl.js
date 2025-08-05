@@ -30,7 +30,7 @@ import { Sandbox, setVMOptions } from 'vm';
 
 var interrupt = false, exiting = false;
 setVMOptions({
-    enablePromiseReport: false,
+    disablePromiseReport: true,
     eventNotifier: (ev, data) => {
         console.log("Event<", ev, '>', data);
     },

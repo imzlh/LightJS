@@ -80,7 +80,7 @@ int server_handle_accept(EvFD* evfd, bool success, uint8_t* buffer, uint32_t rea
     }
 
     // 转换为Pipe
-    JSValue pipe = LJS_NewFDPipe(data -> ctx, client_fd, PIPE_READ | PIPE_WRITE, false, NULL);
+    JSValue pipe = LJS_NewFDPipe(data -> ctx, client_fd, PIPE_READ | PIPE_WRITE | PIPE_SOCKET, false, NULL);
 
     // 调用on_connection回调
     JSValue on_connection = data -> on_connection;
@@ -106,8 +106,9 @@ static void server_handle_close(EvFD* fd, bool _, void* user_data) {
 static inline int socket_create(const char* protocol){
     if(memcmp(protocol, "tcp6", 4) == 0) return socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if(memcmp(protocol, "tcp", 3) == 0) return socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    if(memcmp(protocol, "udp6", 4) == 0) return socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
-    if(memcmp(protocol, "udp", 3) == 0) return socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(memcmp(protocol, "udp6", 4) == 0) return socket(AF_INET6, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(memcmp(protocol, "udp", 3) == 0) return socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(memcmp(protocol, "unix", 4) == 0) return socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
     errno = EADDRNOTAVAIL;
     return -1;
 }
@@ -185,6 +186,11 @@ static int socket_listen(int sockfd, const char* protocol, const char* host, uin
             .sun_family = AF_UNIX
         };
         strncpy(addr_un.sun_path, unix_path, sizeof(addr_un.sun_path)-1);
+
+        // pre-bind, check if path exists
+        if(access(unix_path, F_OK) == 0) {
+            unlink(unix_path);
+        }
 
         bindres = bind(sockfd, (struct sockaddr*)&addr_un, sizeof(addr_un));
     }
@@ -517,11 +523,15 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
         JS_ThrowTypeError(ctx, "bind: invalid address");
         goto fail1;
     }
-    JS_FreeCString(ctx, addr);
 
     // 绑定地址
     int sockfd = socket_create(bind_addr.protocol);
     uint32_t bufsize = BUFFER_SIZE;
+
+    if(sockfd == -1){
+        LJS_Throw(ctx, EXCEPTION_IO, "bind: failed to create socket: %s", NULL, strerror(errno));
+        goto fail2;
+    }
 
     JSValue onclose = JS_UNDEFINED;
     if(argc == 3) {
@@ -606,6 +616,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     }
 
     JSValue func = JS_NewCFunctionData(ctx, js_server_close, 0, 0, 1, (JSValueConst[]){ JS_MKPTR(JS_TAG_INT, evfd) });
+    JS_FreeCString(ctx, addr);
     return func;
 
 fail3:
@@ -705,7 +716,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
     int flag = 0;
     int cipher_count = 0;
     InitSSLOptions options = {0};
-    EvFD* fd = LJS_GetPipeFD(ctx, argv[0]);
+    EvFD* fd = LJS_OverrideFDPipe(ctx, argv[0]);
     if(fd == NULL) {
         return JS_ThrowTypeError(ctx, "handshake_ssl: invalid socket");
     }

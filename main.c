@@ -129,27 +129,6 @@ static size_t parse_limit(const char *arg) {
     return (size_t)(d * unit);
 }
 
-// signal listener
-static void exit_signal_handler(int sig) {
-#ifdef LJS_DEBUG
-    printf("Received signal %d, exiting...\n", sig);
-#endif
-
-    // kill all threads
-    exiting = true;
-}
-
-__attribute__((constructor)) void init_signal_handler() {
-    struct sigaction sa = {
-        .sa_handler = exit_signal_handler,
-        .sa_flags = SA_RESETHAND
-    };
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGQUIT, &sa, NULL);
-    sigaction(SIGABRT, &sa, NULL);
-}
-
 extern void __js_dump_not_resolved_promises();
 char* __progpath;
 int main(int argc, char **argv) {

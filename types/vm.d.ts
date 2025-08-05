@@ -18,6 +18,10 @@ declare module 'vm' {
         constructor();
         get pointer(): number;
         dump(): Uint8Array;
+        /**
+         * 可读可写，当读取时拷贝一个副本，修改副本不会影响原对象
+         */
+        meta: Record<string, any>;
     }
 
     /**
@@ -106,7 +110,7 @@ declare module 'vm' {
      * @param opts 
      */
     export function setVMOptions(opts: Partial<{
-        enablePromiseReport: boolean,
+        disablePromiseReport: boolean,
         memoryLimit: bigint,
         stackLimit: number,
         codeExecutionTimeout: number,
@@ -115,7 +119,28 @@ declare module 'vm' {
          * 手动接管代码是否取消执行，返回任何可以认作`true`的值将结束代码执行
          */
         tickCallback: (this: void) => any,
+        /**
+         * 接管模块路径解析，返回模块路径<br>
+         * 允许抛出错误，将被LightJS传递给用户
+         */
+        moduleResolver: (module_name: string, base_name: string) => string,
+        /**
+         * 解析模块，允许返回Module字节码（class Module），或返回JS内容<br>
+         * 谨慎返回字节码，可能会造成QuickJS崩溃<br>
+         * 字节码返回前，如果是模块，确保已经加载所有依赖，否则将报错
+         * @param module_name 已经被moduleResolver解析过的模块名
+         */
+        moduleLoader: (module_name: string) => Module | string,
     }>): void;
+
+    /**
+     * 为非标准模块添加source map，用于错误追踪时显示原始文件位置<br>
+     * 对于tsc esbuild等编译的模块非常有用<br>
+     * 如果你对模块名疑惑，可以cmake切换到debug编译查看日志
+     * @param module_name 名称，注意需要相对路径全名
+     * @param source_map JSON source map字符串或对象
+     */
+    export function loadSourceMap(module_name: string, source_map: string | object): boolean;
 
     export const version: {
         mbedtls?: string,        

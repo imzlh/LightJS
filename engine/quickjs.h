@@ -1309,6 +1309,7 @@ JS_EXTERN int JS_SetPropertyFunctionList(JSContext *ctx, JSValueConst obj,
 /* C module definition */
 
 typedef int JSModuleInitFunc(JSContext *ctx, JSModuleDef *m);
+typedef void JSStackFilterFunc(int* row, int* col, const char* filename);
 
 JS_EXTERN JSModuleDef *JS_NewCModule(JSContext *ctx, const char *name_str,
                                      JSModuleInitFunc *func);
@@ -1321,6 +1322,7 @@ JS_EXTERN int JS_SetModuleExport(JSContext *ctx, JSModuleDef *m, const char *exp
                                  JSValue val);
 JS_EXTERN int JS_SetModuleExportList(JSContext *ctx, JSModuleDef *m,
                                      const JSCFunctionListEntry *tab, int len);
+JS_EXTERN void JS_SetBackTraceFilter(JSRuntime* rt, JSStackFilterFunc* filter);
 
 /* Version */
 

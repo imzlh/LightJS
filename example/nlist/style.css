@@ -1,0 +1,48 @@
+body {
+    max-width: 50rem;
+    margin: 1rem auto;
+    background-color: #f7faff;
+}
+
+.container {
+    padding: 1rem;
+    background-color: #ffffff;
+    border-radius: .5rem;
+    box-shadow: .05rem 0 .35rem #ffffff;
+    overflow: hidden;
+}
+
+.container > a {
+    text-decoration: none;
+    color: rgb(45, 44, 44);
+    display: flex;
+    gap: 1rem;
+    margin: .75rem 0;
+}
+
+.name {
+    width: 60%;
+}
+
+.size {
+    min-width: 5rem;
+}
+
+h1 {
+    margin: 3rem 0 1rem 1rem;
+}
+
+i{
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    margin-right: 1em;
+}
+
+i.file{
+    background-image: url('data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20fill%3D%22currentColor%22%20class%3D%22bi%20bi-file-earmark-arrow-down%22%20viewBox%3D%220%200%2016%2016%22%3E%0A%20%20%3Cpath%20d%3D%22M8.5%206.5a.5.5%200%200%200-1%200v3.793L6.354%209.146a.5.5%200%201%200-.708.708l2%202a.5.5%200%200%200%20.708%200l2-2a.5.5%200%200%200-.708-.708L8.5%2010.293V6.5z%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M14%2014V4.5L9.5%200H4a2%202%200%200%200-2%202v12a2%202%200%200%200%202%202h8a2%202%200%200%200%202-2zM9.5%203A1.5%201.5%200%200%200%2011%204.5h2V14a1%201%200%200%201-1%201H4a1%201%200%200%201-1-1V2a1%201%200%200%201%201-1h5.5v2z%22%2F%3E%0A%3C%2Fsvg%3E');
+}
+
+i.folder{
+    background-image: url('data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2216%22%20height%3D%2216%22%20fill%3D%22currentColor%22%20class%3D%22bi%20bi-folder2-open%22%20viewBox%3D%220%200%2016%2016%22%3E%0A%20%20%3Cpath%20d%3D%22M1%203.5A1.5%201.5%200%200%201%202.5%202h2.764c.958%200%201.76.56%202.311%201.184C7.985%203.648%208.48%204%209%204h4.5A1.5%201.5%200%200%201%2015%205.5v.64c.57.265.94.876.856%201.546l-.64%205.124A2.5%202.5%200%200%201%2012.733%2015H3.266a2.5%202.5%200%200%201-2.481-2.19l-.64-5.124A1.5%201.5%200%200%201%201%206.14V3.5zM2%206h12v-.5a.5.5%200%200%200-.5-.5H9c-.964%200-1.71-.629-2.174-1.154C6.374%203.334%205.82%203%205.264%203H2.5a.5.5%200%200%200-.5.5V6zm-.367%201a.5.5%200%200%200-.496.562l.64%205.124A1.5%201.5%200%200%200%203.266%2014h9.468a1.5%201.5%200%200%200%201.489-1.314l.64-5.124A.5.5%200%200%200%2014.367%207H1.633z%22%2F%3E%0A%3C%2Fsvg%3E');
+}
