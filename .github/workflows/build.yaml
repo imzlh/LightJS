@@ -2,8 +2,6 @@ name: Multi-Arch Build with glibc and musl
 
 on:
   push:
-    branches: ["**"]
-  push:
     tags: ["*"]
 
 jobs:
@@ -102,7 +100,6 @@ jobs:
             ljsc-${{ matrix.arch }}-musl
 
   release:
-    if: github.ref_type == 'tag'
     needs: [build-glibc, build-musl]
     runs-on: ubuntu-latest
     steps:
