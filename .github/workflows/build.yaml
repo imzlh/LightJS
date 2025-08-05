@@ -1,0 +1,118 @@
+name: Multi-Arch Build with glibc and musl
+
+on:
+  push:
+    branches: ["**"]
+  push:
+    tags: ["*"]
+
+jobs:
+  build-glibc:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            triple: x86_64-linux-gnu
+            push_build: true
+          - arch: x86
+            triple: i686-linux-gnu
+          - arch: armhf
+            triple: arm-linux-gnueabihf
+          - arch: arm64
+            triple: aarch64-linux-gnu
+          - arch: mips
+            triple: mips-linux-gnu
+          - arch: mipsel
+            triple: mipsel-linux-gnu
+
+    steps:
+      - name: Skip if not tagged
+        if: github.ref_type != 'tag' && matrix.push_build != true
+        run: echo "Skipping build for ${{ matrix.arch }}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build \
+            gcc-${{ matrix.triple }} g++-${{ matrix.triple }} \
+            libmbedtls-dev libexpat1-dev libffi-dev zlib1g-dev
+
+      - name: Build glibc
+        run: |
+          mkdir -p build && cd build
+          cmake ../ -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=${{ matrix.triple }}-gcc \
+            -DCMAKE_CXX_COMPILER=${{ matrix.triple }}-g++
+          make -j$(nproc)
+          cp ljs ../ljs-${{ matrix.arch }}
+          cp ljsc ../ljsc-${{ matrix.arch }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glibc-${{ matrix.arch }}
+          path: |
+            ljs-${{ matrix.arch }}
+            ljsc-${{ matrix.arch }}
+
+  build-musl:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            alpine_arch: x86_64
+          - arch: x86
+            alpine_arch: x86
+          - arch: arm64
+            alpine_arch: aarch64
+
+    container:
+      image: alpine:${{ matrix.alpine_arch }}
+    steps:
+      - name: Install deps
+        run: |
+          apk add build-base cmake ninja mbedtls2-dev expat-dev libffi-dev zlib-dev
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build musl
+        run: |
+          mkdir -p build && cd build
+          cmake ../ -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+          cp ljs ../ljs-${{ matrix.arch }}-musl
+          cp ljsc ../ljsc-${{ matrix.arch }}-musl
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: musl-${{ matrix.arch }}
+          path: |
+            ljs-${{ matrix.arch }}-musl
+            ljsc-${{ matrix.arch }}-musl
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [build-glibc, build-musl]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.*
+          tag_name: ${{ github.ref }}
