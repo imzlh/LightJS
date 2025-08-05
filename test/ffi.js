@@ -9,17 +9,15 @@ self.cwd = import.meta.dirname;
 // build
 try{
     stat("libtest.so")
-    unlink("libtest.so");
-    throw 0;
 }catch(e){
-    console.debug(e);
+    console.log(e);
     console.log("building libtest.so...")
     const proc = new Process(["gcc", "-shared", "-fPIC", "-O0", "-ggdb3", "libtest.c", "-o", "libtest.so"], {
         "inheritPipe": true
     });
     console.log('created process');
-    await proc.onclose
     try{
+        await proc.onclose
         stat("libtest.so")
     }catch{
         console.error("failed to build libtest.so");
@@ -45,7 +43,7 @@ test("double+double", () => {
 
 test("malloc", () => {
     const func = handle.bind([types.POINTER, "test_malloc", types.INT]);
-    const ptr = func(10).call(null, 10, false);
+    const ptr = func(12).call(null, 10, false);
     console.log(decodeStr(new Uint8Array(ptr)));
 })
 

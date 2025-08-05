@@ -1,11 +1,30 @@
 /**
  * Control the behavior of every thread created by the engine.
  * Provide toolkits to better code multi-threading.
+ *
+ * Copyright (c) 2025 iz
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
  */
 
 #include "core.h"
 #include "polyfill.h"
-#include "jspack.h"
 #include "../engine/quickjs.h"
 
 #include <pthread.h>
@@ -2328,81 +2347,81 @@ fail:
     return JS_EXCEPTION;
 }
 
-static JSValue js_vm_pack(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-    if(argc == 0 || !JS_IsObject(argv[0])){
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "mkJSPack() requires an object argument",
-            "mkJSPack(obj: Record<string, Module>): Uint8Array"
-        );
-    }
+// static JSValue js_vm_pack(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+//     if(argc == 0 || !JS_IsObject(argv[0])){
+//         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "mkJSPack() requires an object argument",
+//             "mkJSPack(obj: Record<string, Module>): Uint8Array"
+//         );
+//     }
 
-    // get object length
-    uint32_t len;
-    JSPropertyEnum* props;
-    if(-1 == JS_GetOwnPropertyNames(ctx, &props, &len, argv[0], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY))
-        return JS_EXCEPTION;
+//     // get object length
+//     uint32_t len;
+//     JSPropertyEnum* props;
+//     if(-1 == JS_GetOwnPropertyNames(ctx, &props, &len, argv[0], JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY))
+//         return JS_EXCEPTION;
 
-    struct PackResult* pack = js_malloc(ctx, sizeof(struct PackResult) * len);
-    if(!pack) return JS_EXCEPTION;
+//     struct PackResult* pack = js_malloc(ctx, sizeof(struct PackResult) * len);
+//     if(!pack) return JS_EXCEPTION;
 
-    int pri = 0;
-    for(uint32_t i = 0; i < len; i++){
-        size_t pklen;
-        const char* prop_name = JS_AtomToCStringLen(ctx, &pklen, props[i].atom);
-        if(!prop_name){
-            JS_FreeCString(ctx, prop_name);
-            continue;
-        }
+//     int pri = 0;
+//     for(uint32_t i = 0; i < len; i++){
+//         size_t pklen;
+//         const char* prop_name = JS_AtomToCStringLen(ctx, &pklen, props[i].atom);
+//         if(!prop_name){
+//             JS_FreeCString(ctx, prop_name);
+//             continue;
+//         }
 
-        JSValue prop_val = JS_GetProperty(ctx, argv[0], props[i].atom);
-        __maybe_unused size_t __unused__;
-        void* modulePtr = module_getdef(prop_val);
-        JS_FreeValue(ctx, prop_val);
-        if(!modulePtr){
-            JS_FreeCString(ctx, prop_name);
-            continue;
-        }
+//         JSValue prop_val = JS_GetProperty(ctx, argv[0], props[i].atom);
+//         __maybe_unused size_t __unused__;
+//         void* modulePtr = module_getdef(prop_val);
+//         JS_FreeValue(ctx, prop_val);
+//         if(!modulePtr){
+//             JS_FreeCString(ctx, prop_name);
+//             continue;
+//         }
 
-        pack[i].name = js_strdup(ctx, prop_name);
-        pack[i].value = JS_MKPTR(JS_TAG_MODULE, modulePtr);
-        pack[pri ++] = pack[i];
-        JS_FreeCString(ctx, prop_name);
-    }
+//         pack[i].name = js_strdup(ctx, prop_name);
+//         pack[i].value = JS_MKPTR(JS_TAG_MODULE, modulePtr);
+//         pack[pri ++] = pack[i];
+//         JS_FreeCString(ctx, prop_name);
+//     }
 
-    JS_FreePropertyEnum(ctx, props, len);
+//     JS_FreePropertyEnum(ctx, props, len);
 
-    // start
-    size_t olen = 0;
-    uint8_t* res = js_pack(ctx, pack, pri, &olen);
+//     // start
+//     size_t olen = 0;
+//     uint8_t* res = js_pack(ctx, pack, pri, &olen);
 
-    return JS_NewUint8Array(ctx, res, olen, free_js_malloc, NULL, false);
-}
+//     return JS_NewUint8Array(ctx, res, olen, free_js_malloc, NULL, false);
+// }
 
-static JSValue js_vm_unpack(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-    if(argc != 1 || JS_GetTypedArrayType(argv[0]) != JS_TYPED_ARRAY_UINT8){
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "unpack() requires a Uint8Array argument",
-            "unpack(arr: Uint8Array): Record<string, vm.Module>"
-        );
-    }
+// static JSValue js_vm_unpack(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+//     if(argc != 1 || JS_GetTypedArrayType(argv[0]) != JS_TYPED_ARRAY_UINT8){
+//         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "unpack() requires a Uint8Array argument",
+//             "unpack(arr: Uint8Array): Record<string, vm.Module>"
+//         );
+//     }
 
-    size_t len = 0;
-    uint8_t *data = JS_GetUint8Array(ctx, &len, argv[0]);
-    if(!data) return JS_EXCEPTION;
+//     size_t len = 0;
+//     uint8_t *data = JS_GetUint8Array(ctx, &len, argv[0]);
+//     if(!data) return JS_EXCEPTION;
 
-    size_t count;
-    struct PackResult* pack = js_unpack(ctx, data, len, &count);
-    if(!pack) return JS_EXCEPTION;
+//     size_t count;
+//     struct PackResult* pack = js_unpack(ctx, data, len, &count);
+//     if(!pack) return JS_EXCEPTION;
 
-    JSValue obj = JS_NewObject(ctx);
-    for(int i = 0; i < count; i++){
-        JSModuleDef* m = JS_VALUE_GET_PTR(pack[i].value);
-        JS_SetPropertyStr(ctx, obj, pack[i].name, module_new(ctx, m));
-        js_free(ctx, pack[i].name);
-        JS_FreeValue(ctx, pack[i].value);
-    }
-    js_free(ctx, pack);
+//     JSValue obj = JS_NewObject(ctx);
+//     for(int i = 0; i < count; i++){
+//         JSModuleDef* m = JS_VALUE_GET_PTR(pack[i].value);
+//         JS_SetPropertyStr(ctx, obj, pack[i].name, module_new(ctx, m));
+//         js_free(ctx, pack[i].name);
+//         JS_FreeValue(ctx, pack[i].value);
+//     }
+//     js_free(ctx, pack);
 
-    return obj;
-}
+//     return obj;
+// }
 
 #define EACHOPT(_name, check_func, then) \
     if(check_func(valtmp = JS_GetPropertyStr(ctx, argv[0], _name))) then \
@@ -2499,8 +2518,8 @@ const JSCFunctionListEntry js_vm_funcs[] = {
     JS_CFUNC_DEF("dump", 1, js_vm_dump),
     JS_CFUNC_DEF("load", 1, js_vm_load),
     JS_CFUNC_DEF("compile", 1, js_vm_compile),
-    JS_CFUNC_DEF("pack", 1, js_vm_pack),
-    JS_CFUNC_DEF("unpack", 1, js_vm_unpack),
+    // JS_CFUNC_DEF("pack", 1, js_vm_pack),
+    // JS_CFUNC_DEF("unpack", 1, js_vm_unpack),
     JS_CFUNC_DEF("setVMOptions", 1, js_vm_setvmopts),
     JS_CFUNC_DEF("loadSourceMap", 2, js_vm_loadSourceMap),
     // JS_CFUNC_DEF("compileModule", 1, js_vm_compileModule)

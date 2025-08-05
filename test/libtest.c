@@ -18,6 +18,7 @@ double test_addd(double a, double b) {
 }
 
 void* test_malloc(int size) {
+    printf("malloc called with size %d\n", size);
     assert(size > 10);
     uint8_t* val = malloc(size);
     memcpy(val, "hello", 6);

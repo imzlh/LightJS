@@ -1,5 +1,5 @@
 /**
- * LightJS SourceMap
+ * LightJS SourceMap Extension 
  * 
  * Copyright (c) 2025 iz
  * 

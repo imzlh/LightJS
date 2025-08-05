@@ -128,6 +128,7 @@ xoption(QJS_ENABLE_MSAN "Enable MemorySanitizer (MSan)" OFF)
 xoption(QJS_ENABLE_TSAN "Enable ThreadSanitizer (TSan)" OFF)
 xoption(QJS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (UBSan)" OFF)
 xoption(LJS_ENABLE_SOURCE_MAP "Enable source map support" ON)
+xoption(LJS_ENABLE_HTTP_META "Enable HTTP builtin metadata" ON)
 
 if(QJS_ENABLE_ASAN)
 message(STATUS "Building with ASan")
@@ -188,6 +189,11 @@ endif()
 if(LJS_ENABLE_SOURCE_MAP)
     message(STATUS "Building with source map support")
     add_compile_definitions(LJS_FEATURE_SOURCE_MAP)
+endif()
+
+if(LJS_ENABLE_HTTP_META)
+    message(STATUS "Building with HTTP builtin metadata")
+    add_compile_definitions(LJS_FEATURE_HTTP_META)
 endif()
 
 # QuickJS library

@@ -7,7 +7,6 @@
 #include "src/polyfill.h"
 
 #include "src/repl.h"
-#include "src/jspack.h"
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -29,10 +28,6 @@ static JSRuntime *runtime;
 static App* app;
 bool exiting = false;
 static int exit_code = 0;
-#ifdef __LJSC
-static size_t packed_len = 0;
-static struct PackResult* packed_files = NULL;
-#endif
 
 static inline void run_jobs(){
     int jobs = 0;
@@ -171,7 +166,7 @@ int main(int argc, char **argv) {
             if (strcmp(longopt, "help") == 0 || opt == 'h') {
                 printf(
 #ifdef __LJSC
-                    "LightJS Runtime %s - JSPack files evaulation engine\n"
+                    "LightJS Runtime %s - OPCache evaulation engine\n"
 #else
                     "LightJS %s - A lightweight JavaScript engine\n"
 #endif
@@ -181,9 +176,7 @@ int main(int argc, char **argv) {
                     "Options:\n"
                     "    -h, --help         Print this help message\n"
                     "    -v, --version      Print the version number\n"
-#ifdef __LJSC
-                    "    -b, --bundle       Bundle the specified JSPack file into a single executable\n"
-#else
+#ifndef __LJSC
                     "    -e, --eval         Evaluate the follow argument as JavaScript code\n"
                     "    -c, --check        Check syntax only (no execution)\n"
                     "    -r, --repl         Start a read-eval-print loop\n"
@@ -271,8 +264,9 @@ int main(int argc, char **argv) {
     }
 
 #ifdef __LJSC
-    uint8_t* jspack_data;
-    size_t jspack_len;
+    uint8_t* opcode;
+    size_t opcode_len;
+    JSValue code = JS_UNDEFINED;
     if(optind == argc){
         // open self
         int fd = open(argv[0], O_RDONLY);
@@ -284,17 +278,17 @@ int main(int argc, char **argv) {
 
         // read length
         lseek(fd, - sizeof(uint32_t), SEEK_CUR);
-        if(read(fd, &jspack_len, sizeof(uint32_t)) < sizeof(uint32_t))
+        if(read(fd, &opcode_len, sizeof(uint32_t)) < sizeof(uint32_t))
             goto not_bundled_finalizer;
 
         // read data
-        jspack_data = js_malloc_rt(runtime, jspack_len);
-        if(!jspack_data){
-            printf("Failed to allocate memory for JSPack data.\n");
+        opcode = js_malloc_rt(runtime, opcode_len);
+        if(!opcode){
+            printf("Failed to allocate memory for packed data.\n");
             return 1;
         }
-        lseek(fd, - (sizeof(uint32_t) + jspack_len), SEEK_CUR);
-        if(read(fd, jspack_data, jspack_len) < jspack_len)
+        lseek(fd, - (sizeof(uint32_t) + opcode_len), SEEK_CUR);
+        if(read(fd, opcode, opcode_len) < opcode_len)
             goto not_bundled_finalizer;
         close(fd);
 
@@ -303,7 +297,7 @@ int main(int argc, char **argv) {
 not_bundled_finalizer:
         close(fd);
 not_bundled:
-        printf("Error: Missing JSPack file to execute.\n");
+        printf("Error: Missing opcode file to execute.\n");
         return 1;
     }else{
         // try read file
@@ -318,18 +312,20 @@ not_bundled:
             printf("Failed to stat file \"%s\": %s\n", argv[optind], strerror(errno));
             return 1;
         }
-        jspack_len = st.st_size;
-        jspack_data = js_malloc_rt(runtime, jspack_len);
-        if(!jspack_data){
-            printf("Failed to allocate memory for JSPack data.\n");
+        opcode_len = st.st_size;
+        opcode = js_malloc_rt(runtime, opcode_len);
+        if(!opcode){
+            printf("Failed to allocate memory for opcode data.\n");
             return 1;
         }
-        if(read(fd, jspack_data, jspack_len) < jspack_len){
-            printf("Failed to read JSPack data from file.\n");
+        if(read(fd, opcode, opcode_len) < opcode_len){
+            printf("Failed to read opcode data from file.\n");
             return 1;
         }
         close(fd);
     }
+
+    code = JS_ReadObject(app -> ctx, (uint8_t*)opcode, opcode_len, JS_READ_OBJ_BYTECODE);
 #else
     if(eval_code && optind == argc){
         printf("Error: Missing argument for -e/--eval\n");
@@ -372,13 +368,7 @@ not_bundled:
     LJS_init_context(app);
 
 #ifdef __LJSC
-    packed_files = js_unpack(app -> ctx, jspack_data, strlen((char*)jspack_data), &packed_len);
-    FIND_PACKAGE(packed_files, packed_len, "main.js", code);
-    if(JS_IsUndefined(code)){
-        printf("Failed to find entry point in jspack: main.js\n");
-        return 1;
-    }
-
+    // TODO: 
     const char* raw_name = script_path;
 #else
     if(argc - optind == 0 || repl){

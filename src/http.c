@@ -27,7 +27,10 @@
 #include "../engine/list.h"
 #include "polyfill.h"
 #include "core.h"
+
+#ifdef LJS_FEATURE_HTTP_META
 #include "httpmeta.h"
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -3508,8 +3511,12 @@ static inline void handler_write_all_header(JSContext* ctx, struct JSClientHandl
     EvFD* fd = handler -> response.fd;
 
     // status
+#ifdef LJS_FEATURE_HTTP_META
     const char* status_str = http_get_reason_by_code(handler -> response.status);
     FORMAT_WRITE("HTTP/%.1f %d %s", 128, handler -> response.version, handler -> response.status, status_str);
+#else
+    FORMAT_WRITE("HTTP/%.1f %d", 128, handler -> response.version, handler -> response.status);
+#endif
 
     // all headers
     struct list_head *cur, *tmp;
@@ -4137,6 +4144,7 @@ static JSValue js_handler_constructor(JSContext* ctx, JSValueConst new_target, i
     );
 }
 
+#ifdef LJS_FEATURE_HTTP_META
 static JSValue js_handler_static_status(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc == 0 || !JS_IsNumber(argv[0])){
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Handler.status() requires one number argument",
@@ -4170,6 +4178,7 @@ static JSValue js_handler_static_mimetype(JSContext* ctx, JSValueConst this_val,
     JS_FreeCString(ctx, ext);
     return JS_NewString(ctx, mimetype);
 }
+#endif
 
 static JSValue js_handler_static_from(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
     if(argc == 0){
@@ -4240,8 +4249,10 @@ static JSCFunctionListEntry handler_proto_funcs[] = {
 
 static JSCFunctionListEntry handler_static_funcs[] = {
     JS_CFUNC_DEF("from", 1, js_handler_static_from),
+#ifdef LJS_FEATURE_HTTP_META
     JS_CFUNC_DEF("status", 1, js_handler_static_status),
     JS_CFUNC_DEF("mimetype", 1, js_handler_static_mimetype)
+#endif
 };
 
 static JSClassDef handler_class = {
