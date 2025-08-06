@@ -195,12 +195,10 @@ static JSValue js_ffi_type_helper_ptr(JSContext *ctx, JSValueConst this_val, int
 
 // this_val: type, args: to ffi func
 static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic, JSValue *func_data) {
-    if(argc == 0 || JS_IsUndefined(this_val) || (argc == 1 && (JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])))) {
-        // close
-        if(dlclose(JS_VALUE_GET_PTR(func_data[0])) == 0) 
-            return JS_UNDEFINED;
-        else
-            return LJS_Throw(ctx, EXCEPTION_INTERNAL, "Failed to close library: %s", NULL, dlerror());
+    if(argc == 0 || !JS_IsArray(this_val)) {
+        return LJS_Throw(ctx, EXCEPTION_NOTFOUND, "this function requires array-typed this",
+            "<closure>(this: [/* return type */ type.INT, /* function name */ 'fib'], ...)"
+        );
     }
 
     // help message
@@ -481,6 +479,10 @@ cleanup:
     return ret_val;
 }
 
+void free_dl_handler(JSRuntime *rt, void *opaque, void *ptr) {
+    dlclose(ptr);
+}
+
 static JSValue js_dlopen(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     if(argc == 0){
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "dlopen() requires at least one argument", "dlopen(path: string): string");
@@ -503,7 +505,7 @@ static JSValue js_dlopen(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     }
 
     JSValue ret = JS_NewCFunctionData(ctx, js_ffi_handle, 0, 0, 1, (JSValueConst[]){
-        JS_MKPTR(JS_TAG_INT, handle)
+        JS_NewArrayBuffer(ctx, (void*)handle, SIZE_MAX, free_dl_handler, NULL, false)
     });
     return ret;
 }

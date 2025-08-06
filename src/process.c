@@ -778,8 +778,9 @@ static JSValue js_get_sysinfo(JSContext* ctx, JSValueConst this_val, int argc, J
     return obj;
 }
 
-EvFD *pstdin, *pstdout, *pstderr = NULL;
-static JSValue stdin_p, stdout_p, stderr_p;
+// XXX: use thread-safe pipe?
+thread_local EvFD *pstdin, *pstdout, *pstderr = NULL;
+static thread_local JSValue stdin_p, stdout_p, stderr_p;
 static int js_process_init(JSContext* ctx, JSModuleDef* m){
     JS_SetModuleExport(ctx, m, "self", js_get_self(ctx));
     JS_SetModuleExport(ctx, m, "exit", JS_NewCFunction(ctx, js_process_exit, "exit", 1));
@@ -825,8 +826,7 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
     return 0;
 }
 
-bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv
-){
+bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv){
     js_argc = _argc;
 
     // parse argv
@@ -865,12 +865,13 @@ bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv
     JS_AddModuleExport(ctx, m, "stderr");
 
     // init stdpipe
-    if(LJS_IsMainContext(ctx)){
-        stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ, isatty(STDIN_FILENO), &pstdin);
-        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE, isatty(STDOUT_FILENO), &pstdout);
-        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE, isatty(STDERR_FILENO), &pstderr);
+    // XXX: use thread-safe pipe?
+    // if(LJS_IsMainContext(ctx)){
+        stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ | PIPE_THREADSAFE, isatty(STDIN_FILENO), &pstdin);
+        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE | PIPE_THREADSAFE, isatty(STDOUT_FILENO), &pstdout);
+        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE | PIPE_THREADSAFE, isatty(STDERR_FILENO), &pstderr);
         if(!pstderr) pstderr = pstdout;
-    }
+    // }
 
     // vm
     JS_AddModuleExport(ctx, m, "sysinfo");

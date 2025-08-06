@@ -29,7 +29,7 @@ await test('syncpipe', () => {
     console.log(pipe, SyncPipe);
     pipe.write("Hello World", true);
     pipe.seek(0, SyncPipe.SEEK_SET);
-    const res = pipe.read(10);
+    const res = pipe.read(11);
     if(!res) throw new Error("Read failed");
     console.log("read() result:", decodeStr(res));
     assert(isEqual(res, encodeStr("Hello World")), "Read mismatch with write");
@@ -44,6 +44,7 @@ await test("open", async () => {
     console.log("read() result:", decodeStr(res));
     assert(isEqual(res, encodeStr("Hello World")), "Read mismatch with write");
     
+    pipe.fseek(0, "start");
     await pipe.write(encodeStr("Goodbye World"));
     await pipe.write(encodeStr("!!"));
     pipe.close();

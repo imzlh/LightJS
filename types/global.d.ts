@@ -59,7 +59,7 @@ declare class Worker {
  */
 declare class URL {
     /**
-     * @link https://developer.mozilla.org/zh-CN/docs/Web/API/URL/revokeObjectURL_static
+     * @link https://developer.mozilla.org/zh-CN/docs/Web/API/URL/canParse_static
      */
     static canParse(url: string, base?: string): boolean;
 
@@ -91,7 +91,7 @@ declare class Pipe<T>{
     
     /**
      * 创建管道
-     * @param mode 模式，可选 READ、WRITE
+     * @param mode 模式，可选 `Pipe.READ`, `Pipe.WRITE`或组合
      * @param control 管道控制器，出现错误时关闭管道
      */
     constructor(mode: number, control: {
@@ -241,9 +241,12 @@ declare class Event<T = any>{
  */
 declare class EventTarget<MAP extends Record<string, any> = Record<string, any>>{
     on<T extends keyof MAP>(type: T, listener: (event: Event<MAP[T]>) => void): void;
+    on(type: string, listener: (event: Event) => void): void;
     once<T extends keyof MAP>(type: T, listener: (event: Event<MAP[T]>) => void): void;
+    once(type: string, listener: (event: Event) => void): void;
     off<T extends keyof MAP>(type: T, listener: (event: Event<MAP[T]>) => void): void;
-    dispatch<T extends keyof MAP>(event: Event<MAP[T]>): void;
+    off(type: string, listener: (event: Event) => void): void;
+    fire(event: Event<any>): void;
 }
 
 declare const events: EventTarget<{

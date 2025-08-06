@@ -3,23 +3,20 @@ import { self } from "process";
 self.cwd = import.meta.dirname;
 
 if(Worker.isWorker){
-    console.log("from worker");
+    console.info("from worker");
 
     events.on("message", (msg) => {
-        console.log(msg);
+        console.log('from worker', msg);
         Worker.postMessage("done");
     });
 
     Worker.postMessage("hello");
-
-    await delay(1000);
-    Worker.postMessage("done");
 }else{
-    console.log("Main thread");
+    console.info("Main thread");
     const worker = new Worker(import.meta.url);
     // @ts-ignore msg could be any that could be dup by QuickJS
     worker.onmessage = msg => {
-        console.log(msg);
+        console.info(msg);
         if(msg === 'done'){ 
             worker.terminate();
         }
@@ -27,6 +24,11 @@ if(Worker.isWorker){
 
     worker.postMessage('hello');
     worker.postMessage('world');
+
+    // setInterval(() => {
+    //     worker.postMessage('done');
+    // }, 2345);
+
     worker.onclose = () => {
         console.log('worker closed');
     }

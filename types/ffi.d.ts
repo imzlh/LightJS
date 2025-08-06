@@ -82,8 +82,11 @@ declare module 'ffi' {
     }
     
     /**
-     * 打开一个动态库，通常是.so文件
-     * 通过这个函数后，注意需要手动释放资源，否则会造成内存泄漏
+     * 打开一个动态库，通常是.so文件<br>
+     *  - LightJS的ffi不支持类型缓存，对于传入变量较多的函数注意性能损耗！
+     *  - 如果你不明白/不熟悉何为C指针，千万不要使用`types.POINTER`作为返回值
+     *    LightJS需要你手动指定POINTER目标内存空间大小和如何处理这片空间
+     * 
      * @example - 打开一个动态库
      * ```typescript
      * const lib = ffi.dlopen("./libtest.so");  // 返回一个JS函数
@@ -93,8 +96,7 @@ declare module 'ffi' {
      * // 同样的，使用指针则需要额外处理，防止资源泄漏(小心！)
      * const malloc = lib.bind([types.PTR("free"), "test_malloc", types.INT]);
      * malloc(10); // 调用动态库的test_malloc函数，传入参数10，返回一个ArrayBuffer
-     * // @ts-ignore 忽略类型推导
-     * lib();      // 不传参数或NULL，或者this是undefined(没传)，释放动态库资源
+     * // 当lib变量被回收时，自动释放资源
      * ```
      * @param path 动态库的路径
      */

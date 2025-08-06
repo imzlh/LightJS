@@ -149,7 +149,7 @@ static JSValue js_syncio_seek(JSContext *ctx, JSValueConst this_val, int argc, J
 
     int64_t offset;
     int whence;
-    if(argc!= 2 || !JS_ToInt64(ctx, &offset, argv[0]) || !JS_ToInt32(ctx, &whence, argv[1]))
+    if(argc!= 2 || -1 == JS_ToInt64(ctx, &offset, argv[0]) || -1 == JS_ToInt32(ctx, &whence, argv[1]))
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", "SyncPipe.seek(offset: int, whence: int): void");
 
     if(lseek(pipe -> fd, offset, whence) < 0)
@@ -977,7 +977,8 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
         piped -> size = fstat(fd, &st) == 0 ? st.st_size : -1;
         return pipe;
     }else{
-        return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, false, NULL);
+        // file pipe requires seek support(should be IOPipe)
+        return LJS_NewFDPipe(ctx, fd, PIPE_READ | PIPE_WRITE | PIPE_AIO, true, NULL);
     }
 
     error:{

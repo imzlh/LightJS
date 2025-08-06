@@ -1125,7 +1125,7 @@ static JSValue js_iopipe_fseek(JSContext *ctx, JSValueConst this_val, int argc, 
     CHECK_U8PIPE_CLOSED(src);
     CHECK_U8PIPE_READABLE(src);
 
-    if(argc!= 1 || !JS_IsNumber(argv[0])){
+    if(argc < 2 || !JS_IsNumber(argv[0]) || !JS_IsString(argv[1])){
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a number", "U8Pipe.fseek(offset: number, baseline?: string): void");
     }
 

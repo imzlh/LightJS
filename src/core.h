@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdarg.h>
+#include <threads.h>
 
 // once include
 #pragma once
@@ -342,7 +343,7 @@ void js_handle_promise_reject(
 );
 
 // exports
-extern EvFD *pstdin, *pstdout, *pstderr;
+extern thread_local EvFD *pstdin, *pstdout, *pstderr;
 bool LJS_init_global_helper(JSContext *ctx);
 bool LJS_init_vm(JSContext *ctx);
 bool LJS_init_console(JSContext *ctx);

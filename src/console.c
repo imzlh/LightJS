@@ -36,8 +36,8 @@
 
 #define MAX_DEPTH 64
 #define MAX_OUTPUT_LEN 1024
-#define MAX_OBJECT_PROP_LEN 20
-#define MAX_OBJEXT_INLINE_PROP_LEN 5
+#define MAX_OBJECT_PROP_LEN 16
+#define MAX_OBJEXT_INLINE_PROP_LEN 4
 
 // ANSI 颜色代码
 #define ANSI_RESET   "\x1b[0m"
@@ -99,7 +99,7 @@ static inline const char* getBlank(int depth) {
     return blank + offset;
 }
 
-static const int invisible_object[] = { JS_CLASS_OBJECT, JS_CLASS_MAP };
+static __maybe_unused const int invisible_object[] = { JS_CLASS_OBJECT, JS_CLASS_MAP };
 
 // forward declaration
 static inline void print_jsvalue(JSContext *ctx, JSValueConst val, JSValueConst prototype_of, int depth, JSValue visited[], DynBuf* dbuf);
@@ -114,9 +114,10 @@ static inline bool check_circular(JSContext *ctx, JSValue val, JSValue visited[]
 
 // measure whether to wrap display into multiple lines
 // useful for Array and Object with many properties
-static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MAX_OBJEXT_INLINE_PROP_LEN], int depth, bool also_proto) {
+static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MAX_OBJEXT_INLINE_PROP_LEN], int depth, 
+    bool also_proto, bool getset_only) {
 #define MEASURE_SUBELEMENT(el) JSValue value = el; \
-    if(measure_wrap_display(ctx, value, visited, depth + 1, also_proto)){ \
+    if(measure_wrap_display(ctx, value, visited, depth + 1, also_proto, false)){ \
         JS_FreeValue(ctx, value); \
         return true; \
     }\
@@ -137,31 +138,42 @@ static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MA
         MEASURE_SUBELEMENT(JS_GetProperty(ctx, val, JS_ATOM_prototype));
     }
 
+    // string
+    if(JS_IsString(val)) return false;
+    
+    // some special objects
+    if(JS_IsWeakMap(val) || JS_IsWeakSet(val)) return false;
+    // weakref?
+    if (JS_IsWeakRef(val)) {
+        MEASURE_SUBELEMENT(JS_GetWeakRefValue(ctx, val));
+        return false;
+    }
+
+    // NULL and many special objects
+    if (JS_IsNull(val) || JS_IsSymbol(val) || JS_IsRegExp(val) || JS_IsDate(val))
+        return false;
+    if (JS_IsPromise(val)) {
+        MEASURE_SUBELEMENT(JS_PromiseResult(ctx, val));
+        return false;
+    }
+
     if(JS_GetEnumerableLength(ctx, val, &plen) != -1){
-        if(plen > MAX_OBJEXT_INLINE_PROP_LEN) return false;
+        if(plen > MAX_OBJEXT_INLINE_PROP_LEN) return true;
         for(int64_t i = 0; i < plen; i++){
             MEASURE_SUBELEMENT(JS_GetPropertyUint32(ctx, val, i));
         }
     }else if(JS_IsObject(val)){
-        // some special objects
-        if(JS_IsWeakMap(val) || JS_IsWeakSet(val)) return false;
-        // weakref?
-        if(JS_IsWeakRef(val)){
-            MEASURE_SUBELEMENT(JS_GetWeakRefValue(ctx, val));
-            return false;
-        }
-
-        // NULL and many special objects
-        if(JS_IsNull(val) || JS_IsSymbol(val) || JS_IsRegExp(val) || JS_IsDate(val))
-            return false;
-        if(JS_IsPromise(val)){
-            MEASURE_SUBELEMENT(JS_PromiseResult(ctx, val));
-            return false;
-        }
-
         // display prototype?
-        JSValue prototype = JS_GetProperty(ctx, val, JS_ATOM_prototype);
-        if(!JS_IsException(prototype) ) return true;
+        // JSValue prototype = JS_GetProperty(ctx, val, JS_ATOM_prototype);
+        // if(!JS_IsException(prototype) ) return true;
+        if(!also_proto){
+            JSValue proto = JS_GetPrototype(ctx, val);
+            if(JS_IsObject(proto) && measure_wrap_display(ctx, proto, visited, depth + 1, false, true)){
+                JS_FreeValue(ctx, proto);
+                return true;                
+            }
+            JS_FreeValue(ctx, proto);
+        }
 
         JSPropertyEnum *props;
         uint32_t prop_count;
@@ -172,15 +184,33 @@ static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MA
         }
         for(uint32_t i = 0; i < prop_count; i++){
             JSAtom atom = props[i].atom;
-            if(atom == JS_ATOM_prototype || atom == JS_ATOM_Symbol_species)
+            if(atom == JS_ATOM_prototype || atom == JS_ATOM_Symbol_species || atom == JS_ATOM___proto__)
                 continue;
-            JSValue prop = JS_GetProperty(ctx, val, atom);
-            if(measure_wrap_display(ctx, prop, visited, depth + 1, also_proto)){
+            if(getset_only){
+                JSPropertyDescriptor desc;
+                bool wrap_res = false;
+                if(-1 == JS_GetOwnProperty(ctx, &desc, val, props[i].atom))
+                    continue;
+                if(JS_IsFunction(ctx, desc.getter)){
+                    JSValue desc_val = JS_Call(ctx, desc.getter, val, 0, NULL);
+                    if(measure_wrap_display(ctx, desc_val, visited, depth + 1, false, true)){
+                        wrap_res = true;
+                    }
+                    JS_FreeValue(ctx, desc_val);
+                }
+                JS_FreeValue(ctx, desc.value);
+                JS_FreeValue(ctx, desc.getter);
+                JS_FreeValue(ctx, desc.setter);
+                if(wrap_res) return true;
+            }else{
+                JSValue prop = JS_GetProperty(ctx, val, atom);
+                if(measure_wrap_display(ctx, prop, visited, depth + 1, also_proto, false)){
+                    JS_FreeValue(ctx, prop);
+                    JS_FreePropertyEnum(ctx, props, prop_count);
+                    return true;
+                }
                 JS_FreeValue(ctx, prop);
-                JS_FreePropertyEnum(ctx, props, prop_count);
-                return true;
             }
-            JS_FreeValue(ctx, prop);
         }
         JS_FreePropertyEnum(ctx, props, prop_count);
     }
@@ -189,7 +219,7 @@ static bool measure_wrap_display(JSContext *ctx, JSValue val, JSValue visited[MA
 
 static inline bool measure_wrap_disp2(JSContext *ctx, JSValue val, bool also_proto){
     JSValue visited[MAX_OBJEXT_INLINE_PROP_LEN];
-    return measure_wrap_display(ctx, val, visited, 0, also_proto);
+    return measure_wrap_display(ctx, val, visited, 0, also_proto, false);
 }
 
 static void __print_stack(JSContext* ctx, JSValueConst stack, int depth, DynBuf* output) {
@@ -466,9 +496,10 @@ __function_break:
         const char* indent = getBlank(depth + 1);
         bool wrap_display = measure_wrap_disp2(ctx, val, false);
         for (uint32_t i = 0; i < length; i++) {
+            if(i != 0) dbuf_putstr(output, ", ");
             if(wrap_display)
                 dbuf_printf(output, "\n%s", indent);
-            if(i != 0) dbuf_putstr(output, ", ");
+            
             JSValue element = JS_GetPropertyUint32(ctx, val, i);
             print_jsvalue(ctx, element, JS_UNDEFINED, depth + 1, visited, output);
             JS_FreeValue(ctx, element);
@@ -478,7 +509,7 @@ __function_break:
                 break;
             }
         }
-        if(wrap_display) dbuf_printf(output, "\n%s", getBlank(depth) +1);
+        if(wrap_display) dbuf_printf(output, "\n%s", getBlank(depth));
         dbuf_putstr(output, ANSI_GREEN " ]" ANSI_RESET);
 
     end:
@@ -530,6 +561,7 @@ __function_break:
                 dbuf_printf(output, ANSI_MAGENTA "%s" ANSI_RESET, class_name);
                 JS_FreeCString(ctx, class_name);
             }
+            obj_showproto = false;
         }
 
 show_content:
@@ -596,30 +628,15 @@ obj_restart:
         for (int i = 0; i < len; i++) {
             JSPropertyDescriptor desc;
 
-            if(props[i].atom == JS_ATOM_prototype){
-                if(obj_showproto){
-                    JSValue proto = JS_GetPrototype(ctx, val);
-                    // Not globalThis.Object and globalThis.Map
-                    if(!JS_IsUndefined(proto) && !JS_IsNull(proto) && !JS_IsException(proto)){
-                        for(int i = 0; i < countof(invisible_object); i++){
-                            if(JS_GetClassID(proto) == invisible_object[i]){
-                                goto skip_proto;
-                            }
-                        }
-
-                        dbuf_printf(output, ",\n%s" ANSI_MAGENTA ANSI_BOLD "__proto__" ANSI_RESET ": ", indent);
-                        print_jsvalue(ctx, proto, val, depth + 1, visited, output);
-                    }
-                    JS_FreeValue(ctx, proto);
-                }else{
-                    continue;
-                }
-            }else if(props[i].atom == JS_ATOM_Symbol_toStringTag){
+            if(props[i].atom == JS_ATOM_prototype || props[i].atom == JS_ATOM_Symbol_toStringTag){
                 continue;
             }else if(props[i].atom == JS_ATOM_Symbol_species){
                 const char* cname = getClassName(ctx, val);
                 if(cname){
-                    dbuf_printf(output, ",\n%s" ANSI_RED ANSI_BOLD "[species]" ANSI_RESET ": " ANSI_MAGENTA "%s" ANSI_RESET, indent, cname);
+                    if(wrap_display)
+                        dbuf_printf(output, ",\n%s" ANSI_RED ANSI_BOLD "[species]" ANSI_RESET ": " ANSI_MAGENTA "%s" ANSI_RESET, indent, cname);
+                    else
+                        dbuf_printf(output, ANSI_RED ", [species]" ANSI_RESET ": " ANSI_MAGENTA "%s" ANSI_RESET, cname);
                     JS_FreeCString(ctx, cname);
                 }
                 continue;
@@ -674,8 +691,58 @@ obj_restart:
             }
         }
 
+        if (obj_showproto) {
+            for (int i = 0; i < countof(invisible_object); i++) {
+                if (JS_GetClassID(val) == invisible_object[i]) {
+                    goto shallow_show_proto;
+                }
+            }
+            JSValue proto = JS_GetPrototype(ctx, val);
+            // Not globalThis.Object and globalThis.Map
+            if (!JS_IsUndefined(proto) && !JS_IsNull(proto) && !JS_IsException(proto)) {
+                dbuf_printf(output, ",\n%s" ANSI_MAGENTA ANSI_BOLD "__proto__" ANSI_RESET ": ", indent);
+                print_jsvalue(ctx, proto, val, depth + 1, visited, output);
+            }
+            JS_FreeValue(ctx, proto);
+        } else {
+shallow_show_proto:
+            // show get/set properties
+            JSPropertyEnum* prop;
+            uint32_t prop_count;
+            JSValue proto = JS_GetPrototype(ctx, val);
+            if (-1 != JS_GetOwnPropertyNames(ctx, &prop, &prop_count, proto, JS_GPN_STRING_MASK)) {
+                for (int j = 0; j < prop_count; j++) {
+                    if (prop[j].atom == JS_ATOM_constructor || prop[j].atom == JS_ATOM___proto__) continue;
+                    JSPropertyDescriptor desc;
+                    if (-1 != JS_GetOwnProperty(ctx, &desc, proto, prop[j].atom)) {
+                        if (desc.flags & JS_PROP_GETSET) {
+                            if (JS_IsFunction(ctx, desc.getter)) {
+                                // call getter
+                                JSValue getres = JS_Call(ctx, desc.getter, getter_this, 0, NULL);
+                                const char* key_str = JS_AtomToCString(ctx, prop[j].atom);
+                                if (!JS_IsException(getres)) {
+                                    if (wrap_display)
+                                        dbuf_printf(output, ",\n%s" ANSI_MAGENTA "%s" ANSI_RESET ": ", indent, key_str ? key_str : "");
+                                    else
+                                        dbuf_printf(output, ANSI_MAGENTA ", %s" ANSI_RESET ": ", key_str ? key_str : "");
+                                    print_jsvalue(ctx, getres, JS_UNDEFINED, depth + 1, visited, output);
+                                }
+                                if (key_str) JS_FreeCString(ctx, key_str);
+                                JS_FreeValue(ctx, getres);
+                            }
+                            JS_FreeValue(ctx, desc.getter);
+                            JS_FreeValue(ctx, desc.setter);
+                        } else {
+                            JS_FreeValue(ctx, desc.value);
+                        }
+                    }
+                }
+                JS_FreePropertyEnum(ctx, prop, prop_count);
+            }
+            JS_FreeValue(ctx, proto);
+        }
 
-skip_proto:
+// skip_proto:
         if(wrap_display) {
             dbuf_printf(output, "\n%s", indent + 4);
         } else {

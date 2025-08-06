@@ -42,10 +42,7 @@ test("double+double", () => {
 });
 
 test("malloc", () => {
-    const func = handle.bind([types.POINTER, "test_malloc", types.INT]);
-    const ptr = func(12).call(null, 10, false);
-    console.log(decodeStr(new Uint8Array(ptr)));
+    const func = handle.bind([types.PTR('free'), "test_malloc", types.INT]);
+    const ptr = func(12).call(null, 12, false);
+    console.log(new Uint8Array(ptr));
 })
-
-// @ts-ignore
-handle(null);   // free resources
