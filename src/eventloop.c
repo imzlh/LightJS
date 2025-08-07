@@ -45,7 +45,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
-// #define LJS_DEBUG    // debug
+#define LJS_DEBUG    // debug
 // #define LJS_EVLOOP_FULL_DEBUG
 
 #include "../engine/cutils.h"
@@ -629,10 +629,15 @@ static void check_queue_status(EvFD* evfd) {
         case EVFD_PTY:
             new_events = EPOLLIN | EPOLLHUP | EPOLLERR;
 
+        case EVFD_UDP:
+            new_events = 0;
+            goto general;
+
         default:
             new_events |= EPOLLHUP | EPOLLERR;
             if (evfd -> rdhup_feature && !evfd -> rdhup)
                 new_events |= EPOLLRDHUP;   // socket feature
+general:
             if (!list_empty(&evfd -> u.task.read_tasks) && !evfd -> rdhup)
                 new_events |= EPOLLIN;
             if (!list_empty(&evfd -> u.task.write_tasks))
@@ -931,7 +936,7 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
         // TODO: buffer_recvfrom
         struct UDPContext* ctx = evfd -> proto.udp;
         n = recvfrom(fd, evfd -> incoming_buffer -> buffer,
-            evfd -> incoming_buffer -> size - evfd -> incoming_buffer -> end, 0,
+            buffer_available(evfd -> incoming_buffer), MSG_DONTWAIT,
             (struct sockaddr*) &ctx -> peer_addr,
             &ctx -> addr_len);
         if (n == -1) {
@@ -1350,6 +1355,11 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
             // seek
             if(n)   buffer_seek_cur(task -> buffer, n);
             else    evfd_mod(evfd, true, EPOLLOUT);
+        } else if (evfd -> type == EVFD_UDP) {
+            buffer_flat(task -> buffer);
+            n = sendto(fd, task -> buffer -> buffer + task -> buffer -> start, buffer_used(task -> buffer), MSG_DONTWAIT, 
+                (struct sockaddr*) &evfd -> proto.udp -> peer_addr, sizeof(struct sockaddr_in));
+            if(n > 0) buffer_seek_cur(task -> buffer, n);
         } else {
             // write to fd directly
             n = buffer_write(task -> buffer, fd, UINT32_MAX);
@@ -1366,7 +1376,8 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
 #ifdef LJS_DEBUG
             perror("evfd_write");
 #endif
-            handle_close(fd, evfd, false);
+            if(errno != EAGAIN && errno != EWOULDBLOCK)
+                handle_close(fd, evfd, false);
             goto _return;
         } else {
             break;  // fd is busy
@@ -1498,6 +1509,7 @@ static void handle_close(int fd, EvFD* evfd, bool is_rdhup) {
     // close fd
     if (!prev_destroy && !is_rdhup) switch (evfd -> type) {
         case EVFD_NORM:
+        case EVFD_UDP:
 #ifdef LJS_EVLOOP_FEATURE_PTY
         case EVFD_PTY:
 #endif

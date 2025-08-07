@@ -1,5 +1,6 @@
 import { open, read, write } from "fs";
 import { connectAsync } from "../lib/io/socket";
+import { connect } from "socket";
 
 // await test('fdpipe', async () => {
 //     write('a.txt', 'hello');
@@ -60,14 +61,14 @@ function createDebugPipe(max_write){
 }
 
 await test('fdpipe', async () => {
-    const conn = await connectAsync('tcp://192.168.1.1:81');
-    conn.write(encodeStr("GET / HTTP/0.2\r\nHost: 192.168.1.1:81"));
+    const conn = connect('tls://www.apple.com');
+    conn.write(encodeStr("GET /library/test/success.html HTTP/1.1\r\nHost: www.apple.com\r\nConnection: close"));
     conn.write(encodeStr("\r\n\r\n"));
     await conn.sync();
 
     // 500 then close
     while(!conn.closed){
-        console.log(conn.read());
+        console.log(await conn.read());
     }
 });
 
@@ -80,7 +81,7 @@ await test('pipeto', async () => {
     //     pipe.close();
     // });
     // await delay(1000);
-    const pipe = await connectAsync("tcp://192.168.1.1:81");
+    const pipe = await connectAsync("tls://www.apple.com");
     console.log("Connected");
     let sent = false;
     const pipe2 = new U8Pipe({
@@ -90,7 +91,7 @@ await test('pipeto', async () => {
                 throw new Error();   // close
             }else{
                 sent = true;
-                return encodeStr("GET / HTTP/1.1\r\nHost: 192.168.1.1:81\r\n\r\n");
+                return encodeStr("GET /library/test/success.html HTTP/1.1\r\nHost: www.apple.com\r\nConnection: close\r\n\r\n");
             }
         },
         write(data){

@@ -234,7 +234,7 @@ static void __print_stack(JSContext* ctx, JSValueConst stack, int depth, DynBuf*
         stack_str = wrap_pos + 1;
         wrap_pos = strchr(stack_str, '\n');
     }
-    dbuf_printf(output, "%s%s\n", indent, stack_str);
+    // dbuf_printf(output, "%s%s\n", indent, stack_str);
     JS_FreeCString(ctx, stack_str);
 }
 
@@ -810,16 +810,17 @@ void js_dump(JSContext *ctx, JSValueConst val, EvFD* target_fd){
 
 // dump LightJS special promise(with promise stack)
 void js_dump_promise(JSContext *ctx, JSValueConst val, EvFD* target_fd){
-    static JSValue visited[64];
     if(evfd_closed(target_fd)) return;
     DynBuf output;
     dbuf_init2(&output, JS_GetRuntime(ctx), dalloc);
     JSValue reject = JS_PromiseResult(ctx, val);
-    print_jsvalue(ctx, reject, JS_UNDEFINED, 0, visited, &output);
+    print_jserror(ctx, reject, 0, &output);
     JS_FreeValue(ctx, reject);
     JSValue stack = JS_GetProperty(ctx, val, JS_ATOM_stack);
-    if(JS_PromiseState(ctx, val) == JS_PROMISE_PENDING && JS_IsString(stack)){
-        dbuf_putstr(&output, "    " ANSI_BOLD "---- promise ----" ANSI_RESET "\n");
+
+    int64_t stack_len;
+    if(JS_IsString(stack) && JS_GetLength(ctx, stack, &stack_len) != -1 && stack_len > 0){
+        dbuf_putstr(&output, "    " ANSI_BOLD "------ promise ------" ANSI_RESET "\n");
         __print_stack(ctx, stack, 0, &output);
     }
     JS_FreeValue(ctx, stack);

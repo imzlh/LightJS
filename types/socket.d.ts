@@ -9,6 +9,40 @@ type IAddr = {
     path: string
 };
 
+interface DNS_NORM{
+    type: 'A' | 'AAAA' | 'CNAME' | 'NS' | 'TXT',
+    data: string
+}
+
+interface DNS_MX{
+    type: 'MX',
+    priority: number,
+    data: string
+}
+
+interface DNS_SOA{
+    type: 'SOA',
+    mname: string,
+    rname: string,
+    serial: number,
+    refresh: number,
+    retry: number,
+    expire: number,
+    minimum: number
+}
+
+interface DNS_SRV{
+    type: 'SRV',
+    priority: number,
+    weight: number,
+    port: number,
+    target: string
+}
+
+type DnsResult = DNS_NORM | DNS_MX | DNS_SOA | DNS_SRV | {
+    type: 'UNKNOWN'
+}
+
 type CloseFunction = () => void;
 
 declare module 'socket'{
@@ -33,7 +67,7 @@ declare module 'socket'{
         suiteb?: boolean
     }) => Promise<void>;
 
-    export const resolveDNS: (host: string, dns_server?: string) => Promise<IAddr>;
+    export const resolveDNS: (host: string, dns_server?: string) => Promise<Array<DnsResult>>;
 
     export const regCert: (key: string, cert: string, ca: string) => void;
     export const unregCert: (key: string) => boolean;

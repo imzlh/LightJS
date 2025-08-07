@@ -2911,6 +2911,7 @@ void js_handle_promise_reject(
         if(!catch_error && js_dispatch_global_event(ctx, "unhandledrejection", dobj, true)){
             __fprintf(pstderr, "Uncaught (in promise) ");
             js_dump_promise(ctx, promise, pstderr);
+            __fprintf(pstderr, "\n");
         }
         JS_FreeValue(ctx, dobj);
         // JS_FreeValue(ctx, reason);

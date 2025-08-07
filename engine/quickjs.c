@@ -6876,7 +6876,7 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_val,
 
     if (JS_IsUndefined(ctx->error_back_trace))
         ctx->error_back_trace = js_dup(stack);
-    if (has_filter_func || can_add_backtrace(error_val)) {
+    if (has_filter_func || JS_IsPromise(error_val) || can_add_backtrace(error_val)) {
         JS_DefinePropertyValue(ctx, error_val, JS_ATOM_stack, stack,
                                JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
     } else {
@@ -50631,8 +50631,6 @@ static JSValue js_promise_constructor(JSContext *ctx, JSValueConst new_target,
     JS_FreeValue(ctx, args[0]);
     JS_FreeValue(ctx, args[1]);
 
-    // create stack
-    build_backtrace(ctx, obj, JS_UNDEFINED, NULL, 0, 0, 0);
     return obj;
  fail1:
     JS_FreeValue(ctx, args[0]);
@@ -50693,6 +50691,10 @@ static JSValue js_new_promise_capability(JSContext *ctx,
     for(i = 0; i < 2; i++)
         resolving_funcs[i] = js_dup(s->data[i]);
     JS_FreeValue(ctx, executor);
+
+    // build backtrace
+    build_backtrace(ctx, result_promise, JS_UNDEFINED, NULL, 0, 0, 0);
+
     return result_promise;
  fail:
     JS_FreeValue(ctx, executor);
