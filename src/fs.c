@@ -311,7 +311,7 @@ static JSValue js_inotify_close(JSContext *ctx, JSValueConst this_val, int argc,
     struct JSValueProxy* proxy = evfd_get_opaque(fd);
     LJS_FreeJSValueProxy(proxy);
 
-    evcore_stop_inotify(fd);
+    evfd_close(fd);
     JS_SetOpaque(this_val, NULL);
     return JS_UNDEFINED;
 }
@@ -320,11 +320,22 @@ static JSValue js_inotify_close(JSContext *ctx, JSValueConst this_val, int argc,
 
 void in_callback(EvFD* fd, const char* path, uint32_t evtype, const char* move_to, void* cb_ptr){
     struct JSValueProxy* proxy = (struct JSValueProxy*)cb_ptr;
+
+    if(path == NULL && evtype == IN_CLOSE) return;
+
     JS_Call(proxy -> ctx, proxy -> val, JS_NULL, evtype == IN_MOVE ? 3 : 2, (JSValueConst[]){
         JS_NewUint32(proxy -> ctx, evtype),
         JS_NewString(proxy -> ctx, path),
         evtype == IN_MOVE ? JS_NewString(proxy -> ctx, move_to) : JS_UNDEFINED
     });
+}
+
+void in_resolve(EvFD* fd, bool _, void* cb_ptr){
+    struct promise* prom = (struct promise*)cb_ptr;
+    js_resolve(prom, JS_UNDEFINED);
+
+    // free event callback
+    LJS_FreeJSValueProxy(evfd_get_opaque(fd));
 }
 
 static JSValue js_inotify_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv){
@@ -339,20 +350,18 @@ static JSValue js_inotify_ctor(JSContext *ctx, JSValueConst new_target, int argc
 
     JSValue class = JS_NewObjectClass(ctx, js_inotify_class_id);
     JS_SetOpaque(class, fd);
+
+    // close promise
+    struct promise* prom = js_promise(ctx);
+    JS_DefinePropertyValueStr(ctx, class, "closed", js_get_promise(prom), JS_PROP_C_W_E);
+
+    evfd_onclose(fd, in_resolve, prom);
+
     return class;
 }
 
-static void js_inotify_finalizer(JSRuntime *rt, JSValue val){
-    EvFD* fd = JS_GetOpaque(val, js_inotify_class_id);
-    if(!fd) return;
-
-    LJS_FreeJSValueProxy(evfd_get_opaque(fd));
-    evcore_stop_inotify(fd);
-}
-
 static JSClassDef js_inotify_class = {
-    "Inotify",
-    .finalizer = js_inotify_finalizer
+    "Inotify"
 };
 
 static const JSCFunctionListEntry js_inotify_funcs[] = {
@@ -365,27 +374,27 @@ static const JSCFunctionListEntry js_inotify_funcs[] = {
 
 static const JSCFunctionListEntry js_inotify_flags[] = {
     // event mask
-    C_CONST(IN_ACCESS),
-    C_CONST(IN_MODIFY),
-    C_CONST(IN_ATTRIB),
-    C_CONST(IN_CLOSE_WRITE),
-    C_CONST(IN_CLOSE_NOWRITE),
-    C_CONST(IN_OPEN),
-    C_CONST(IN_CREATE),
-    C_CONST(IN_DELETE),
-    C_CONST(IN_DELETE_SELF),
-    C_CONST(IN_MOVE_SELF),
-    C_CONST(IN_UNMOUNT),
+    C_CONST_RENAME(IN_ACCESS, ACCESS),
+    C_CONST_RENAME(IN_MODIFY, MODIFY),
+    C_CONST_RENAME(IN_ATTRIB, ATTRIB),
+    C_CONST_RENAME(IN_CLOSE_WRITE, CLOSE_WRITE),
+    C_CONST_RENAME(IN_CLOSE_NOWRITE, CLOSE_NOWRITE),
+    C_CONST_RENAME(IN_OPEN, OPEN),
+    C_CONST_RENAME(IN_CREATE, CREATE),
+    C_CONST_RENAME(IN_DELETE, DELETE),
+    C_CONST_RENAME(IN_DELETE_SELF, DELETE_SELF),
+    C_CONST_RENAME(IN_MOVE_SELF, MOVE_SELF),
+    C_CONST_RENAME(IN_UNMOUNT, UNMOUNT),
     // message flags
-    C_CONST(IN_Q_OVERFLOW),
-    C_CONST(IN_IGNORED),
-    C_CONST(IN_ONLYDIR),
-    C_CONST(IN_DONT_FOLLOW),
-    C_CONST(IN_MASK_ADD),
-    C_CONST(IN_ISDIR),
+    C_CONST_RENAME(IN_Q_OVERFLOW, Q_OVERFLOW),
+    C_CONST_RENAME(IN_IGNORED, IGNORED),
+    C_CONST_RENAME(IN_ONLYDIR, ONLYDIR),
+    C_CONST_RENAME(IN_DONT_FOLLOW, DONT_FOLLOW),
+    C_CONST_RENAME(IN_MASK_ADD, MASK_ADD),
+    C_CONST_RENAME(IN_ISDIR, ISDIR),
     // watch flags
-    C_CONST(IN_ONESHOT),
-    C_CONST(IN_ALL_EVENTS),
+    C_CONST_RENAME(IN_ONESHOT, ONESHOT),
+    C_CONST_RENAME(IN_ALL_EVENTS, ALL_EVENTS),
 };
 
 // --------------- stdio ---------------

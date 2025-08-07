@@ -880,7 +880,36 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     }
 #ifdef LJS_MBEDTLS
     else if(is_tls){
-        evfd_initssl(evfd, NULL, true, 0, NULL, NULL);
+        InitSSLOptions options = {0};
+
+        // tls options
+        if(argc >= 2){
+            if(JS_IsString(jsobj = JS_GetPropertyStr(ctx, argv[1], "hostname"))){
+                options.server_name = JS_ToCString(ctx, jsobj);
+                JS_FreeCString(ctx, options.server_name);
+            }
+            JS_FreeValue(ctx, jsobj);
+
+            if(JS_IsArray(jsobj = JS_GetPropertyStr(ctx, argv[1], "alpn"))){
+                int64_t count;
+                if(JS_GetLength(ctx, jsobj, &count) > 0){
+                    options.alpn_protocols = malloc2((count +1) * sizeof(char*));
+                    for(int i = 0; i < count; i++){
+                        JSValue item = JS_GetPropertyUint32(ctx, jsobj, i);
+                        const char* protocol = JS_ToCString(ctx, item);
+                        if(protocol != NULL){
+                            ((char**)options.alpn_protocols)[i] = (void*)protocol;
+                        }
+                        JS_FreeCString(ctx, protocol);
+                        JS_FreeValue(ctx, item);
+                    }
+                    ((char**)options.alpn_protocols)[count] = NULL;
+                }
+            }
+        }
+        JS_FreeValue(ctx, jsobj);
+
+        evfd_initssl(evfd, NULL, true, &options, NULL, NULL);
     }
 #endif
 

@@ -1041,7 +1041,7 @@ static int parse_evloop_callback(EvFD* evfd, bool _, uint8_t* _line_data, uint32
         // 找空格解析参数
         char *param1 = line_data;
         STRTRIM (param1, len + line_data);
-        char *param2 = strnpchr(line_data, ' ', line_data + len);
+        char *param2 = strnpchr(line_data, ' ', line_data + MIN(16, len));
         if (param2 == NULL){
             goto error;
         }
@@ -1118,6 +1118,7 @@ static int parse_evloop_callback(EvFD* evfd, bool _, uint8_t* _line_data, uint32
         if(!strlen(name) || !strlen(value)) return EVCB_RET_CONTINUE;
         
         if (strcmp(line_data, "content-length") == 0){
+            if(line_data[15] == '-') goto error;
             data -> content_length = atoi (value);
         }else if(
             strcmp (line_data, "transfer-encoding") == 0 && 

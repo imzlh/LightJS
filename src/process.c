@@ -349,23 +349,83 @@ static JSValue js_del_signal(JSContext* ctx, JSValueConst this_val, int argc, JS
     return JS_FALSE;
 }
 
-static JSValue js_get_ppid(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+static JSValue js_limit(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    if(argc <= 2)
+iarg:
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments",
+            "Process.limit(resource: number, cur?: number, max?: number): void");
+
+    struct rlimit rlim;
+    int64_t resource, cur = 0, max = 0;
+    if(-1 == JS_ToInt64(ctx, &resource, argv[0])) goto iarg;
+    if(argc >= 2 && -1 == JS_ToInt64(ctx, &cur, argv[1]) && 
+        argc >= 3 && -1 == JS_ToInt64(ctx, &max, argv[2])){
+            // query limit
+            if(getrlimit(resource, &rlim) == -1)
+                return LJS_Throw(ctx, EXCEPTION_IO, "Failed to get resource limit: %s", NULL, strerror(errno));
+            JSValue ret = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, ret, "cur", JS_NewInt64(ctx, rlim.rlim_cur));
+            JS_SetPropertyStr(ctx, ret, "max", JS_NewInt64(ctx, rlim.rlim_max));
+            return ret;
+        }
+
+    rlim.rlim_cur = cur;
+    rlim.rlim_max = max;
+
+    if(-1 == setrlimit(resource, &rlim)){
+        return LJS_Throw(ctx, EXCEPTION_IO, "Failed to set resource limit: %s", NULL, strerror(errno));
+    }
+
+    return JS_UNDEFINED;
+}
+
+static JSValue js_get_ppid(JSContext* ctx, JSValueConst this_val){
     return JS_NewInt32(ctx, getppid());
 }
 
-static JSValue js_cwd(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
-    if(argc == 0){
-        char cwd[PATH_MAX];
-        if(getcwd(cwd, PATH_MAX) == NULL)
-            return JS_ThrowTypeError(ctx, "Failed to get current working directory");
-        return JS_NewString(ctx, cwd);
-    }else{
-        const char* path = JS_ToCString(ctx, argv[0]);
-        if(chdir(path)!= 0)
-            return LJS_Throw(ctx, EXCEPTION_IO, "Failed to change cwd to %s: %s", NULL, path, strerror(errno));
-        JS_FreeCString(ctx, path);
-        return JS_UNDEFINED;
-    }
+static JSValue js_get_uid(JSContext* ctx, JSValueConst this_val){ 
+    return JS_NewInt32(ctx, getuid());
+}
+
+static JSValue js_get_gid(JSContext* ctx, JSValueConst this_val){
+    return JS_NewInt32(ctx, getgid());
+}
+
+static JSValue js_set_gid(JSContext* ctx, JSValueConst this_val, JSValueConst value){
+    int32_t uid;
+    if(-1 == JS_ToInt32(ctx, &uid, value)) return JS_EXCEPTION;
+    if(setgid(uid) == -1) return LJS_Throw(ctx, EXCEPTION_IO, "Failed to setgid to %d: %s", NULL, uid, strerror(errno));
+    return JS_UNDEFINED;
+}
+
+static JSValue js_set_uid(JSContext* ctx, JSValueConst this_val, JSValueConst value){
+    int32_t uid;
+    if(-1 == JS_ToInt32(ctx, &uid, value)) return JS_EXCEPTION;
+    if(setuid(uid) == -1) return LJS_Throw(ctx, EXCEPTION_IO, "Failed to setuid to %d: %s", NULL, uid, strerror(errno));
+    return JS_UNDEFINED;
+}
+
+static JSValue js_get_euid(JSContext* ctx, JSValueConst this_val){
+    return JS_NewInt32(ctx, getegid());
+}
+
+static JSValue js_get_egid(JSContext* ctx, JSValueConst this_val){
+    return JS_NewInt32(ctx, getegid());
+}
+
+static JSValue js_get_cwd(JSContext* ctx, JSValueConst this_val){
+    char cwd[PATH_MAX];
+    if(getcwd(cwd, PATH_MAX) == NULL)
+        return JS_ThrowTypeError(ctx, "Failed to get current working directory");
+    return JS_NewString(ctx, cwd);
+}
+
+static JSValue js_set_cwd(JSContext* ctx, JSValueConst this_val, JSValueConst value){
+    const char* path = JS_ToCString(ctx, value);
+    if(chdir(path)!= 0)
+        return LJS_Throw(ctx, EXCEPTION_IO, "Failed to change cwd to %s: %s", NULL, path, strerror(errno));
+    JS_FreeCString(ctx, path);
+    return JS_UNDEFINED;
 }
 
 static JSValue js_sleep(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
@@ -375,6 +435,19 @@ static JSValue js_sleep(JSContext* ctx, JSValueConst this_val, int argc, JSValue
     usleep(ms * 1000);
     return JS_UNDEFINED;
 }
+
+static JSCFunctionListEntry js_process_self_funcs[] = {
+    JS_CFUNC_DEF("exit", 1, js_process_exit),
+    JS_CFUNC_DEF("setSignal", 2, js_set_signal),
+    JS_CFUNC_DEF("removeSignal", 1, js_del_signal),
+    JS_CFUNC_DEF("limit", 2, js_limit),
+    JS_CGETSET_DEF("cwd", js_get_cwd, js_set_cwd),
+    JS_CGETSET_DEF("ppid", js_get_ppid, NULL),
+    JS_CGETSET_DEF("uid", js_get_uid, js_set_uid),
+    JS_CGETSET_DEF("gid", js_get_gid, js_set_gid),
+    JS_CGETSET_DEF("euid", js_get_euid, NULL),
+    JS_CGETSET_DEF("egid", js_get_egid, NULL),
+};
 
 static JSValue js_get_self(JSContext* ctx){
     App* app = JS_GetContextOpaque(ctx);
@@ -390,12 +463,7 @@ static JSValue js_get_self(JSContext* ctx){
     printf("jsvm: create process %d, entry: %s\n", getpid(), entry);
 #endif
 
-    JS_SetPropertyStr(ctx, ret, "signal", JS_NewCFunction(ctx, js_set_signal, "setSignal", 2));
-    JS_SetPropertyStr(ctx, ret, "removeSignal", JS_NewCFunction(ctx, js_del_signal, "removeSignal", 1));
-
-    JS_DefinePropertyGetSet(ctx, ret, JS_NewAtom(ctx, "cwd"), JS_NewCFunction(ctx, js_cwd, "getCwd", 0), JS_NewCFunction(ctx, js_cwd, "setCwd", 1), 0);
-    JS_DefinePropertyGetSet(ctx, ret, JS_NewAtom(ctx, "ppid"), JS_NewCFunction(ctx, js_get_ppid, "getPpid", 0), JS_UNDEFINED, 0);
-
+    JS_SetPropertyFunctionList(ctx, ret, js_process_self_funcs, countof(js_process_self_funcs));
     return ret;
 }
 
@@ -724,6 +792,25 @@ static const JSCFunctionListEntry js_process_signals[] = {
     C_CONST(SIGSYS),
 };
 
+static const JSCFunctionListEntry js_limit_const[] = {
+    C_CONST_RENAME(RLIMIT_AS, AS),
+    C_CONST_RENAME(RLIMIT_CORE, CORE),
+    C_CONST_RENAME(RLIMIT_CPU, CPU),
+    C_CONST_RENAME(RLIMIT_DATA, DATA),
+    C_CONST_RENAME(RLIMIT_FSIZE, FSIZE),
+    C_CONST_RENAME(RLIMIT_LOCKS, LOCKS),
+    C_CONST_RENAME(RLIMIT_MEMLOCK, MEMLOCK),
+    C_CONST_RENAME(RLIMIT_MSGQUEUE, MSGQUEUE),
+    C_CONST_RENAME(RLIMIT_NICE, NICE),
+    C_CONST_RENAME(RLIMIT_NOFILE, NOFILE),
+    C_CONST_RENAME(RLIMIT_NPROC, NPROC),
+    C_CONST_RENAME(RLIMIT_RSS, RSS),
+    C_CONST_RENAME(RLIMIT_RTPRIO, RTPRIO),
+    C_CONST_RENAME(RLIMIT_RTTIME, RTTIME),
+    C_CONST_RENAME(RLIMIT_SIGPENDING, SIGPENDING),
+    C_CONST_RENAME(RLIMIT_STACK, STACK),
+};
+
 static const JSClassDef js_process_class = {
     "Process",
     .finalizer = js_process_finalizer
@@ -801,6 +888,11 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
     JSValue signals = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, signals, js_process_signals, countof(js_process_signals));
     JS_SetModuleExport(ctx, m, "signals", signals);
+
+    // limits
+    JSValue limits = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, limits, js_limit_const, countof(js_limit_const));
+    JS_SetModuleExport(ctx, m, "limits", limits);
 
     // set STDIN
     // struct termios tty;

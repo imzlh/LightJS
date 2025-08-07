@@ -58,7 +58,9 @@ declare module 'socket'{
 
     export const connect: (addr: string, settings?: {
         timeout?: number,
-        // nodelay?: boolean
+        // nodelay?: boolean,
+        hostname?: string,              // for TLS
+        alpn_protocols?: Array<string>, // for TLS
     }) => IOPipe;
 
     export const upgradeTLS: (client: U8Pipe, settings: {

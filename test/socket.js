@@ -1,5 +1,5 @@
 import { exit, self, signals } from "process";
-import { bind, connect } from "socket"
+import { bind, connect, resolveDNS } from "socket"
 
 // const port = (Math.random() * 10000 + 10000).toFixed(0);
 const port = 8080;
@@ -43,14 +43,22 @@ await test('client', async () => {
     client.close();
 })
 
+await test('async_dns', async () => {
+    const res = await resolveDNS("www.bing.com", "114.114.114.114");
+    assert(res.length > 0);
+    console.log(res);
+})
+
 await test('remote http', async () => {
-    const client = connect("tcp://172.23.224.1:8000");
+    const ip = await resolveDNS("www.baidu.com", "114.114.114.114");
+    // @ts-ignore
+    const client = connect(`tls://${ip.filter(x => x.type === 'A')[0].data}:443`);
     client.onclose.catch(e => console.log("client: client connect failed", e));
     client.onclose.then(e => console.log("client: client closed"));
 
     for(const line of [
-        "GET / HTTP/1.1",
-        "Host: www.google.com",
+        "POST / HTTP/1.1",
+        "Host: www.baidu.com",
         "Connection: close",
         "Content-Length: 1",
         "",

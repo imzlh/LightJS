@@ -1,5 +1,5 @@
 /**
- * Control the behavior of every thread created by the engine.
+ * Control the behavior of each thread created by the engine.
  * Provide toolkits to better code multi-threading.
  *
  * Copyright (c) 2025 iz

@@ -11,7 +11,7 @@
             "program": "${workspaceFolder}/build/ljs",
             "preLaunchTask": "CMake: 生成",
             // "args": ["--memory-limit=64m", "example/tinyhttp", "http://localhost:8000"],
-            "args": ["--memory-limit=64m", "test", "asdns"],
+            "args": ["--memory-limit=64m", "test", "inotify"],
             // "args": ["--memory-limit=64m", "src/repl.js"],
             // "args": ["--memory-limit=64m", "${file}"],
             // "args": ["--memory-limit=64m", "lib/lbundler.js", "lib"],

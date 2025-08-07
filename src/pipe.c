@@ -39,6 +39,10 @@
 #include <threads.h>
 #include <termios.h>
 
+#ifdef LJS_MBEDTLS
+#include <mbedtls/error.h>
+#endif
+
 struct PipeRWTask{
     Promise* promise;
     JSValue write_data; // for write()
@@ -562,8 +566,13 @@ static void evwrite_callback(EvFD* evfd, bool success, void* opaque){
     struct PipeRWTask* task = opaque;
     if(success)
         js_resolve(task -> promise, JS_UNDEFINED);
-    else
-        js_reject(task -> promise, "Write failed");
+    else if(0 == evfd_ssl_errno(evfd))
+        js_reject(task -> promise, "Write failed: Connection closed");
+    else {
+        char ebuf[128];
+        mbedtls_strerror(evfd_ssl_errno(evfd), ebuf, sizeof(ebuf));
+        js_reject3(task -> promise, "Write failed: %s", ebuf);
+    }
     JSContext* ctx = task -> pipe -> pipe.fdpipe -> ctx;
     U8PIPE_UNREF(task -> pipe);
     js_free(ctx, task);

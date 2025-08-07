@@ -28,6 +28,8 @@
 #include "../engine/cutils.h"
 #endif
 
+// #undef LJS_DEBUG    // for debug only
+
 #include "utils.h"
 
 #include <sys/inotify.h>
@@ -89,6 +91,7 @@ enum {
 #endif
 
 #define C_CONST(x) JS_PROP_INT32_DEF(#x, x, JS_PROP_CONFIGURABLE )
+#define C_CONST_RENAME(cconst, name) JS_PROP_INT32_DEF(#name, cconst, JS_PROP_CONFIGURABLE )
 
 typedef JSValue (*PipeCallback)(JSContext* ctx, void* ptr, JSValueConst data);
 
@@ -406,7 +409,6 @@ EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* cbo
 bool evcore_clearTimer(int timer_fd);
 bool evcore_clearTimer2(EvFD* evfd);
 EvFD* evcore_inotify(EvINotifyCallback callback, void* user_data);
-bool evcore_stop_inotify(EvFD* evfd);
 bool evcore_inotify_watch(EvFD* evfd, const char* path, uint32_t mask, int* wd);
 bool evcore_inotify_unwatch(EvFD* evfd, int wd);
 int evcore_inotify_find(EvFD* evfd, const char* path);

@@ -33,6 +33,11 @@ declare module 'process'{
          */
         cwd: string,
 
+        gid: number,
+        uid: number,
+        readonly egid: number,
+        readonly euid: number,
+
         /**
          * 环境变量对象<br>
          * 可以直接通过读写值修改，多个Worker间可以安全共享

@@ -487,7 +487,7 @@ bool js_has_sourcemap(const char *file_path){
     return false;
 }
 
-// 获取映射结果
+// Get mapping for a given position in a file
 MappingResult js_get_source_mapping(const char *file_path, int generated_line, int generated_column) {
     MappingResult result = {0};
     
