@@ -104,6 +104,8 @@ int eventfd_write(evfd_t fd, eventfd_t value){
 }
 #else
 #define evfd_t int
+#define EVPIPE_READABLE_FD(fd) fd
+#define EVPIPE_WRITABLE_FD(fd) fd
 #endif
 
 // predef 

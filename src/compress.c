@@ -61,8 +61,8 @@ static JSValue js_zlib_zlibformat(JSContext *ctx, JSValueConst this_val, int arg
     uint8_t* outbuf = js_malloc(ctx, outsize);
     if(!outbuf) return JS_ThrowOutOfMemory(ctx);
 
-main:
     int res;
+main:
     if(decompress){
         res = uncompress2(outbuf, &outsize, buf, &bufsize);
     }else{
