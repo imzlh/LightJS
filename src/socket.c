@@ -34,13 +34,20 @@
 #include <errno.h>
 #include <threads.h>
 #include <signal.h>
+#include <fcntl.h>
 #include <netinet/tcp.h>
+#include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/un.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/random.h>
+
+#ifdef __CYGWIN__
+#include "../deps/wepoll/wepoll.h"
+#else
+#include <sys/epoll.h>
+#endif
 
 #ifdef LJS_MBEDTLS
 #include "../lib/mbedtls_config.h"
@@ -262,12 +269,12 @@ static int build_dns_query(uint8_t* buf, size_t buf_size, const char* domain, ui
 
     // 构造DNS头部
     struct dns_header* header = (struct dns_header*)buf;
-    header->id = htons(transaction_id);
-    header->flags = htons(0x0100);  // 标准递归查询
-    header->qdcount = htons(1);     // 1个问题
-    header->ancount = 0;
-    header->nscount = 0;
-    header->arcount = 0;
+    header -> id = htons(transaction_id);
+    header -> flags = htons(0x0100);  // 标准递归查询
+    header -> qdcount = htons(1);     // 1个问题
+    header -> ancount = 0;
+    header -> nscount = 0;
+    header -> arcount = 0;
 
     uint8_t* ptr = buf + sizeof(struct dns_header);
     const char* label_start = domain;
@@ -403,9 +410,9 @@ static int parse_dns_records(const uint8_t* packet, size_t packet_size,
         if (!record) break;
         
         // 读取记录头部
-        record->type = ntohs(*(uint16_t*)ptr); ptr += 2;  // Type
+        record -> type = ntohs(*(uint16_t*)ptr); ptr += 2;  // Type
         ptr += 2;  // Class (跳过)
-        record->ttl = ntohl(*(uint32_t*)ptr); ptr += 4;   // TTL
+        record -> ttl = ntohl(*(uint32_t*)ptr); ptr += 4;   // TTL
         uint16_t rdlength = ntohs(*(uint16_t*)ptr); ptr += 2;  // Data Length
         
         // 检查数据长度
@@ -415,44 +422,44 @@ static int parse_dns_records(const uint8_t* packet, size_t packet_size,
         }
         
         // 根据类型解析数据
-        switch (record->type) {
+        switch (record -> type) {
             case DNS_A:
                 if (rdlength == 4) {
-                    memcpy(&record->data.a, ptr, 4);
+                    memcpy(&record -> data.a, ptr, 4);
                 }
                 break;
                 
             case DNS_AAAA:
                 if (rdlength == 16) {
-                    memcpy(&record->data.aaaa, ptr, 16);
+                    memcpy(&record -> data.aaaa, ptr, 16);
                 }
                 break;
                 
             case DNS_CNAME:
             case DNS_NS:
                 if (parse_dns_name(packet, packet_size, ptr, 
-                    (record->type == DNS_CNAME) ? record->data.cname : record->data.ns, 
-                    sizeof(record->data.cname)) == 0) {
+                    (record -> type == DNS_CNAME) ? record -> data.cname : record -> data.ns, 
+                    sizeof(record -> data.cname)) == 0) {
                     // 解析成功
                 }
                 break;
                 
             case DNS_MX:
                 if (rdlength >= 3) {
-                    record->data.mx.priority = ntohs(*(uint16_t*)ptr);
+                    record -> data.mx.priority = ntohs(*(uint16_t*)ptr);
                     parse_dns_name(packet, packet_size, ptr + 2, 
-                        record->data.mx.exchange, sizeof(record->data.mx.exchange));
+                        record -> data.mx.exchange, sizeof(record -> data.mx.exchange));
                 }
                 break;
                 
             case DNS_TXT:
                 if (rdlength > 0) {
                     uint8_t txt_len = *ptr;
-                    size_t copy_len = (txt_len < sizeof(record->data.txt) - 1) ? 
-                        txt_len : sizeof(record->data.txt) - 1;
+                    size_t copy_len = (txt_len < sizeof(record -> data.txt) - 1) ? 
+                        txt_len : sizeof(record -> data.txt) - 1;
                     if (copy_len > 0 && ptr + 1 + copy_len <= packet_end) {
-                        memcpy(record->data.txt, ptr + 1, copy_len);
-                        record->data.txt[copy_len] = '\0';
+                        memcpy(record -> data.txt, ptr + 1, copy_len);
+                        record -> data.txt[copy_len] = '\0';
                     }
                 }
                 break;
@@ -465,7 +472,7 @@ static int parse_dns_records(const uint8_t* packet, size_t packet_size,
                     int mname_len = skip_dns_name(packet, packet_size, soa_ptr);
                     if (mname_len > 0) {
                         parse_dns_name(packet, packet_size, soa_ptr, 
-                            record->data.soa.mname, sizeof(record->data.soa.mname));
+                            record -> data.soa.mname, sizeof(record -> data.soa.mname));
                         soa_ptr += mname_len;
                     }
                     
@@ -473,28 +480,28 @@ static int parse_dns_records(const uint8_t* packet, size_t packet_size,
                     int rname_len = skip_dns_name(packet, packet_size, soa_ptr);
                     if (rname_len > 0) {
                         parse_dns_name(packet, packet_size, soa_ptr, 
-                            record->data.soa.rname, sizeof(record->data.soa.rname));
+                            record -> data.soa.rname, sizeof(record -> data.soa.rname));
                         soa_ptr += rname_len;
                     }
                     
                     // 解析序列号等字段
                     if (soa_ptr + 20 <= ptr + rdlength) {
-                        record->data.soa.serial = ntohl(*(uint32_t*)soa_ptr); soa_ptr += 4;
-                        record->data.soa.refresh = ntohl(*(uint32_t*)soa_ptr); soa_ptr += 4;
-                        record->data.soa.retry = ntohl(*(uint32_t*)soa_ptr); soa_ptr += 4;
-                        record->data.soa.expire = ntohl(*(uint32_t*)soa_ptr); soa_ptr += 4;
-                        record->data.soa.minimum = ntohl(*(uint32_t*)soa_ptr);
+                        record -> data.soa.serial = ntohl(*(uint32_t*)soa_ptr); soa_ptr += 4;
+                        record -> data.soa.refresh = ntohl(*(uint32_t*)soa_ptr); soa_ptr += 4;
+                        record -> data.soa.retry = ntohl(*(uint32_t*)soa_ptr); soa_ptr += 4;
+                        record -> data.soa.expire = ntohl(*(uint32_t*)soa_ptr); soa_ptr += 4;
+                        record -> data.soa.minimum = ntohl(*(uint32_t*)soa_ptr);
                     }
                 }
                 break;
                 
             case DNS_SRV:
                 if (rdlength >= 6) {
-                    record->data.srv.priority = ntohs(*(uint16_t*)ptr);
-                    record->data.srv.weight = ntohs(*(uint16_t*)(ptr + 2));
-                    record->data.srv.port = ntohs(*(uint16_t*)(ptr + 4));
+                    record -> data.srv.priority = ntohs(*(uint16_t*)ptr);
+                    record -> data.srv.weight = ntohs(*(uint16_t*)(ptr + 2));
+                    record -> data.srv.port = ntohs(*(uint16_t*)(ptr + 4));
                     parse_dns_name(packet, packet_size, ptr + 6, 
-                        record->data.srv.target, sizeof(record->data.srv.target));
+                        record -> data.srv.target, sizeof(record -> data.srv.target));
                 }
                 break;
                 
@@ -524,26 +531,26 @@ int dns_response_handler(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_siz
     DnsQueryContext* ctx = (DnsQueryContext*)user_data;
 
     if(!ok){
-        ctx -> error_callback("failed to read DNS response", ctx->user_data);
+        ctx -> error_callback("failed to read DNS response", ctx -> user_data);
         goto cleanup;
     }
     
     // 基础校验
     if (!buffer || read_size < sizeof(struct dns_header)) {
-        ctx->error_callback("Invalid DNS response: too short", ctx->user_data);
+        ctx -> error_callback("Invalid DNS response: too short", ctx -> user_data);
         goto cleanup;
     }
     
     struct dns_header* header = (struct dns_header*)buffer;
     
     // 检查事务ID
-    if (ntohs(header->id) != ctx->transaction_id) {
-        ctx->error_callback("Invalid DNS response: transaction ID mismatch", ctx->user_data);
+    if (ntohs(header -> id) != ctx -> transaction_id) {
+        ctx -> error_callback("Invalid DNS response: transaction ID mismatch", ctx -> user_data);
         goto cleanup;
     }
     
     // 检查响应状态码
-    uint16_t flags = ntohs(header->flags);
+    uint16_t flags = ntohs(header -> flags);
     uint16_t rcode = flags & 0x000F;
     
     if (rcode != 0) {
@@ -556,15 +563,15 @@ int dns_response_handler(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_siz
             case 5: error_msg = "Refused"; break;
             default: break;
         }
-        ctx->error_callback(error_msg, ctx->user_data);
+        ctx -> error_callback(error_msg, ctx -> user_data);
         goto cleanup;
     }
     
     // 解析各部分记录数
-    uint16_t qdcount = ntohs(header->qdcount);
-    uint16_t ancount = ntohs(header->ancount);
-    uint16_t nscount = ntohs(header->nscount);
-    uint16_t arcount = ntohs(header->arcount);
+    uint16_t qdcount = ntohs(header -> qdcount);
+    uint16_t ancount = ntohs(header -> ancount);
+    uint16_t nscount = ntohs(header -> nscount);
+    uint16_t arcount = ntohs(header -> arcount);
     
     // 跳过问题部分
     const uint8_t* ptr = buffer + sizeof(struct dns_header);
@@ -573,7 +580,7 @@ int dns_response_handler(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_siz
     for (int i = 0; i < qdcount && ptr < buffer_end; i++) {
         int name_skip = skip_dns_name(buffer, read_size, ptr);
         if (name_skip < 0 || ptr + name_skip + 4 > buffer_end) {
-            ctx->error_callback("Malformed DNS response: invalid question section", ctx->user_data);
+            ctx -> error_callback("Malformed DNS response: invalid question section", ctx -> user_data);
             goto cleanup;
         }
         ptr += name_skip + 4; // 跳过QTYPE(2) + QCLASS(2)
@@ -584,7 +591,7 @@ int dns_response_handler(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_siz
     if (total_records == 0) {
         // 没有记录，返回空数组
         dns_record** empty_records = malloc(sizeof(dns_record*));
-        ctx->user_callback(0, empty_records, ctx->user_data);
+        ctx -> user_callback(0, empty_records, ctx -> user_data);
         goto cleanup;
     }
     
@@ -592,12 +599,12 @@ int dns_response_handler(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_siz
     int parsed_count = parse_dns_records(buffer, read_size, ptr, total_records, &records);
     
     if (parsed_count < 0) {
-        ctx->error_callback("Failed to parse DNS records", ctx->user_data);
+        ctx -> error_callback("Failed to parse DNS records", ctx -> user_data);
         goto cleanup;
     }
     
     // 调用用户回调
-    ctx->user_callback(parsed_count, records, ctx->user_data);
+    ctx -> user_callback(parsed_count, records, ctx -> user_data);
 
 cleanup:
     evfd_close(evfd);
@@ -666,11 +673,11 @@ static inline bool async_dns_resolve(const char* dns_server, const char* domain,
         return false;
     }
     
-    ctx->transaction_id = transaction_id;
-    ctx->user_callback = callback;
-    ctx->error_callback = error_callback;
-    ctx->user_data = user_data;
-    ctx->timeout_ms = DNS_TIMEOUT;
+    ctx -> transaction_id = transaction_id;
+    ctx -> user_callback = callback;
+    ctx -> error_callback = error_callback;
+    ctx -> user_data = user_data;
+    ctx -> timeout_ms = DNS_TIMEOUT;
     
     // 注册读取回调
     if (!evfd_read(evfd, 1024, NULL, dns_response_handler, ctx)) {
@@ -770,6 +777,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
                 setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, (const char *)&keepalive, sizeof(keepalive));
             }
             JS_FreeValue(ctx, jsobj);
+#ifndef __CYGWIN__
             if(JS_IsString(jsobj = JS_GetPropertyStr(ctx, argv[2], "bindto"))){
                 const char* bindto = JS_ToCString(ctx, jsobj);
                 if(bindto != NULL) {
@@ -778,6 +786,7 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
                 }
             }
             JS_FreeValue(ctx, jsobj);
+#endif
         }
     }
 
@@ -999,56 +1008,56 @@ void js_handle_dns_resolve(int total_records, dns_record** records, void* user_d
         JSValue obj = JS_NewObject(ctx);
         
         // 添加TTL字段
-        JS_SetPropertyStr(ctx, obj, "ttl", JS_NewInt32(ctx, record->ttl));
+        JS_SetPropertyStr(ctx, obj, "ttl", JS_NewInt32(ctx, record -> ttl));
         
-        switch (record->type) {
+        switch (record -> type) {
             case DNS_A: {
                 char ip_str[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &record->data.a, ip_str, INET_ADDRSTRLEN);
+                inet_ntop(AF_INET, &record -> data.a, ip_str, INET_ADDRSTRLEN);
                 JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "A"));
                 JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, ip_str));
                 break;
             }
             case DNS_AAAA: {
                 char ip_str[INET6_ADDRSTRLEN];
-                inet_ntop(AF_INET6, &record->data.aaaa, ip_str, INET6_ADDRSTRLEN);
+                inet_ntop(AF_INET6, &record -> data.aaaa, ip_str, INET6_ADDRSTRLEN);
                 JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "AAAA"));
                 JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, ip_str));
                 break;
             }
             case DNS_CNAME:
                 JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "CNAME"));
-                JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, record->data.cname));
+                JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, record -> data.cname));
                 break;
             case DNS_MX:
                 JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "MX"));
-                JS_SetPropertyStr(ctx, obj, "priority", JS_NewInt32(ctx, record->data.mx.priority));
-                JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, record->data.mx.exchange));
+                JS_SetPropertyStr(ctx, obj, "priority", JS_NewInt32(ctx, record -> data.mx.priority));
+                JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, record -> data.mx.exchange));
                 break;
             case DNS_NS:
                 JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "NS"));
-                JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, record->data.ns));
+                JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, record -> data.ns));
                 break;
             case DNS_TXT:
                 JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "TXT"));
-                JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, record->data.txt));
+                JS_SetPropertyStr(ctx, obj, "data", JS_NewString(ctx, record -> data.txt));
                 break;
             case DNS_SOA:
                 JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "SOA"));
-                JS_SetPropertyStr(ctx, obj, "mname", JS_NewString(ctx, record->data.soa.mname));
-                JS_SetPropertyStr(ctx, obj, "rname", JS_NewString(ctx, record->data.soa.rname));
-                JS_SetPropertyStr(ctx, obj, "serial", JS_NewInt64(ctx, record->data.soa.serial));
-                JS_SetPropertyStr(ctx, obj, "refresh", JS_NewInt32(ctx, record->data.soa.refresh));
-                JS_SetPropertyStr(ctx, obj, "retry", JS_NewInt32(ctx, record->data.soa.retry));
-                JS_SetPropertyStr(ctx, obj, "expire", JS_NewInt32(ctx, record->data.soa.expire));
-                JS_SetPropertyStr(ctx, obj, "minimum", JS_NewInt32(ctx, record->data.soa.minimum));
+                JS_SetPropertyStr(ctx, obj, "mname", JS_NewString(ctx, record -> data.soa.mname));
+                JS_SetPropertyStr(ctx, obj, "rname", JS_NewString(ctx, record -> data.soa.rname));
+                JS_SetPropertyStr(ctx, obj, "serial", JS_NewInt64(ctx, record -> data.soa.serial));
+                JS_SetPropertyStr(ctx, obj, "refresh", JS_NewInt32(ctx, record -> data.soa.refresh));
+                JS_SetPropertyStr(ctx, obj, "retry", JS_NewInt32(ctx, record -> data.soa.retry));
+                JS_SetPropertyStr(ctx, obj, "expire", JS_NewInt32(ctx, record -> data.soa.expire));
+                JS_SetPropertyStr(ctx, obj, "minimum", JS_NewInt32(ctx, record -> data.soa.minimum));
                 break;
             case DNS_SRV:
                 JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "SRV"));
-                JS_SetPropertyStr(ctx, obj, "priority", JS_NewInt32(ctx, record->data.srv.priority));
-                JS_SetPropertyStr(ctx, obj, "weight", JS_NewInt32(ctx, record->data.srv.weight));
-                JS_SetPropertyStr(ctx, obj, "port", JS_NewInt32(ctx, record->data.srv.port));
-                JS_SetPropertyStr(ctx, obj, "target", JS_NewString(ctx, record->data.srv.target));
+                JS_SetPropertyStr(ctx, obj, "priority", JS_NewInt32(ctx, record -> data.srv.priority));
+                JS_SetPropertyStr(ctx, obj, "weight", JS_NewInt32(ctx, record -> data.srv.weight));
+                JS_SetPropertyStr(ctx, obj, "port", JS_NewInt32(ctx, record -> data.srv.port));
+                JS_SetPropertyStr(ctx, obj, "target", JS_NewString(ctx, record -> data.srv.target));
                 break;
             default:
                 JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "UNKNOWN"));
@@ -1100,6 +1109,7 @@ static JSValue js_resolve_dns(JSContext *ctx, JSValueConst this_val, int argc, J
     return js_get_promise(promise);
 }
 
+#ifdef LJS_MBEDTLS
 static int default_rng(void *userdata, unsigned char *output, size_t output_size) {
     if(-1 == getrandom(output, output_size, GRND_NONBLOCK)){
         long rand = random();
@@ -1107,15 +1117,17 @@ static int default_rng(void *userdata, unsigned char *output, size_t output_size
     }
     return 0;
 }
+#endif
 
 static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+#ifdef LJS_MBEDTLS
     if(argc == 0 || !JS_IsObject(argv[0])) {
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "cert_add: missing or invalid arguments",
             "regCert(name: string, cert: string, key: string, options?: { keypwd?: string }) => void"
         );
     }
 
-#ifdef LJS_MBEDTLS
+
     JSValue name_val = argv[0];
     JSValue cert_val = argv[1];
     JSValue key_val = argv[2];
@@ -1258,6 +1270,14 @@ EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int 
         hostname = host6 ? host6 : host4;
         protocol = host6 ? "tcp6" : "tcp";
     }
+
+#ifdef __CYGWIN__
+    else {
+        errno = ENOTSUP;
+        return NULL;
+    }
+#endif
+
     bool try_ipv4 = true;
 retry:
     int fd = socket_create(protocol);

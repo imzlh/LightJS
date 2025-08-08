@@ -37,7 +37,24 @@
 #include <threads.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#ifdef __CYGWIN__
+#include <windows.h>
+#else
 #include <sys/sendfile.h>
+#endif
+
+#ifndef DT_UNKNOWN
+#define DT_UNKNOWN 0
+#define DT_FIFO 1
+#define DT_CHR 2
+#define DT_DIR 4
+#define DT_BLK 6
+#define DT_REG 8
+#define DT_LNK 10
+#define DT_SOCK 12
+#define DT_WHT 14
+#endif
 
 // class SyncPipe
 static thread_local JSClassID js_syncpipe_class_id;
@@ -250,8 +267,10 @@ static const JSCFunctionListEntry js_syncpipe_flags[] = {
     C_CONST(SEEK_END),
     C_CONST(SEEK_SET),
 
+#ifndef __CYGWIN__
     JS_PROP_INT32_DEF("FL_KEEP_SIZE", FALLOC_FL_KEEP_SIZE, JS_PROP_CONFIGURABLE),
     JS_PROP_INT32_DEF("FL_PUNCH_HOLE", FALLOC_FL_PUNCH_HOLE, JS_PROP_CONFIGURABLE)
+#endif
 };
 
 // class Inotify
@@ -259,6 +278,7 @@ static thread_local JSClassID js_inotify_class_id;
 
 #define TELL_ERROR return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild INotify instance", "did you called Inotify.close() before?");
 
+#ifndef __CYGWIN__
 static JSValue js_inotify_watch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     EvFD* fd = JS_GetOpaque(this_val, js_inotify_class_id);
     if(!fd) TELL_ERROR;
@@ -360,10 +380,6 @@ static JSValue js_inotify_ctor(JSContext *ctx, JSValueConst new_target, int argc
     return class;
 }
 
-static JSClassDef js_inotify_class = {
-    "Inotify"
-};
-
 static const JSCFunctionListEntry js_inotify_funcs[] = {
     JS_CFUNC_DEF("watch", 2, js_inotify_watch),
     JS_CFUNC_DEF("unwatch", 1, js_inotify_unwatch),
@@ -371,8 +387,19 @@ static const JSCFunctionListEntry js_inotify_funcs[] = {
     JS_CFUNC_DEF("close", 0, js_inotify_close),
     JS_PROP_STRING_DEF("[Symbol.toStringTag]", "Inotify", JS_PROP_CONFIGURABLE),
 };
+#else
+static JSValue js_inotify_ctor(JSContext *ctx, JSValueConst new_target, int argc, JSValueConst *argv){
+    return LJS_Throw(ctx, EXCEPTION_NOTSUPPORT, "not support inotify on windows", NULL);
+}
+static const JSCFunctionListEntry js_inotify_funcs[] = {};
+#endif
+
+static JSClassDef js_inotify_class = {
+    "Inotify"
+};
 
 static const JSCFunctionListEntry js_inotify_flags[] = {
+#ifndef __CYGWIN__
     // event mask
     C_CONST_RENAME(IN_ACCESS, ACCESS),
     C_CONST_RENAME(IN_MODIFY, MODIFY),
@@ -395,6 +422,7 @@ static const JSCFunctionListEntry js_inotify_flags[] = {
     // watch flags
     C_CONST_RENAME(IN_ONESHOT, ONESHOT),
     C_CONST_RENAME(IN_ALL_EVENTS, ALL_EVENTS),
+#endif
 };
 
 // --------------- stdio ---------------
@@ -890,6 +918,12 @@ static JSValue js_stdio_copy(JSContext *ctx, JSValueConst self, int argc, JSValu
     const char *dst = JS_ToCStringLen(ctx, &dst_len, argv[1]);
     if (!src || !dst) return JS_EXCEPTION;
 
+#ifdef __CYGWIN__
+    if(!CopyFile(src, dst, false)){
+        DWORD err = GetLastError();
+        LJS_Throw(ctx, EXCEPTION_IO, "failed to copy file: %s", NULL, strerror(err));
+    }
+#else
     int src_fd = open(src, O_RDONLY);
     if(src_fd < 0) goto oserr;
     int dst_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
@@ -914,10 +948,13 @@ static JSValue js_stdio_copy(JSContext *ctx, JSValueConst self, int argc, JSValu
         }
     }
 
+#endif
     return JS_UNDEFINED;
 
+#ifndef __CYGWIN__
 oserr:
     return LJS_Throw(ctx, EXCEPTION_IO, "failed to copy file: %s", NULL, strerror(errno));
+#endif
 }
 
 // open

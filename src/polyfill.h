@@ -46,6 +46,7 @@ typedef enum {
     EXCEPTION_INPUT,
     EXCEPTION_INVAILDF,
     EXCEPTION_INTERNAL,
+    EXCEPTION_NOTSUPPORT,
 
     __EXCEPTION_COUNT
 } ExceptionType;
@@ -58,6 +59,7 @@ static const char* __exception_type_str[] = {
     "InvaildFileException",
     "InputError",
     "InternalError",
+    "NotSupportError"
 };
 
 /**

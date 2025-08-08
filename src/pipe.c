@@ -33,11 +33,16 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <errno.h>
 #include <threads.h>
 #include <termios.h>
+
+#ifdef __CYGWIN__
+#include "../deps/wepoll/wepoll.h"
+#else
+#include <sys/epoll.h>
+#endif
 
 #ifdef LJS_MBEDTLS
 #include <mbedtls/error.h>
@@ -566,6 +571,7 @@ static void evwrite_callback(EvFD* evfd, bool success, void* opaque){
     struct PipeRWTask* task = opaque;
     if(success)
         js_resolve(task -> promise, JS_UNDEFINED);
+#ifdef LJS_MBEDTLS
     else if(0 == evfd_ssl_errno(evfd))
         js_reject(task -> promise, "Write failed: Connection closed");
     else {
@@ -573,6 +579,10 @@ static void evwrite_callback(EvFD* evfd, bool success, void* opaque){
         mbedtls_strerror(evfd_ssl_errno(evfd), ebuf, sizeof(ebuf));
         js_reject3(task -> promise, "Write failed: %s", ebuf);
     }
+#else
+    else
+        js_reject(task -> promise, "Write failed: Connection closed");
+#endif
     JSContext* ctx = task -> pipe -> pipe.fdpipe -> ctx;
     U8PIPE_UNREF(task -> pipe);
     js_free(ctx, task);
@@ -1136,7 +1146,9 @@ static JSValue js_iopipe_fflush(JSContext *ctx, JSValueConst this_val, int argc,
     struct U8Pipe_T* pipe = JS_GetOpaque(this_val, u8pipe_class_id);
     if(!pipe) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a U8Pipe object", NULL);
     EvFD* fd = pipe -> pipe.fdpipe -> fd;
-    if(evfd_isAIO(fd)) return JS_UNDEFINED; // 不支持异步IO
+#ifndef __CYGWIN__
+    if(evfd_isAIO(fd)) return JS_UNDEFINED; // no flush for AIO!
+#endif
     int fdnum = evfd_getfd(fd, NULL);
 
     if(isatty(fdnum)){
@@ -1152,6 +1164,9 @@ static JSValue js_iopipe_fflush(JSContext *ctx, JSValueConst this_val, int argc,
 }
 
 static JSValue js_iopipe_fseek(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+#ifdef __CYGWIN__
+    return LJS_Throw(ctx, EXCEPTION_NOTSUPPORT, "fseek(AIO) is not supported on cygwin", NULL);
+#else
     GET_U8PIPE_OPAQUE(src, this_val);
     CHECK_U8PIPE_CLOSED(src);
     CHECK_U8PIPE_READABLE(src);
@@ -1185,6 +1200,7 @@ static JSValue js_iopipe_fseek(JSContext *ctx, JSValueConst this_val, int argc, 
 
     evfd_clearbuf(src -> pipe.fdpipe -> fd);
     return JS_UNDEFINED;
+#endif
 }
 
 static JSClassDef U8Pipe_class = {

@@ -11,19 +11,19 @@ void test_buffer_init() {
     struct Buffer* buffer;
     uint8_t* data = (uint8_t*)malloc(10);
     buffer_init(&buffer, data, 10);
-    assert(buffer->buffer == data);
-    assert(buffer->size == 10);
-    assert(buffer->start == 0);
-    assert(buffer->end == 0);
-    assert(buffer->is_dynamic == false);
+    assert(buffer -> buffer == data);
+    assert(buffer -> size == 10);
+    assert(buffer -> start == 0);
+    assert(buffer -> end == 0);
+    assert(buffer -> is_dynamic == false);
     buffer_free(buffer);
 
     buffer_init(&buffer, NULL, 10);
-    assert(buffer->buffer != NULL);
-    assert(buffer->size == 10);
-    assert(buffer->start == 0);
-    assert(buffer->end == 0);
-    assert(buffer->is_dynamic == true);
+    assert(buffer -> buffer != NULL);
+    assert(buffer -> size == 10);
+    assert(buffer -> start == 0);
+    assert(buffer -> end == 0);
+    assert(buffer -> is_dynamic == true);
     buffer_free(buffer);
 }
 
@@ -47,12 +47,12 @@ void test_buffer_seek() {
     buffer_init(&buffer, NULL, 10);
 
     assert(buffer_seek(buffer, 5) == true);
-    assert(buffer->start == 5);
-    assert(buffer->end == 5);
+    assert(buffer -> start == 5);
+    assert(buffer -> end == 5);
 
     assert(buffer_seek(buffer, 5) == true);
-    assert(buffer->start == 0);
-    assert(buffer->end == 0);
+    assert(buffer -> start == 0);
+    assert(buffer -> end == 0);
 
     buffer_free(buffer);
 }
@@ -103,8 +103,8 @@ void test_buffer_clear() {
 
     buffer_clear(buffer);
     assert(buffer_is_empty(buffer));
-    assert(buffer->start == 0);
-    assert(buffer->end == 0);
+    assert(buffer -> start == 0);
+    assert(buffer -> end == 0);
 
     buffer_free(buffer);
 }
@@ -135,12 +135,12 @@ void test_buffer_realloc() {
     buffer_init(&buffer, NULL, 10);
 
     assert(buffer_realloc(buffer, 20, false) == true);
-    assert(buffer->size == 20);
+    assert(buffer -> size == 20);
 
     uint8_t data[] = "123456789";
     buffer_push(buffer, data, 9);
     assert(buffer_realloc(buffer, 5, true) == true);
-    assert(buffer->size == 5);
+    assert(buffer -> size == 5);
     assert(buffer_used(buffer) == 4); // last byte lost due to insufficient space
 
     buffer_free(buffer);
@@ -200,8 +200,8 @@ void test_buffer_expand() {
     buffer_push(buffer, data, 9);
 
     assert(buffer_flat(buffer) == true);
-    assert(buffer->start == 0);
-    assert(buffer->end == 9);
+    assert(buffer -> start == 0);
+    assert(buffer -> end == 9);
 
     buffer_free(buffer);
 }
@@ -214,8 +214,8 @@ void test_buffer_offset() {
     buffer_push(buffer, data, 9);  // start=0, end=9
 
     assert(buffer_offset(buffer, 3, false) == true);
-    assert(buffer->start == 0);    // 展开后数据从0开始
-    assert(buffer->end == 6);      // 9-3=6
+    assert(buffer -> start == 0);    // 展开后数据从0开始
+    assert(buffer -> end == 6);      // 9-3=6
     assert(buffer_used(buffer) == 6);
     
     // 验证数据内容
@@ -231,7 +231,7 @@ void test_buffer_aligned() {
     buffer_init(&buffer, NULL, 10);
 
     buffer_aligned(buffer, 16);
-    assert(((uintptr_t)buffer->buffer & 15) == 0);
+    assert(((uintptr_t)buffer -> buffer & 15) == 0);
 
     buffer_free(buffer);
 }
@@ -249,9 +249,9 @@ void test_buffer_merge() {
     buffer_push(buffer2, data2, 5); // used=5
 
     assert(buffer_merge(buffer1, buffer2) == true);
-    printf("buffer1->used=%d\n", buffer_used(buffer1));
+    printf("buffer1 -> used=%d\n", buffer_used(buffer1));
     assert(buffer_used(buffer1) == 10);
-    assert(buffer1->size == 11);
+    assert(buffer1 -> size == 11);
     
     buffer_free(buffer1);
 }

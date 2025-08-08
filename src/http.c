@@ -44,13 +44,20 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <sys/random.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
+
+#ifdef __CYGWIN__
+#include "../deps/wepoll/wepoll.h"
+#else
+#include <sys/epoll.h>
+#endif
 
 #ifdef LJS_MBEDTLS
 #include <mbedtls/ssl.h>
 #include <mbedtls/error.h>
 #endif
+
+#pragma GCC diagnostic ignored "-Wchar-subscripts"
 
 #define BUFFER_SIZE 1024
 #define MAX_HEADER_SIZE 4096
@@ -1850,11 +1857,14 @@ bool body_chunked_filter(struct Buffer* buf, void* user_data){
 static void fetch_close_cb(EvFD* evfd, bool is_rdhup, void* user_data){
     Promise *promise = user_data;
     if(is_rdhup) return;
+#ifdef LJS_MBEDTLS
     if(evfd_ssl_errno(evfd) != 0){
         char ebuf[512] = {0};
         mbedtls_strerror(evfd_ssl_errno(evfd), ebuf, sizeof(ebuf));
         js_reject3(promise, "TLS connection error: %s", ebuf);
-    }else{
+    }else
+#endif
+    {
         js_reject(promise, "Connection closed or failed");
     }
 }
@@ -1958,10 +1968,16 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     if(!fd || evfd_closed(fd)){
         // open new connection
         // ws -> tcp, wss -> ssl
-        fd = LJS_open_socket(tls ? "tcps" : "tcp", url.host, url.port, BUFFER_SIZE, &(InitSSLOptions){
+        fd = LJS_open_socket(tls ? "tcps" : "tcp", url.host, url.port, BUFFER_SIZE, 
+#ifdef LJS_MBEDTLS    
+        &(InitSSLOptions){
             .server_name = url.host,
             .alpn_protocols = (const char*[]){ "http/1.1", NULL }
-        });
+        }
+#else
+        NULL
+#endif
+        );
         if(!fd || evfd_closed(fd)){
             JS_FreeValue(ctx, obj);
             if(errno == ENOTSUP)
@@ -2290,7 +2306,7 @@ check_payload:
 
                 js_free(ws -> ctx, buf);
                 goto end;
-            }else if (ws->frame.opcode == 0x9) { // Ping
+            }else if (ws -> frame.opcode == 0x9) { // Ping
                 if (ws -> frame.payload_len > 0) {
                     build_ws_frame(&ws -> wbuffer, true, 0xA, buf, ws -> frame.payload_len, ws -> enable_mask);
                 }else{

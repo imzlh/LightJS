@@ -149,5 +149,6 @@
         "debug.h": "c",
         "cstring": "c"
     },
-    "C_Cpp.errorSquiggles": "enabled"
+    "C_Cpp.errorSquiggles": "enabled",
+    "cmake.sourceDirectory": "E:/docs/Documents/lightjs"
 }

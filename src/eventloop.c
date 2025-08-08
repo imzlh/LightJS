@@ -34,16 +34,37 @@
 #include <time.h>
 #include <netdb.h>
 #include <fcntl.h>
-#include <linux/aio_abi.h>
-#include <sys/epoll.h>
 #include <sys/timerfd.h>
-#include <sys/eventfd.h>
-#include <sys/syscall.h>
 #include <sys/socket.h>
 #include <sys/random.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+
+#ifdef __CYGWIN__
+#include "../deps/wepoll/wepoll.h"
+#define EPOLL_CLOEXEC 0
+
+#ifndef O_DIRECT
+#define O_DIRECT 0
+#endif
+
+#define EPOLL_FD_NULL NULL
+
+struct io_event {};
+struct inotify_event {};
+
+#pragma GCC diagnostic ignored "-Wunused-label"
+
+#else 
+#include <linux/aio_abi.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/syscall.h>
+
+#define EPOLL_FD_NULL -1
+
+#endif
 
 // #define LJS_DEBUG    // debug
 // #define LJS_EVLOOP_FULL_DEBUG
@@ -84,10 +105,14 @@
 enum EvFDType {
     EVFD_NORM,
     EVFD_UDP,
+#ifndef __CYGWIN__
     EVFD_AIO,
     EVFD_INOTIFY,
+#endif
     EVFD_TIMER,
+#ifdef LJS_MBEDTLS
     EVFD_SSL,
+#endif
     // diff: will attempt to read infinitely to avoid data lost when subprocess exiting
 #ifdef LJS_EVLOOP_FEATURE_PTY
     EVFD_PTY,
@@ -186,6 +211,7 @@ struct InotifyContext {
     char* move_tmp[2];
 };
 
+#ifndef __CYGWIN__
 struct AIOContext {
     aio_context_t ctx;
     void* rbuf;
@@ -195,6 +221,7 @@ struct AIOContext {
     struct Task* write_pending;
     size_t offset;
 };
+#endif
 
 struct EvFD {
     int fd[2];  // if type==EVFD_AIO, fd[1] is the real fd
@@ -203,7 +230,7 @@ struct EvFD {
     bool task_based :1;    // task-based or raw EvFD
     bool rdhup_feature :1; // whether to use RDHUP feature for socket-based EvFD
     bool rdhup :1;         // already hup?
-    bool __reserved :1;    // reserved for future use
+    bool sync :1;          // donot use async read/write
                            
     // specific for each type
     union {
@@ -267,24 +294,32 @@ struct ThreadSafeEvFD {
 };
 #endif
 
-static thread_local int epoll_fd = -1;
+static thread_local 
+#ifdef __CYGWIN__
+    HANDLE epoll_fd = NULL;
+#else
+    int epoll_fd = -1;
+#endif
 static thread_local struct list_head timer_list;
 static thread_local ssize_t evloop_events = 0;
 static atomic_int thread_id_pool = 0;
 static thread_local int thread_id = 0;
+
+#ifndef __CYGWIN__
 static int is_aio_supported = -1;
+#endif
 
 // used when evfd_destroy is called
 static thread_local struct list_head evfd_list;
+
+// for modified flag
+#define LOCK_READ_FLAG (1 << 30)
+#define LOCK_WRITE_FLAG (1 << 31)
 
 #ifdef LJS_MBEDTLS
 // override certs
 static mbedtls_x509_crt tls_global_cert;
 static pthread_rwlock_t tls_cert_mod_lock;
-
-// for modified flag
-#define LOCK_READ_FLAG (1 << 30)
-#define LOCK_WRITE_FLAG (1 << 31)
 
 // use system random to generate random numbers
 static int default_rng(void* userdata, unsigned char* output, size_t output_size) {
@@ -316,6 +351,7 @@ static inline void __useless_call(void){
 }
 
 // linux_kernel aio syscall
+#ifndef __CYGWIN__
 static inline int io_setup(unsigned nr, aio_context_t* ctxp) {
     return (int) syscall(__NR_io_setup, nr, ctxp);
 }
@@ -335,8 +371,14 @@ static inline int io_getevents(aio_context_t ctx, long min_nr, long max_nr, stru
 static inline int io_cancel(aio_context_t ctx, struct iocb* iocb, struct io_event* result) {
     return (int) syscall(__NR_io_cancel, ctx, iocb, result);
 }
+#endif
+
+// predef
+static void handle_write(int fd, EvFD* evfd, struct io_event* ioev);
+static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotify_event* inev);
 
 __attribute__((constructor)) static void evloop_init() {
+#ifndef __CYGWIN__
     struct sigaction act = {
         .sa_handler = SIG_IGN,
         .sa_flags = 0,
@@ -354,6 +396,7 @@ __attribute__((constructor)) static void evloop_init() {
         io_destroy(test_ctx);
     }
     is_aio_supported = true;
+#endif
 
 #ifdef LJS_MBEDTLS
     // init 
@@ -383,8 +426,10 @@ __attribute__((constructor)) static void evloop_init() {
 }
 
 __attribute__((destructor)) static void evloop_cleanup(){
+#ifdef LJS_MBEDTLS
     mbedtls_x509_crt_free(&tls_global_cert);
     pthread_rwlock_destroy(&tls_cert_mod_lock);
+#endif
 }
 
 #if defined(LJS_MBEDTLS) && defined(MBEDTLS_DEBUG_C)
@@ -401,6 +446,7 @@ static thread_local struct EvFD* evfd_modify_tasks[MAX_EVENTS];
 static thread_local int evfd_modify_tasks_count = 0;
 static inline void evfd_ctl(struct EvFD* evfd, uint32_t epoll_flags) {
     assert(!evfd -> destroy);
+    if(evfd -> sync) return;
 
 #ifdef LJS_DEBUG
     if(!(epoll_flags & (EPOLLHUP | EPOLLERR))){
@@ -469,6 +515,7 @@ static inline bool evfd_add(struct EvFD* evfd, uint32_t epoll_flags) {
 // cautious when using this function
 // it may make the fd inaccessible but not closed
 static inline void evfd_mod(struct EvFD* evfd, bool add, uint32_t epoll_flags) {
+    if(evfd -> sync) return;
     uint64_t flag = evfd -> modify_flag ? evfd -> modify_flag : evfd -> epoll_flags;
     if (add)    flag |= epoll_flags;
     else        flag &= ~epoll_flags;
@@ -507,6 +554,7 @@ static inline void evfd_mod_start(bool force) {
 #ifdef LJS_EVLOOP_THREADSAFE
             evfd_perform(task);
 #endif
+            assert(!task -> sync);
             
             // process marked modify_flag
             uint32_t flag = task -> modify_flag & (UINT32_MAX >> 2);
@@ -589,17 +637,35 @@ static inline void evfd_init_ts(EvFD* evfd, bool ts){
         pthread_mutex_init(&tfd -> fd_lock, NULL);
     }
 }
-#else
-#define evfd_init_ts(evfd, boot) ;
-#endif
 
 #define PERFORM(evfd, type, then) if(evfd_perform(evfd, type)){ then; evfd_perform_end(evfd, type); }
+
+#else
+#define evfd_init_ts(evfd, boot) ;
+#define PERFORM(evfd, type, then) then;
+#endif
+
 
 static inline void free_task(struct Task* task);
 
 // required to check whether fd should EPOLLIN/EPOLLOUT
 static void check_queue_status(EvFD* evfd) {
     if (evfd -> destroy || !evfd -> task_based) return;
+    if (evfd -> sync){
+        if(evfd -> u.task.rw_state){
+            // execute task
+            PERFORM(evfd, PIPE_READ, {
+                if(!list_empty(&evfd -> u.task.read_tasks))
+                    handle_read(evfd -> fd[0], evfd, NULL, NULL);
+            });
+            if(evfd -> destroy) return;
+            PERFORM(evfd, PIPE_WRITE, {
+                if(!list_empty(&evfd -> u.task.write_tasks))
+                    handle_write(evfd -> fd[0], evfd, NULL);
+            });
+        }
+        return;
+    }
 
     uint32_t new_events = evfd -> modify_flag | EPOLLERR | EPOLLLT;
     if(evfd -> u.task.tcp_connected == 0){
@@ -608,13 +674,15 @@ static void check_queue_status(EvFD* evfd) {
     }
 
     switch (evfd -> type) {
+#ifndef __CYGWIN__
         case EVFD_AIO:
             if (!list_empty(&evfd -> u.task.read_tasks) || !list_empty(&evfd -> u.task.write_tasks))
                 new_events |= EPOLLIN;
         break;
 
-        case EVFD_TIMER:
         case EVFD_INOTIFY:
+#endif
+        case EVFD_TIMER:
             if (list_empty(&evfd -> u.task.read_tasks))
                 new_events = EPOLLLT | EPOLLERR;
             else
@@ -737,10 +805,15 @@ static inline void free_task(struct Task* task) {
 
 static inline int blksize_get(int fd) {
     int blksize;
+#ifdef __CYGWIN__
+    blksize = S_BLKSIZE;
+#else
     if (fcntl(fd, BLKSSZGET, &blksize) != 0) return 512;
+#endif
     return blksize;
 }
 
+#ifndef __CYGWIN__
 static inline bool submit_aio_read(EvFD* evfd, struct Task* task) {
     if (!is_aio_supported) return false;
     if (evfd -> proto.aio -> read_pending) return true;
@@ -802,7 +875,9 @@ static inline bool submit_aio_write(EvFD* evfd, struct Task* task) {
     evfd -> proto.aio -> write_pending = task;
     return ret != -1;
 }
+#endif
 
+#ifdef LJS_MBEDTLS
 // Note: as handshake will return 0 if successful, zero_as_error should set to false
 static inline int handle_mbedtls_ret(EvFD* evfd, bool zero_as_error, int ret) {
     if (ret > 0) {
@@ -871,7 +946,6 @@ static void handle_handshake_done(EvFD* evfd){
         evfd -> proto.ssl -> handshake_cb(evfd, true, evfd -> proto.ssl -> handshake_user_data);
 }
 
-static void handle_write(int fd, EvFD* evfd, struct io_event* ioev);
 static inline ssize_t ssl_poll_data(EvFD* evfd) {
     if (evfd -> type != EVFD_SSL) return 0;
     if (evfd -> proto.ssl -> ssl_handshaking) return 0;
@@ -891,6 +965,11 @@ try_read:
         evfd -> incoming_buffer -> end = (evfd -> incoming_buffer -> end + readed) % evfd -> incoming_buffer -> size;
     return readed;
 }
+#else
+static inline ssize_t ssl_poll_data(EvFD* evfd) {
+    return 0;
+}
+#endif
 
 // handle readable event/ssl recv event
 static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotify_event* inev) {
@@ -918,13 +997,18 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
             if (n-- == 1) goto _return;
         }
         evfd -> strip_if_is_n = false;
-    } else if (evfd -> type == EVFD_AIO) {
+    } 
+#ifndef __CYGWIN__
+    else if (evfd -> type == EVFD_AIO) {
         n = ioev -> res;
         if(n == -1) goto _return;
         evfd -> proto.aio -> offset += n;
         evfd -> proto.aio -> read_pending = NULL;
         buffer_push(evfd -> incoming_buffer, evfd -> proto.aio -> rbuf, n);
-    } else if (evfd -> type == EVFD_SSL) {
+    }
+#endif
+#ifdef LJS_MBEDTLS
+    else if (evfd -> type == EVFD_SSL) {
         if(evfd -> destroy) goto start;  // skip reading
         // evfd_ssl: read from mbedtls
         if(evfd -> proto.ssl -> ssl_handshaking){
@@ -938,7 +1022,9 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
         }
         n = ssl_poll_data(evfd);
         if (n == -1) goto _return;
-    } else if (evfd -> type == EVFD_UDP) {
+    } 
+#endif
+    else if (evfd -> type == EVFD_UDP) {
         // TODO: buffer_recvfrom
         struct UDPContext* ctx = evfd -> proto.udp;
         n = recvfrom(fd, evfd -> incoming_buffer -> buffer,
@@ -996,6 +1082,7 @@ mainloop:
 
         // linux inotify
         // XXX: use struct to compute before for better performance?
+#ifndef __CYGWIN__
         if (evfd -> type == EVFD_INOTIFY) {
             char real_path[PATH_MAX + 1];
 
@@ -1037,7 +1124,9 @@ mainloop:
             prevexec ++;
             continue;
 
-        } else if (evfd -> type == EVFD_TIMER) {
+        } 
+#endif
+        else if (evfd -> type == EVFD_TIMER) {
             // read timerfd to get count
             uint64_t val;
             if (sizeof(val) == read(fd, &val, sizeof(val))) {
@@ -1231,7 +1320,10 @@ main:   // while loop
     // mostly, when executing callback of last task
     // callback add new task, but list_for_each_prev_safe will not handle it
     if (
-        evfd -> type != EVFD_INOTIFY && evfd -> type != EVFD_TIMER &&
+#ifndef __CYGWIN__
+        evfd -> type != EVFD_INOTIFY && 
+#endif
+        evfd -> type != EVFD_TIMER &&
         prevexec && cur == &evfd -> u.task.read_tasks && !list_empty(&evfd -> u.task.read_tasks)
     ) {
         prevexec = 0;   // avoid infinite loop
@@ -1244,10 +1336,14 @@ end:
             evfd -> proto.timer -> time = 0;
             evfd_ctl(evfd, EPOLLLT);    // disable timerfd
         }
+#ifdef LJS_MBEDTLS
     } else if (evfd -> type == EVFD_SSL && !evfd -> proto.ssl -> want_read) {
         evfd -> proto.ssl -> want_read = !list_empty(&evfd -> u.task.read_tasks);
+#endif
+#ifndef __CYGWIN__
     } else if (evfd -> type == EVFD_AIO && !list_empty(&evfd -> u.task.write_tasks)){
         submit_aio_write(evfd, list_entry(evfd -> u.task.write_tasks.next, struct Task, list));
+#endif
     }
     check_queue_status(evfd);
 _return:
@@ -1257,6 +1353,7 @@ _return:
 
 // handle write event for normal/ssl fd or aio fd
 static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
+#ifndef __CYGWIN__
     if (evfd -> type == EVFD_AIO && !list_empty(&evfd -> u.task.write_tasks)) {
         if (ioev -> res < 0) {
 #ifdef LJS_DEBUG
@@ -1271,9 +1368,11 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
         // struct Task* task = list_entry(evfd -> u.task.write_tasks.next, struct Task, list);
         // buffer_seek_cur(task -> buffer, ioev -> res);
     }
+#endif
 
     if(evfd -> u.task.rw_state & 0x1) return;  // read state
     evfd -> u.task.rw_state |= 0x1;
+#ifdef LJS_MBEDTLS
     if(evfd -> type == EVFD_SSL && evfd -> proto.ssl -> ssl_handshaking){
         int n = handle_mbedtls_ret(evfd, false, mbedtls_ssl_handshake(&evfd -> proto.ssl -> ctx));
         if(n == -1) goto _return;
@@ -1283,6 +1382,7 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
         handle_read(fd, evfd, NULL, NULL);
         if(evfd -> destroy) goto _return;
     }
+#endif
 
     struct list_head* current, *head = &evfd -> u.task.write_tasks;
     // loop:
@@ -1340,6 +1440,7 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
 
         ssize_t n;
 
+#ifndef __CYGWIN__
         if (evfd -> type == EVFD_AIO) {
             n = MIN(ioev -> res, task -> buffer -> size -1);
 
@@ -1352,7 +1453,10 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
             buffer_seek_cur(task -> buffer, n);
             ioev -> res = 0;
             evfd -> proto.aio -> write_pending = NULL;
-        } else if (evfd -> type == EVFD_SSL) {
+        } else 
+#endif
+#ifdef LJS_MBEDTLS
+        if (evfd -> type == EVFD_SSL) {
             // write to mbedtls
             ssize_t prev_write;
             n = 0;
@@ -1368,7 +1472,9 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
             // seek
             if(n)                       buffer_seek_cur(task -> buffer, n);
             else if(!evfd -> destroy)   evfd_mod(evfd, true, EPOLLOUT);
-        } else if (evfd -> type == EVFD_UDP) {
+        } else 
+#endif
+        if (evfd -> type == EVFD_UDP) {
             buffer_flat(task -> buffer);
             n = sendto(fd, task -> buffer -> buffer + task -> buffer -> start, buffer_used(task -> buffer), MSG_DONTWAIT, 
                 (struct sockaddr*) &evfd -> proto.udp -> peer_addr, sizeof(struct sockaddr_in));
@@ -1421,10 +1527,12 @@ static void clear_tasks(EvFD* evfd, bool rdhup, bool call_close) {
                 pipeto_handle_close(evfd, task -> cb.pipeto, true); // also freed task
                 continue;
             }
+#ifndef __CYGWIN__
             if (evfd -> type == EVFD_INOTIFY){
                 task -> cb.inotify(evfd, NULL, IN_CLOSE, NULL, task -> opaque);
                 continue;
             }
+#endif
 
             if (task -> cb.read) {
                 if (has_data) {
@@ -1511,8 +1619,10 @@ static void handle_close(int fd, EvFD* evfd, bool is_rdhup) {
 
     // Note: SSL should read again after close, to clear SSL buffer
     // due to destroy=true, no more action will be taken except read
+#ifdef LJS_MBEDTLS
     if (evfd -> type == EVFD_SSL) ssl_poll_data(evfd);
     if (evfd -> incoming_buffer) handle_read(fd, evfd, NULL, NULL);
+#endif
 
     // remove in epoll
     if(!is_rdhup){
@@ -1533,7 +1643,9 @@ static void handle_close(int fd, EvFD* evfd, bool is_rdhup) {
         case EVFD_PTY:
 #endif
         case EVFD_TIMER:
+#ifndef __CYGWIN__
         case EVFD_INOTIFY:
+#endif
             if (evfd -> proto.inotify){
                 struct InotifyContext* ctx = evfd -> proto.inotify;
                 for (int i = 0; i < MAX_EVENTS; i++) {
@@ -1547,6 +1659,7 @@ static void handle_close(int fd, EvFD* evfd, bool is_rdhup) {
             close(fd);
         break;
 
+#ifndef __CYGWIN__
         case EVFD_AIO:
             close(evfd -> fd[0]);
             close(evfd -> fd[1]);   // eventfd
@@ -1558,9 +1671,10 @@ static void handle_close(int fd, EvFD* evfd, bool is_rdhup) {
                 free2(evfd -> proto.aio);
             }
         break;
+#endif
 
-        case EVFD_SSL:
 #ifdef LJS_MBEDTLS
+        case EVFD_SSL:
             if (evfd -> proto.ssl) {
                 buffer_free(evfd -> proto.ssl -> sendbuf);
                 buffer_free(evfd -> proto.ssl -> recvbuf);
@@ -1678,9 +1792,9 @@ int ssl_sni_callback(void* opaque, mbedtls_ssl_context* ssl, const unsigned char
 // Initialize the event loop.
 // Eventloop is thread_local, so you should call this function in each thread.
 bool evcore_init() {
-    assert(epoll_fd == -1);
+    assert(epoll_fd == EPOLL_FD_NULL);
     epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-    if (epoll_fd == -1) {
+    if (epoll_fd == EPOLL_FD_NULL) {
         perror("epoll_create1");
         return false;
     }
@@ -1689,7 +1803,9 @@ bool evcore_init() {
     init_list_head(&timer_list);
     init_list_head(&evfd_list);
     init_list_head(&timer_list);
+#ifdef LJS_MBEDTLS
     init_list_head(&cert_list);
+#endif
 
     thread_id = thread_id_pool ++;
     return true;
@@ -1713,7 +1829,7 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
         }
         
         // or epoll destroyed, force exit
-        if (epoll_fd == -1) {
+        if (epoll_fd == EPOLL_FD_NULL) {
 #ifdef LJS_DEBUG
             printf("epoll_wait: destroyed, force exit\n");
 #endif
@@ -1801,6 +1917,7 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                         handle_read(evfd -> fd[0], evfd, NULL, NULL);
                     break;
 
+#ifndef __CYGWIN__
                     case EVFD_AIO:
                         struct io_event events[3];
                         static struct timespec timeout = { 0, 0 };
@@ -1842,9 +1959,10 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                                 handle_close(evfd -> fd[0], evfd, false);
                         }
                     break;
+#endif
 
-                    case EVFD_SSL:
 #ifdef LJS_MBEDTLS
+                    case EVFD_SSL:
                         struct EvFD_SSL* ssl_evfd = evfd -> proto.ssl;
                         // feed to buffer
                         ssize_t n = buffer_read(ssl_evfd -> recvbuf, evfd -> fd[0], UINT32_MAX);
@@ -1911,7 +2029,12 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
         }
     }
 
+#ifdef __CYGWIN__
+    epoll_close(epoll_fd);
+#else
     close(epoll_fd);
+#endif
+
     return true;
 }
 
@@ -1922,7 +2045,7 @@ static inline void expand_bufsize(EvFD* evfd, uint32_t minsize) {
 }
 
 void evcore_destroy() {
-    if (epoll_fd == -1) return;
+    if (epoll_fd == EPOLL_FD_NULL) return;
 
     // free all timerfd
     struct list_head* cur, * tmp;
@@ -1950,9 +2073,13 @@ void evcore_destroy() {
     }
 #endif
 
+#ifdef __CYGWIN__
+    epoll_close(epoll_fd);
+#else
     close(epoll_fd);
+#endif
     // evfd_mod_start(true);   // force cleanup evfds
-    epoll_fd = -1;
+    epoll_fd = EPOLL_FD_NULL;
 
 #ifdef LJS_DEBUG
     printf("evcore_destroy: exit, (thread#%d)remains=%ld\n", thread_id, evloop_events);
@@ -1976,8 +2103,12 @@ bool evfd_syncexec(EvFD* evfd) {
 #ifdef LJS_EVLOOP_THREADSAFE
     evfd_perform(evfd);
 #endif
-    if (epoll_fd == -1 || evfd_closed(evfd)) return false;
+    if (epoll_fd == EPOLL_FD_NULL || evfd_closed(evfd)) return false;
+#ifdef __CYGWIN__
+    tassert(evfd -> type != EVFD_TIMER);
+#else
     tassert(evfd -> type != EVFD_INOTIFY && evfd -> type != EVFD_TIMER);
+#endif
 
     int fd = evfd_getfd(evfd, NULL);
     int flags = fcntl(fd, F_GETFL, 0);
@@ -1992,12 +2123,14 @@ bool evfd_syncexec(EvFD* evfd) {
     }
 
     // XXX: this logic is not safe, but it's a workaround for now.
+#ifndef __CYGWIN__
     if (evfd -> type == EVFD_AIO) {
         epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL);
         close(evfd -> fd[0]); // close eventfd
         evfd -> fd[0] = fd;
         evfd -> type = EVFD_NORM;
     }
+#endif
     handle_read(fd, evfd, NULL, NULL);
     if (!evfd -> destroy) handle_write(fd, evfd, NULL);
 
@@ -2010,9 +2143,10 @@ bool evfd_syncexec(EvFD* evfd) {
     return true;
 }
 
+#ifndef __CYGWIN__
 static inline bool evfd_init_aio(EvFD* evfd, int fd) {
-    evfd->type = EVFD_AIO;
-    evfd->fd[1] = fd;
+    evfd -> type = EVFD_AIO;
+    evfd -> fd[1] = fd;
 
     // init aio context
     struct AIOContext* aio = malloc2(sizeof(struct AIOContext));
@@ -2026,15 +2160,15 @@ static inline bool evfd_init_aio(EvFD* evfd, int fd) {
         goto error;
     }
 
-    if (io_setup(2, &evfd->proto.aio->ctx) == -1) {
+    if (io_setup(2, &evfd -> proto.aio -> ctx) == -1) {
 #ifdef LJS_DEBUG
         perror("io_setup");
 #endif
         goto error;
     }
 
-    fd = evfd->fd[0] = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (evfd->fd[0] == -1) {
+    fd = evfd -> fd[0] = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (evfd -> fd[0] == -1) {
 #ifdef LJS_DEBUG
         perror("eventfd");
 #endif
@@ -2054,6 +2188,7 @@ error:
 
     return true;
 }
+#endif
 
 // XXX: use flags to replace use_aio and support more types
 // attach evfd to epoll, and you would control the IO yourself
@@ -2071,6 +2206,10 @@ struct EvFD* evcore_attach(
 //         return NULL;
 //     }
 
+#ifdef __CYGWIN__
+    if(use_aio) return NULL;
+#endif
+
     // O_DIRECT
     if (use_aio) fcntl(fd, F_SETFL, O_DIRECT | fcntl(fd, F_GETFL, 0));
 
@@ -2080,13 +2219,16 @@ struct EvFD* evcore_attach(
     list_add_tail(&evfd -> link, &evfd_list);
     // evfd_init_ts(evfd);
 
+#ifndef __CYGWIN__
     if (use_aio) {
         if(!evfd_init_aio(evfd, fd)){
             list_del(&evfd -> link);
             free2(evfd);
             return NULL;
         }
-    } else {
+    } else 
+#endif
+    {
         evfd -> type = EVFD_NORM;
         evfd -> fd[0] = fd;
     }
@@ -2149,13 +2291,24 @@ EvFD* evfd_new(int fd, int flag, uint32_t bufsize,
         assert(bufsize > 0);
         buffer_init(&evfd -> incoming_buffer, NULL, bufsize);
     }
-
+    
     // is socket?
     if (flag & PIPE_SOCKET) {
         evfd -> u.task.tcp_connected = 0;
         if(flag & PIPE_RDHUP) evfd -> rdhup_feature = true;
     }else{
         evfd -> u.task.tcp_connected = -1; // not a socket
+    }
+
+    // push to eventloop
+    if(!evfd_add(evfd, EPOLLHUP | EPOLLERR)){
+        if(flag & PIPE_SYNC_IF_NOT_SUPPORTED){
+            evfd -> sync = true;
+        }else{
+            list_del(&evfd -> link);
+            free2(evfd);
+            return NULL;
+        }
     }
 
     // close callback
@@ -2168,24 +2321,24 @@ EvFD* evfd_new(int fd, int flag, uint32_t bufsize,
     }
 
     // aio
+#ifndef __CYGWIN__
     if (flag & PIPE_AIO) {
         if(!evfd_init_aio(evfd, fd)){
+            goto error;
+        }
+    } else 
+#endif
+    if(!evfd -> sync){
+        if (fcntl(fd, F_SETFL, O_NONBLOCK | fcntl(fd, F_GETFL, 0))){
+#ifdef LJS_DEBUG
+            perror("fcntl");
+#endif
 error:
             list_del(&evfd -> link);
             free2(evfd);
             return NULL;
         }
-    } else {
-        if (fcntl(fd, F_SETFL, O_NONBLOCK | fcntl(fd, F_GETFL, 0))){
-#ifdef LJS_DEBUG
-            perror("fcntl");
-#endif
-            goto error;
-        }
     }
-
-    // push to eventloop
-    evfd_add(evfd, EPOLLHUP | EPOLLERR);
 
 #ifdef LJS_DEBUG
     printf("new evfd fd:%d, aio:%d, bufsize:%d, r:%d, w:%d\n", fd, flag & PIPE_AIO, bufsize, flag & PIPE_READ, flag & PIPE_WRITE);
@@ -2422,6 +2575,7 @@ startup:
     task -> opaque = user_data;
     task -> buffer = buf;
 
+#ifndef __CYGWIN__
     if (evfd -> type == EVFD_AIO) {
         if (!submit_aio_read(evfd, task)) {
             free2(task);
@@ -2430,7 +2584,9 @@ startup:
             goto ret_false;
         }
     }
-    bool try_direct = list_empty(&evfd -> u.task.read_tasks);
+#endif
+
+    __maybe_unused bool try_direct = list_empty(&evfd -> u.task.read_tasks);
     list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
     check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
@@ -2532,15 +2688,15 @@ startup:
     task -> cb.read = callback;
     task -> opaque = user_data;
     evfd -> strip_if_is_n = false;
-
+#ifndef __CYGWIN__
     if (evfd -> type == EVFD_AIO && !submit_aio_read(evfd, task)) {
         free2(task);
         buffer_free(buf);
         callback(evfd, false, NULL, 0, user_data);
         return false;
     }
-
-    bool try_direct = list_empty(&evfd -> u.task.read_tasks);
+#endif
+    __maybe_unused bool try_direct = list_empty(&evfd -> u.task.read_tasks);
     list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
     check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
@@ -2597,11 +2753,11 @@ startup:
     task -> cb.read = callback;
     task -> opaque = user_data;
 
-#ifdef LJS_DEBUG
+#if defined(LJS_DEBUG) && !defined(__CYGWIN__)
     if (evfd -> type == EVFD_AIO)
         printf("warn: aio is not supported for readonce\n");
 #endif
-
+#ifndef __CYGWIN__
     if (evfd -> type == EVFD_AIO) {
         // submit aio read
         if (!submit_aio_read(evfd, task)) {
@@ -2611,7 +2767,8 @@ startup:
             return false;
         }
     }
-    bool try_direct = list_empty(&evfd -> u.task.read_tasks);
+#endif
+    __maybe_unused bool try_direct = list_empty(&evfd -> u.task.read_tasks);
     list_add_tail(&task -> list, &evfd -> u.task.read_tasks);
     check_queue_status(evfd);
     TRACE_EVENTS(evfd, +1);
@@ -2638,7 +2795,7 @@ bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
 
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
-    bool try_direct = list_empty(&evfd -> u.task.write_tasks);
+    __maybe_unused bool try_direct = list_empty(&evfd -> u.task.write_tasks);
 
     // write circular buffer
     struct Buffer* buf;
@@ -2650,6 +2807,7 @@ bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
     task -> cb.write = callback;
     task -> opaque = user_data;
 
+#ifndef __CYGWIN__
     if (evfd -> type == EVFD_AIO) {
         // submit AIO write
         if (!submit_aio_write(evfd, task))
@@ -2660,14 +2818,18 @@ bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
     } else {
         list_add_tail(&task -> list, &evfd -> u.task.write_tasks);
     }
+#endif
 
     TRACE_EVENTS(evfd, +1);
 
+#ifdef LJS_MBEDTLS
     if (try_direct && evfd -> type == EVFD_SSL) {
         if(!evfd -> proto.ssl -> ssl_handshaking)
             // note: writing requires mbedtls processing data before EPOLLOUT
             handle_write(evfd -> fd[0], evfd, NULL);
-    } else {
+    } else 
+#endif
+    {
         check_queue_status(evfd);
     }
 
@@ -3128,6 +3290,7 @@ bool evcore_clearTimer(int timer_fd) {
     return false;
 }
 
+#ifndef __CYGWIN__
 // create an inotify file watcher
 EvFD* evcore_inotify(EvINotifyCallback callback, void* user_data) {
     int inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
@@ -3244,22 +3407,6 @@ int evcore_inotify_find(EvFD* evfd, const char* path) {
     return -1;
 }
 
-int evfd_getfd(EvFD* evfd, int* timer_fd) {
-    if (evfd -> type == EVFD_AIO) {
-        if (timer_fd) *timer_fd = evfd -> fd[0];
-        return evfd -> fd[1];
-    } else {
-        if (timer_fd)*timer_fd = -1;
-        return evfd -> fd[0];
-    }
-}
-
-int evfd_ssl_errno(EvFD* evfd) {
-    if(evfd -> type != EVFD_SSL)
-        return 0;
-    return evfd -> proto.ssl -> mb_errno;
-}
-
 bool evfd_seek(EvFD* evfd, int seek_type, off_t pos) {
     tassert(!evfd -> destroy && evfd -> type == EVFD_AIO && evfd -> task_based);
 
@@ -3288,6 +3435,29 @@ bool evfd_seek(EvFD* evfd, int seek_type, off_t pos) {
 bool evfd_isAIO(EvFD* evfd) {
     return evfd -> type == EVFD_AIO;
 }
+
+#endif
+
+int evfd_getfd(EvFD* evfd, int* timer_fd) {
+#ifndef __CYGWIN__
+    if (evfd -> type == EVFD_AIO) {
+        if (timer_fd) *timer_fd = evfd -> fd[0];
+        return evfd -> fd[1];
+    } else 
+#endif
+    {
+        if (timer_fd)*timer_fd = -1;
+        return evfd -> fd[0];
+    }
+}
+
+#ifdef LJS_MBEDTLS
+int evfd_ssl_errno(EvFD* evfd) {
+    if(evfd -> type != EVFD_SSL)
+        return 0;
+    return evfd -> proto.ssl -> mb_errno;
+}
+#endif
 
 void* evfd_get_opaque(EvFD* evfd) {
     return evfd -> opaque;

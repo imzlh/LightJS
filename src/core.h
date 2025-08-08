@@ -32,18 +32,21 @@
 
 #include "utils.h"
 
-#include <sys/inotify.h>
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdarg.h>
 #include <threads.h>
 
+#ifdef __CYGWIN__
+// #warning "LightJS may not work correctly on non-linux platforms"
+#else
+#include <sys/inotify.h>
+#endif
+
 // once include
 #pragma once
 
-// GNU/POSIX compatibility
-#define _POSIX_C_SOURCE 1
 #ifndef __GNUC__
 #warning "This code may not fit well on non-GNU compilers"
 #endif
@@ -57,6 +60,15 @@ enum {
 #undef DEF
     JS_ATOM_END,
 };
+
+// bool polyfill
+#ifndef true
+#define true 1
+#endif
+
+#ifndef false
+#define false 0
+#endif
 
 // mbedtls
 #ifdef LJS_MBEDTLS
@@ -79,6 +91,7 @@ enum {
 #define PIPE_RDHUP (1 << 4)
 #define PIPE_THREADSAFE (1 << 5)
 #define PIPE_PTY (1 << 6)
+#define PIPE_SYNC_IF_NOT_SUPPORTED (1 << 7)
 
 #define SSL_VERIFY (1)
 #define SSL_PRESET_SUITEB (1 << 1)
@@ -326,6 +339,8 @@ typedef struct  {
     const char** alpn_protocols;
     const int *ciphersuites;
 } InitSSLOptions;
+#else 
+#define InitSSLOptions void*
 #endif
 
 typedef void (*HTTP_Callback)(LHTTPData* data, uint8_t* buffer, uint32_t size, void* userdata);
@@ -391,10 +406,8 @@ bool evfd_onclose(EvFD* fd, EvCloseCallback callback, void* user_data);
 bool evfd_finalizer(EvFD* evfd, EvFinalizerCallback callback, void* user_data);
 int evfd_getfd(EvFD* evfd, int* timer_fd);
 int evfd_ssl_errno(EvFD* evfd);
-bool evfd_seek(EvFD* evfd, int seek_type, off_t pos);
 bool evfd_yield(EvFD* evfd, bool yield_read, bool yield_write);
 bool evfd_consume(EvFD* evfd, bool consume_read, bool consume_write);
-bool evfd_isAIO(EvFD* evfd);
 void* evfd_get_opaque(EvFD* evfd);
 void evfd_set_opaque(EvFD* evfd, void* opaque);
 bool evfd_syncexec(EvFD* pipe);
@@ -408,10 +421,15 @@ EvFD* evcore_setTimeout(uint64_t milliseconds, EvTimerCallback callback, void* u
 EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* cbopaque, EvCloseCallback close_cb, void* close_opaque);
 bool evcore_clearTimer(int timer_fd);
 bool evcore_clearTimer2(EvFD* evfd);
+
+#ifndef __CYGWIN__
+bool evfd_isAIO(EvFD* evfd);
+bool evfd_seek(EvFD* evfd, int seek_type, off_t pos);
 EvFD* evcore_inotify(EvINotifyCallback callback, void* user_data);
 bool evcore_inotify_watch(EvFD* evfd, const char* path, uint32_t mask, int* wd);
 bool evcore_inotify_unwatch(EvFD* evfd, int wd);
 int evcore_inotify_find(EvFD* evfd, const char* path);
+#endif
 
 int js_run_promise_jobs(); // internal use
 bool LJS_enqueue_promise_job(JSContext* ctx, JSValue promise, JSPromiseCallback callback, void* opaque);

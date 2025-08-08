@@ -184,53 +184,53 @@ static void free_string_array(char **array, int count) {
 static void insert_mapping(FileSourceMap *file_map, int gen_line, int gen_col,
                           int orig_line, int orig_col, const char *orig_file, const char *name) {
     uint64_t key = make_position_key(gen_line, gen_col);
-    uint32_t hash = hash_position(gen_line, gen_col) % file_map->hash_size;
+    uint32_t hash = hash_position(gen_line, gen_col) % file_map -> hash_size;
     
     MappingNode *node = malloc(sizeof(MappingNode));
     if (!node) return;
     
-    node->key = key;
-    node->mapping.generated_line = gen_line;
-    node->mapping.generated_column = gen_col;
-    node->mapping.original_line = orig_line;
-    node->mapping.original_column = orig_col;
-    node->mapping.original_file = orig_file ? strdup(orig_file) : NULL;
-    node->mapping.name = name ? strdup(name) : NULL;
+    node -> key = key;
+    node -> mapping.generated_line = gen_line;
+    node -> mapping.generated_column = gen_col;
+    node -> mapping.original_line = orig_line;
+    node -> mapping.original_column = orig_col;
+    node -> mapping.original_file = orig_file ? strdup(orig_file) : NULL;
+    node -> mapping.name = name ? strdup(name) : NULL;
     
-    node->next = file_map->hash_table[hash];
-    file_map->hash_table[hash] = node;
+    node -> next = file_map -> hash_table[hash];
+    file_map -> hash_table[hash] = node;
 }
 
 // find mapping in hash table
 static SourceMapping *find_mapping(FileSourceMap *file_map, int line, int column) {
-    if (!file_map || !file_map->hash_table) return NULL;
+    if (!file_map || !file_map -> hash_table) return NULL;
     
     uint64_t key = make_position_key(line, column);
-    uint32_t hash = hash_position(line, column) % file_map->hash_size;
+    uint32_t hash = hash_position(line, column) % file_map -> hash_size;
     
-    MappingNode *node = file_map->hash_table[hash];
+    MappingNode *node = file_map -> hash_table[hash];
     while (node) {
-        if (node->key == key) {
-            return &node->mapping;
+        if (node -> key == key) {
+            return &node -> mapping;
         }
-        node = node->next;
+        node = node -> next;
     }
     
     // no exact match, find the nearest match
     SourceMapping *best_match = NULL;
-    for (int i = 0; i < file_map->hash_size; i++) {
-        node = file_map->hash_table[i];
+    for (int i = 0; i < file_map -> hash_size; i++) {
+        node = file_map -> hash_table[i];
         while (node) {
-            if (node->mapping.generated_line < line || 
-                (node->mapping.generated_line == line && node->mapping.generated_column <= column)) {
+            if (node -> mapping.generated_line < line || 
+                (node -> mapping.generated_line == line && node -> mapping.generated_column <= column)) {
                 if (!best_match || 
-                    node->mapping.generated_line > best_match->generated_line ||
-                    (node->mapping.generated_line == best_match->generated_line && 
-                     node->mapping.generated_column > best_match->generated_column)) {
-                    best_match = &node->mapping;
+                    node -> mapping.generated_line > best_match -> generated_line ||
+                    (node -> mapping.generated_line == best_match -> generated_line && 
+                     node -> mapping.generated_column > best_match -> generated_column)) {
+                    best_match = &node -> mapping;
                 }
             }
-            node = node->next;
+            node = node -> next;
         }
     }
     
@@ -280,15 +280,15 @@ static int parse_mappings(FileSourceMap *file_map, const char *mappings_str) {
                 original_column += values[3];
                 
                 const char *orig_file = NULL;
-                if (source_index >= 0 && source_index < file_map->sources_count) {
-                    orig_file = file_map->sources[source_index];
+                if (source_index >= 0 && source_index < file_map -> sources_count) {
+                    orig_file = file_map -> sources[source_index];
                 }
                 
                 const char *name = NULL;
                 if (value_count >= 5) {
                     name_index += values[4];
-                    if (name_index >= 0 && name_index < file_map->names_count) {
-                        name = file_map->names[name_index];
+                    if (name_index >= 0 && name_index < file_map -> names_count) {
+                        name = file_map -> names[name_index];
                     }
                 }
                 
@@ -306,14 +306,14 @@ static FileSourceMap *create_file_sourcemap(const char *file_path) {
     FileSourceMap *file_map = calloc(1, sizeof(FileSourceMap));
     if (!file_map) return NULL;
     
-    file_map->file_path = strdup(file_path);
-    file_map->hash_size = 1024;
-    file_map->hash_table = calloc(file_map->hash_size, sizeof(MappingNode*));
-    file_map->ref_count = 1;
+    file_map -> file_path = strdup(file_path);
+    file_map -> hash_size = 1024;
+    file_map -> hash_table = calloc(file_map -> hash_size, sizeof(MappingNode*));
+    file_map -> ref_count = 1;
     
-    if (pthread_rwlock_init(&file_map->rwlock, NULL) != 0) {
-        free(file_map->file_path);
-        free(file_map->hash_table);
+    if (pthread_rwlock_init(&file_map -> rwlock, NULL) != 0) {
+        free(file_map -> file_path);
+        free(file_map -> hash_table);
         free(file_map);
         return NULL;
     }
@@ -325,24 +325,24 @@ static FileSourceMap *create_file_sourcemap(const char *file_path) {
 static void free_file_sourcemap(FileSourceMap *file_map) {
     if (!file_map) return;
     
-    if (file_map->hash_table) {
-        for (int i = 0; i < file_map->hash_size; i++) {
-            MappingNode *node = file_map->hash_table[i];
+    if (file_map -> hash_table) {
+        for (int i = 0; i < file_map -> hash_size; i++) {
+            MappingNode *node = file_map -> hash_table[i];
             while (node) {
-                MappingNode *next = node->next;
-                free(node->mapping.original_file);
-                free(node->mapping.name);
+                MappingNode *next = node -> next;
+                free(node -> mapping.original_file);
+                free(node -> mapping.name);
                 free(node);
                 node = next;
             }
         }
-        free(file_map->hash_table);
+        free(file_map -> hash_table);
     }
     
-    free_string_array(file_map->sources, file_map->sources_count);
-    free_string_array(file_map->names, file_map->names_count);
-    free(file_map->file_path);
-    pthread_rwlock_destroy(&file_map->rwlock);
+    free_string_array(file_map -> sources, file_map -> sources_count);
+    free_string_array(file_map -> names, file_map -> names_count);
+    free(file_map -> file_path);
+    pthread_rwlock_destroy(&file_map -> rwlock);
     free(file_map);
 }
 
@@ -354,9 +354,9 @@ static FileSourceMap *get_or_create_file_map(const char *file_path) {
     
     FileSourceMap *found = NULL;
     for (int i = 0; i < g_manager.files_count; i++) {
-        if (g_manager.files[i] && strcmp(g_manager.files[i]->file_path, file_path) == 0) {
+        if (g_manager.files[i] && strcmp(g_manager.files[i] -> file_path, file_path) == 0) {
             found = g_manager.files[i];
-            found->ref_count++;
+            found -> ref_count++;
             break;
         }
     }
@@ -399,43 +399,43 @@ int js_load_sourcemap(JSContext *ctx, const char *file_path, JSValue sourcemap_o
     FileSourceMap *file_map = get_or_create_file_map(file_path);
     if (!file_map) return 0;
     
-    pthread_rwlock_wrlock(&file_map->rwlock);
+    pthread_rwlock_wrlock(&file_map -> rwlock);
     
     // 清除现有映射
-    if (file_map->hash_table) {
-        for (int i = 0; i < file_map->hash_size; i++) {
-            MappingNode *node = file_map->hash_table[i];
+    if (file_map -> hash_table) {
+        for (int i = 0; i < file_map -> hash_size; i++) {
+            MappingNode *node = file_map -> hash_table[i];
             while (node) {
-                MappingNode *next = node->next;
-                free(node->mapping.original_file);
-                free(node->mapping.name);
+                MappingNode *next = node -> next;
+                free(node -> mapping.original_file);
+                free(node -> mapping.name);
                 free(node);
                 node = next;
             }
-            file_map->hash_table[i] = NULL;
+            file_map -> hash_table[i] = NULL;
         }
     }
     
-    free_string_array(file_map->sources, file_map->sources_count);
-    free_string_array(file_map->names, file_map->names_count);
-    file_map->sources = NULL;
-    file_map->names = NULL;
-    file_map->sources_count = 0;
-    file_map->names_count = 0;
+    free_string_array(file_map -> sources, file_map -> sources_count);
+    free_string_array(file_map -> names, file_map -> names_count);
+    file_map -> sources = NULL;
+    file_map -> names = NULL;
+    file_map -> sources_count = 0;
+    file_map -> names_count = 0;
     
     int success = 0;
     
     // 解析sources
     JSValue sources = JS_GetPropertyStr(ctx, sourcemap_obj, "sources");
     if (JS_IsArray(sources)) {
-        file_map->sources = parse_json_array(ctx, sources, &file_map->sources_count);
+        file_map -> sources = parse_json_array(ctx, sources, &file_map -> sources_count);
     }
     JS_FreeValue(ctx, sources);
     
     // 解析names
     JSValue names = JS_GetPropertyStr(ctx, sourcemap_obj, "names");
     if (JS_IsArray(names)) {
-        file_map->names = parse_json_array(ctx, names, &file_map->names_count);
+        file_map -> names = parse_json_array(ctx, names, &file_map -> names_count);
     }
     JS_FreeValue(ctx, names);
     
@@ -448,7 +448,7 @@ int js_load_sourcemap(JSContext *ctx, const char *file_path, JSValue sourcemap_o
     }
     JS_FreeValue(ctx, mappings_val);
     
-    pthread_rwlock_unlock(&file_map->rwlock);
+    pthread_rwlock_unlock(&file_map -> rwlock);
     
     return success;
 }
@@ -474,7 +474,7 @@ bool js_has_sourcemap(const char *file_path){
 
     FileSourceMap *file_map = NULL;
     for (int i = 0; i < g_manager.files_count; i++) {
-        if (g_manager.files[i] && strcmp(g_manager.files[i]->file_path, file_path) == 0) {
+        if (g_manager.files[i] && strcmp(g_manager.files[i] -> file_path, file_path) == 0) {
             file_map = g_manager.files[i];
             break;
         }
@@ -499,7 +499,7 @@ MappingResult js_get_source_mapping(const char *file_path, int generated_line, i
     
     FileSourceMap *file_map = NULL;
     for (int i = 0; i < g_manager.files_count; i++) {
-        if (g_manager.files[i] && strcmp(g_manager.files[i]->file_path, file_path) == 0) {
+        if (g_manager.files[i] && strcmp(g_manager.files[i] -> file_path, file_path) == 0) {
             file_map = g_manager.files[i];
             break;
         }
@@ -510,16 +510,16 @@ MappingResult js_get_source_mapping(const char *file_path, int generated_line, i
         return result;
     }
     
-    pthread_rwlock_rdlock(&file_map->rwlock);
+    pthread_rwlock_rdlock(&file_map -> rwlock);
     pthread_rwlock_unlock(&g_manager.global_rwlock);
     
     SourceMapping *mapping = find_mapping(file_map, generated_line - 1, generated_column);
     
-    if (mapping && mapping->original_file) {
-        result.original_file = mapping->original_file;
-        result.original_line = mapping->original_line + 1;
-        result.original_column = mapping->original_column;
-        result.function_name = mapping->name;
+    if (mapping && mapping -> original_file) {
+        result.original_file = mapping -> original_file;
+        result.original_line = mapping -> original_line + 1;
+        result.original_column = mapping -> original_column;
+        result.function_name = mapping -> name;
         result.found = 1;
     } else {
         result.original_line = generated_line;
@@ -527,7 +527,7 @@ MappingResult js_get_source_mapping(const char *file_path, int generated_line, i
         result.found = 0;
     }
     
-    pthread_rwlock_unlock(&file_map->rwlock);
+    pthread_rwlock_unlock(&file_map -> rwlock);
     
     return result;
 }

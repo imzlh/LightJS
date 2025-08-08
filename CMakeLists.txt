@@ -42,34 +42,6 @@ xcheck_add_c_compiler_flag(-Wno-stringop-truncation)
 xcheck_add_c_compiler_flag(-Wno-array-bounds)
 xcheck_add_c_compiler_flag(-funsigned-char)
 
-# ClangCL is command line compatible with MSVC, so 'MSVC' is set.
-if(MSVC)
-    xcheck_add_c_compiler_flag(-Wno-unsafe-buffer-usage)
-    xcheck_add_c_compiler_flag(-Wno-sign-conversion)
-    xcheck_add_c_compiler_flag(-Wno-nonportable-system-include-path)
-    xcheck_add_c_compiler_flag(-Wno-implicit-int-conversion)
-    xcheck_add_c_compiler_flag(-Wno-shorten-64-to-32)
-    xcheck_add_c_compiler_flag(-Wno-reserved-macro-identifier)
-    xcheck_add_c_compiler_flag(-Wno-reserved-identifier)
-    xcheck_add_c_compiler_flag(-Wdeprecated-declarations)
-    xcheck_add_c_compiler_flag(/experimental:c11atomics)
-    xcheck_add_c_compiler_flag(/wd4018) # -Wno-sign-conversion
-    xcheck_add_c_compiler_flag(/wd4061) # -Wno-implicit-fallthrough
-    xcheck_add_c_compiler_flag(/wd4100) # -Wno-unused-parameter
-    xcheck_add_c_compiler_flag(/wd4200) # -Wno-zero-length-array
-    xcheck_add_c_compiler_flag(/wd4242) # -Wno-shorten-64-to-32
-    xcheck_add_c_compiler_flag(/wd4244) # -Wno-shorten-64-to-32
-    xcheck_add_c_compiler_flag(/wd4245) # -Wno-sign-compare
-    xcheck_add_c_compiler_flag(/wd4267) # -Wno-shorten-64-to-32
-    xcheck_add_c_compiler_flag(/wd4388) # -Wno-sign-compare
-    xcheck_add_c_compiler_flag(/wd4389) # -Wno-sign-compare
-    xcheck_add_c_compiler_flag(/wd4710) # Function not inlined
-    xcheck_add_c_compiler_flag(/wd4711) # Function was inlined
-    xcheck_add_c_compiler_flag(/wd4820) # Padding added after construct
-    xcheck_add_c_compiler_flag(/wd4996) # -Wdeprecated-declarations
-    xcheck_add_c_compiler_flag(/wd5045) # Compiler will insert Spectre mitigation for memory load if /Qspectre switch specified
-endif()
-
 # MacOS and GCC 11 or later need -Wno-maybe-uninitialized
 # https://github.com/quickjs-ng/quickjs/issues/453
 if(APPLE AND CMAKE_C_COMPILER_ID STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 11)
@@ -203,7 +175,7 @@ macro(add_static_if_needed target)
     if(QJS_BUILD_STATIC OR MINGW)
         target_link_options(${target} PRIVATE -static)
         if(MINGW)
-            target_link_options(${target} PRIVATE -static-libgcc)
+            target_link_options(${target} PRIVATE -static-libgcc -lws2_32)
         endif()
     endif()
 endmacro()
@@ -219,10 +191,18 @@ set(qjs_sources
 )
 
 list(APPEND ljs_defines _GNU_SOURCE)
+add_compile_definitions(_GNU_SOURCE)
 if(WIN32)
     # NB: Windows 7 is EOL and we are only supporting in so far as it doesn't interfere with progress.
+    message(STATUS "Building for Windows")
     list(APPEND ljs_defines WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0601)
 endif()
+
+if(CMAKE_SYSTEM_NAME MATCHES "MSYS" OR DEFINED ENV{MSYSTEM})
+    message(STATUS "Building for MSYS")
+    list(APPEND ljs_libs ws2_32)
+endif()
+
 list(APPEND ljs_libs ${CMAKE_DL_LIBS})
 find_package(Threads)
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")

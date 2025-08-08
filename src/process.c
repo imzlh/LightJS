@@ -46,6 +46,11 @@
 #include <sys/ioctl.h>
 #include <sys/sysinfo.h>
 
+#ifdef __CYGWIN__
+#include <windows.h>
+#include <io.h>
+#endif
+
 #define MAX_SIGNAL_SIZE 1024
 
 extern char **environ;
@@ -573,14 +578,15 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     JSValue promise = JS_NewPromiseCapability(ctx, promise_cb);
     JS_SetPropertyStr(ctx, class_obj, "onclose", promise);
 
-    // 创建pty
+    // Create PTY
+    // XXX: use windows native ConPTY API instead of pty.h
     int master_fd, slave_fd;
     if (openpty(&master_fd, &slave_fd, NULL, NULL, NULL) == -1) {
         LJS_Throw(ctx, EXCEPTION_IO, "Failed to create pty: %s", NULL, strerror(errno));
         goto fail;
     }
 
-    // 加入链表
+    // add to process list
     obj -> exit_code = -1;
     obj -> ctx = ctx;
     obj -> onclose = promise_cb[1];
@@ -589,7 +595,8 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     list_add_tail(&obj -> link, &process_list);
     pthread_rwlock_unlock(&process_lock);
 
-    // 创建进程
+    // create process
+    // XXX: use windows native CreateProcess API instead of fork/exec
     pid_t pid = fork();
     if (pid == -1) {
         LJS_Throw(ctx, EXCEPTION_IO, "Failed to create process: %s", NULL, strerror(errno));
@@ -597,7 +604,6 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
         close(master_fd);
         goto fail;
     } else if (pid == 0) {
-        // 子进程
         close(master_fd);
         
 #ifdef LJS_DEBUG
@@ -620,7 +626,7 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
         close(slave_fd);
 #undef ioassert
         
-        // 初始化环境变量
+        // environment variables
         if(argc > 1){
             JSValue envs = JS_GetPropertyStr(ctx, opts, "env");
             if(JS_IsObject(envs)){
@@ -752,12 +758,16 @@ __attribute__((constructor)) static void init_signal_system(void) {
     pthread_rwlock_init(&process_lock, NULL);
     pthread_rwlock_init(&signal_lock, NULL);
 
+#ifdef __CYGWIN__
+    signal(SIGCHLD, sigchild_handler);
+#else
     // handle SIGCHLD
     struct sigaction sa_child = {
         .sa_flags = SA_RESTART,
         .sa_handler = sigchild_handler
     };
     sigaction(SIGCHLD, &sa_child, NULL);
+#endif
 }
 
 static const JSCFunctionListEntry js_process_proto_funcs[] = {
@@ -798,17 +808,21 @@ static const JSCFunctionListEntry js_limit_const[] = {
     C_CONST_RENAME(RLIMIT_CPU, CPU),
     C_CONST_RENAME(RLIMIT_DATA, DATA),
     C_CONST_RENAME(RLIMIT_FSIZE, FSIZE),
+    
+    C_CONST_RENAME(RLIMIT_NOFILE, NOFILE),
+    C_CONST_RENAME(RLIMIT_STACK, STACK),
+
+#ifndef __CYGWIN__
     C_CONST_RENAME(RLIMIT_LOCKS, LOCKS),
     C_CONST_RENAME(RLIMIT_MEMLOCK, MEMLOCK),
     C_CONST_RENAME(RLIMIT_MSGQUEUE, MSGQUEUE),
     C_CONST_RENAME(RLIMIT_NICE, NICE),
-    C_CONST_RENAME(RLIMIT_NOFILE, NOFILE),
     C_CONST_RENAME(RLIMIT_NPROC, NPROC),
     C_CONST_RENAME(RLIMIT_RSS, RSS),
     C_CONST_RENAME(RLIMIT_RTPRIO, RTPRIO),
     C_CONST_RENAME(RLIMIT_RTTIME, RTTIME),
     C_CONST_RENAME(RLIMIT_SIGPENDING, SIGPENDING),
-    C_CONST_RENAME(RLIMIT_STACK, STACK),
+#endif
 };
 
 static const JSClassDef js_process_class = {
@@ -853,7 +867,9 @@ static JSValue js_get_sysinfo(JSContext* ctx, JSValueConst this_val, int argc, J
         JS_SetPropertyStr(ctx, sys_obj, "release", JS_NewString(ctx, uts.release));
         JS_SetPropertyStr(ctx, sys_obj, "version", JS_NewString(ctx, uts.version));
         JS_SetPropertyStr(ctx, sys_obj, "arch", JS_NewString(ctx, uts.machine));
+#ifdef _GNU_SOURCE
         JS_SetPropertyStr(ctx, sys_obj, "domain", JS_NewString(ctx, uts.domainname));
+#endif
         JS_SetPropertyStr(ctx, obj, "sys", sys_obj);
     }
 
@@ -918,6 +934,7 @@ static int js_process_init(JSContext* ctx, JSModuleDef* m){
     return 0;
 }
 
+static bool stdpipe_init = false;
 bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv){
     js_argc = _argc;
 
@@ -958,12 +975,13 @@ bool LJS_init_process(JSContext* ctx, uint32_t _argc, char** _argv){
 
     // init stdpipe
     // XXX: use thread-safe pipe?
-    // if(LJS_IsMainContext(ctx)){
-        stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ | PIPE_THREADSAFE, isatty(STDIN_FILENO), &pstdin);
-        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE | PIPE_THREADSAFE, isatty(STDOUT_FILENO), &pstdout);
-        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE | PIPE_THREADSAFE, isatty(STDERR_FILENO), &pstderr);
+    if(LJS_IsMainContext(ctx) && !stdpipe_init){
+        stdin_p = LJS_NewFDPipe(ctx, STDIN_FILENO, PIPE_READ | PIPE_THREADSAFE | PIPE_SYNC_IF_NOT_SUPPORTED, isatty(STDIN_FILENO), &pstdin);
+        stdout_p = LJS_NewFDPipe(ctx, STDOUT_FILENO, PIPE_WRITE | PIPE_THREADSAFE | PIPE_SYNC_IF_NOT_SUPPORTED, isatty(STDOUT_FILENO), &pstdout);
+        stderr_p = LJS_NewFDPipe(ctx, STDERR_FILENO, PIPE_WRITE | PIPE_THREADSAFE | PIPE_SYNC_IF_NOT_SUPPORTED, isatty(STDERR_FILENO), &pstderr);
         if(!pstderr) pstderr = pstdout;
-    // }
+        stdpipe_init = true;
+    }
 
     // vm
     JS_AddModuleExport(ctx, m, "sysinfo");

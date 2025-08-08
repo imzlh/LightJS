@@ -23,13 +23,12 @@
  * THE SOFTWARE.
  */
 
-#ifdef LJS_LIBFFI
-
 #include "../engine/quickjs.h"
 #include "utils.h"
 #include "core.h"
 #include "polyfill.h"
 
+#ifdef LJS_LIBFFI
 #include <ffi.h>
 #include <pthread.h>
 #include <signal.h>
@@ -536,7 +535,7 @@ const JSCFunctionListEntry js_ffi_funcs[] = {};
 #endif
 
 int init_ffi(JSContext *ctx, JSModuleDef *m) {
-#ifdef LJS_DEBUG
+#if defined(LJS_DEBUG) && !defined(__CYGWIN__)
     // signal(SIGUSR1, inthread_sighandler);
     struct sigaction sa = {
         .sa_flags = SA_SIGINFO,

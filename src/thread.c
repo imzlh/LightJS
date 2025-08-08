@@ -41,9 +41,14 @@
 #include <libgen.h>
 #include <netdb.h>
 #include <semaphore.h>
-#include <sys/epoll.h>
 #include <sys/stat.h>
+
+#ifdef __CYGWIN__
+#include "../deps/wepoll/wepoll.h"
+#else
+#include <sys/epoll.h>
 #include <sys/eventfd.h>
+#endif
 
 #ifdef LJS_LIBFFI
 #include <ffi.h>
@@ -69,6 +74,37 @@
 static thread_local JSRuntime* g_runtime = NULL;
 static thread_local bool catch_error = false; 
 static thread_local JSValue g_eventbus = JS_UNDEFINED;
+
+// eventfd polyfill
+#ifdef __CYGWIN__
+#define evfd_t int64_t
+#define EVPIPE_READABLE_FD(evfd) (evfd) >> 32
+#define EVPIPE_WRITABLE_FD(evfd) (evfd) & UINT32_MAX
+
+typedef uint64_t eventfd_t;
+
+#define EFD_SEMAPHORE 1
+#define EFD_CLOEXEC O_CLOEXEC
+#define EFD_NONBLOCK O_NONBLOCK
+
+static inline evfd_t eventfd(unsigned int, int flags){
+    int fds[2];
+    if(-1 == pipe2(fds, flags)) return -1;
+    return fds[1];
+}
+
+int eventfd_read(evfd_t fd, eventfd_t * value){
+    int* fds = (void*)&fd;
+    return read(fds[0], value, sizeof(eventfd_t));
+}
+
+int eventfd_write(evfd_t fd, eventfd_t value){
+    int* fds = (void*)&fd;
+    return write(fds[1], &value, sizeof(eventfd_t)) == sizeof(eventfd_t);
+}
+#else
+#define evfd_t int
+#endif
 
 // predef 
 static inline JSModuleDef* module_getdef2(JSContext* ctx, JSValueConst this_val);
@@ -425,7 +461,7 @@ read_body:
 static inline size_t urldecode(const char *src, size_t src_len, uint8_t *dst) {
     size_t i, j = 0;
     for (i = 0; i < src_len; i++) {
-        if (src[i] == '%' && i + 2 < src_len && isxdigit(src[i+1]) && isxdigit(src[i+2])) {
+        if (src[i] == '%' && i + 2 < src_len && isxdigit((unsigned char)src[i+1]) && isxdigit((unsigned char)src[i+2])) {
             uint8_t hi = src[i+1];
             uint8_t lo = src[i+2];
             hi = hi <= '9' ? hi - '0' : (hi & 0x0F) + 9; // 处理16进制
@@ -709,9 +745,9 @@ struct WorkerMessage {
 
 struct Worker_Props{
     EvFD* efd_worker2main;
-    int fd_worker2main;
+    evfd_t fd_worker2main;
     EvFD* efd_main2worker;
-    int fd_main2worker;
+    evfd_t fd_main2worker;
 
     JSValue main_msgcb;  // for main thread
     JSValue destroy_cb;  // for main thread
@@ -845,7 +881,7 @@ App* LJS_NewApp(
         list_add_tail(&app -> link, &parent -> workers);
 
         // Create eventfd for worker-main communication
-        int fd1 = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC),
+        evfd_t fd1 = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC),
             fd2 = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if(fd1 < 0 || fd2 < 0){
             perror("eventfd");
@@ -996,18 +1032,18 @@ static int worker_message_callback(EvFD* __, bool _, uint8_t* buffer, uint32_t r
         
     // process queue
     // dispatch global event in next tick
-    pthread_mutex_lock(&app->worker->lock);
+    pthread_mutex_lock(&app -> worker -> lock);
     // if(list_empty(&app -> worker -> main_msg)) abort();
     struct list_head* pos, * tmp;
     list_for_each_safe(pos, tmp, &app -> worker -> main_msg) {
         struct WorkerMessage* msg = list_entry(pos, struct WorkerMessage, list);
-        list_del(&msg->list);
+        list_del(&msg -> list);
 
         // call
-        callev_delay(app->ctx, "message", msg->arg);
+        callev_delay(app -> ctx, "message", msg -> arg);
         free(msg);
     }
-    pthread_mutex_unlock(&app->worker->lock);
+    pthread_mutex_unlock(&app -> worker -> lock);
     
     return EVCB_RET_DONE;
 }
@@ -1109,7 +1145,7 @@ void worker_boot_pipeevent(JSContext* ctx, bool is_error, JSValue result, void* 
 
     // start pipe
     app -> worker -> efd_worker2main = evcore_attach(
-        app -> worker -> fd_worker2main, false,
+        EVPIPE_READABLE_FD(app -> worker -> fd_worker2main), false,
         worker_message_callback, app,
         NULL, NULL,
         worker_close_callback, app
@@ -1462,7 +1498,8 @@ static JSValue js_worker_ctor(JSContext* ctx, JSValueConst new_target, int argc,
 
     // evloop
     app -> worker -> efd_worker2main =
-        evcore_attach(app -> worker -> fd_worker2main, false, 
+        evcore_attach(
+            EVPIPE_READABLE_FD(app -> worker -> fd_worker2main), false, 
             main_message_callback, app,
             NULL, NULL,
             main_close_callback, app
