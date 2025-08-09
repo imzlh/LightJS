@@ -39,7 +39,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <errno.h>
 #include <assert.h>
 #include <stdbool.h>
@@ -482,7 +484,7 @@ skip_protocol:
                 url = last_at + 1; 
             }
         }
-skip_up:
+skip_up:;
         char* host = url;
         char* host_end;
         if(*host == '['){   // ipv6
@@ -859,7 +861,7 @@ static JSValue js_headers_toString(JSContext *ctx, JSValueConst this_val, int ar
         pos += sprintf(buf + pos, " * %s: %s\n", header -> key, header -> value);
     }
     if(data -> content_length > 0){
-        pos += sprintf(buf + pos, " * content-length: %ld\n", data -> content_length);
+        pos += sprintf(buf + pos, " * content-length: %zd\n", data -> content_length);
     }
 
     return JS_NewStringLen(ctx, buf, pos);
@@ -1401,7 +1403,7 @@ static void response_merge_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, vo
 
         Promise *promise = task -> promise;
         // if(data -> state == HTTP_ERROR)
-        js_reject3(promise, "Failed to receive data: %ld bytes missed due to EOF", data -> content_length - data -> content_resolved);
+        js_reject3(promise, "Failed to receive data: %zd bytes missed due to EOF", data -> content_length - data -> content_resolved);
         // else
         //     LJS_Promise_Resolve(promise, )
         free2(task); // done!
@@ -1566,7 +1568,7 @@ static int callback_formdata_parse(EvFD* evfd, bool ok, uint8_t* buffer, uint32_
     }
 
     struct list_head *tmp, *cur;
-end_callback:
+end_callback:;
     JSValue array = JS_NewArray(ctx);
     uint32_t i = 0;
     
@@ -1675,7 +1677,7 @@ static JSValue js_response_formData(JSContext* ctx, JSValueConst this_val, int a
 not_found:
     return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid or missing content-type. Please ensure boundary is set", NULL);
 
-main:
+main:;
     Promise *promise = js_promise(ctx);
     struct formdata_addition_data* task = init_formdata_parse_task(promise, response);
     task -> boundary = boundary;
@@ -2077,7 +2079,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
                 if (data) {
                     size_t len = 21 + sizeof(size_t);
                     char* buf = malloc2(len);
-                    snprintf(buf, len, "Content-Length: %lu\r\n\r\n", data_len);
+                    snprintf(buf, len, "Content-Length: %zu\r\n\r\n", data_len);
                     evfd_write(fd, (uint8_t*) buf, len, write_then_free, buf);
                     free2(buf);
                 }
@@ -2339,7 +2341,7 @@ check_payload:
 
 end:
     return 0;
-error:
+error:;
     // send close frame
     // \03\234: 1002
     char close_frame[16] = "\3\234" "Invaild frame";

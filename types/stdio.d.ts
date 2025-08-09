@@ -160,6 +160,16 @@ declare module "fs" {
 
     export function stat(path: string): Stat;
 
+    export const access: {
+        (path: string, mode: number, safe_call?: false): void;
+        (path: string, mode: number, safe_call: true): boolean;
+
+        ACCESS: number; // alias for F_OK
+        EXECUTE: number;// alias for X_OK
+        WRITE: number;  // alias for W_OK
+        READ: number;   // alias for R_OK
+    };
+
     /**
      * Open a file for reading or writing synchronously.
      */

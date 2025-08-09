@@ -124,12 +124,12 @@ static inline JSValue LJS_NewResolvedPromise(JSContext* ctx, JSValue value){
 static inline bool JS_CopyObject(JSContext *ctx, JSValueConst from, JSValue to, uint32_t max_items){
     JSValue val;
 
-    JSPropertyEnum *props[max_items];
-    int proplen = JS_GetOwnPropertyNames(ctx, props, &max_items, from, JS_GPN_ENUM_ONLY);
+    JSPropertyEnum *props;
+    int proplen = JS_GetOwnPropertyNames(ctx, &props, &max_items, from, JS_GPN_ENUM_ONLY);
     if(proplen < 0) return false;
     for(int i = 0; i < proplen; i++){
-        val = JS_GetProperty(ctx, from, props[i] -> atom);
-        JS_SetProperty(ctx, to, props[i] -> atom, val);
+        val = JS_GetProperty(ctx, from, props[i].atom);
+        JS_SetProperty(ctx, to, props[i].atom, val);
     }
     return true;
 }
@@ -159,8 +159,9 @@ static inline void JS_PromiseCatch(JSContext* ctx, JSValueConst promise, JSValue
 
 static inline bool LJS_IsMainContext(JSContext* ctx){
     App* app = JS_GetContextOpaque(ctx);
-    if(!app -> worker) return true;
-    return false;
+    if(app -> worker) return false; // worker
+    if(JS_GetRuntimeOpaque(JS_GetRuntime(ctx)) != app) return false; // sandbox
+    return true;
 }
 
 static inline bool JS_IsTypedArray(JSContext* ctx, JSValueConst val){

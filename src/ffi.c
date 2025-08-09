@@ -28,14 +28,15 @@
 #include "core.h"
 #include "polyfill.h"
 
-#ifdef LJS_LIBFFI
-#include <ffi.h>
 #include <pthread.h>
 #include <signal.h>
 #include <threads.h>
 #include <setjmp.h>
 #include <dlfcn.h>
 #include <errno.h>
+
+#ifdef LJS_LIBFFI
+#include <ffi.h>
 
 #if defined(LJS_DEBUG) && defined(LJS_EXECINFO)
 // warn: not available in Alpine(musl)
@@ -119,7 +120,7 @@ static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
     if(running_thread){
         pthread_mutex_unlock(&ffi_mutex);
         pthread_kill(running_thread, SIGUSR2);
-        running_thread = NULL;
+        running_thread = 0;
     }else{
         // Not in FFI thread
         printf("program received unhandled %s\n", info);
@@ -535,7 +536,7 @@ const JSCFunctionListEntry js_ffi_funcs[] = {};
 #endif
 
 int init_ffi(JSContext *ctx, JSModuleDef *m) {
-#if defined(LJS_DEBUG) && !defined(__CYGWIN__)
+#if defined(LJS_DEBUG) && !defined(__CYGWIN__) && defined(LJS_LIBFFI)
     // signal(SIGUSR1, inthread_sighandler);
     struct sigaction sa = {
         .sa_flags = SA_SIGINFO,

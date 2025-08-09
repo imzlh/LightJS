@@ -32,7 +32,9 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <errno.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <signal.h>
 #include <fcntl.h>
 #include <netinet/tcp.h>
@@ -52,6 +54,8 @@
 #ifdef LJS_MBEDTLS
 #include "../lib/mbedtls_config.h"
 #include <mbedtls/ssl.h>
+#include <mbedtls/x509.h>
+#include <mbedtls/x509_crt.h>
 #endif
 
 #define BUFFER_SIZE 16 * 1024
@@ -949,16 +953,20 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
         return JS_ThrowTypeError(ctx, "handshake_ssl: invalid socket");
     }
 
+    // save certs
+    mbedtls_x509_crt server_crt;
+    mbedtls_pk_context server_key;
+
     if(argc >= 2){
         JSValue obj = argv[1];
         JSValue val;
+        int server_verify = -1;
         if(JS_IsBool(val = JS_GetPropertyStr(ctx, obj, "server"))){
             flag |= SSL_IS_SERVER;
 
             // server features
             JS_FreeValue(ctx, val);
-            // TODO: server crt&key
-            // if(JS_IsUint)
+            server_verify = 0;
         }
         JS_FreeValue(ctx, val);
         if(JS_IsArray(val = JS_GetPropertyStr(ctx, obj, "ciphers"))) {
@@ -984,6 +992,64 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
             }
         }
         JS_FreeValue(ctx, val);
+        if(JS_IsString(val = JS_GetPropertyStr(ctx, obj, "hostname"))){
+            options.server_name = JS_ToCString(ctx, val);
+            JS_FreeCString(ctx, options.server_name);
+        }
+        JS_FreeValue(ctx, val);
+        if (JS_IsArray(val = JS_GetPropertyStr(ctx, argv[1], "alpn"))) {
+            int64_t count;
+            if (JS_GetLength(ctx, val, &count) > 0) {
+                options.alpn_protocols = malloc2((count + 1) * sizeof(char*));
+                for (int i = 0; i < count; i++) {
+                    JSValue item = JS_GetPropertyUint32(ctx, val, i);
+                    const char* protocol = JS_ToCString(ctx, item);
+                    if (protocol != NULL) {
+                        ((char**) options.alpn_protocols)[i] = (void*) protocol;
+                    }
+                    JS_FreeCString(ctx, protocol);
+                    JS_FreeValue(ctx, item);
+                }
+                ((char**) options.alpn_protocols)[count] = NULL;
+            }
+        }
+        JS_FreeValue(ctx, val);
+        if(JS_IsTypedArray(ctx, val = JS_GetPropertyStr(ctx, obj, "cacert"))){
+            size_t len;
+            uint8_t* data = JS_GetUint8Array(ctx, &len, val);
+            mbedtls_x509_crt* cacert = &server_crt;
+            if(data && len && 0 == mbedtls_x509_crt_parse(cacert, (void*)data, len)){
+                // something to do?
+                if(server_verify >= 0) server_verify ++;
+                options.ca_cert = cacert;
+            }
+        }
+        JS_FreeValue(ctx, val);
+
+        const char* ca_key_pw = NULL;
+        size_t ca_key_pw_len = 0;
+        if(JS_IsString(val = JS_GetPropertyStr(ctx, obj, "cakey_password"))){
+            ca_key_pw = JS_ToCStringLen(ctx, &ca_key_pw_len, val);
+        }
+        JS_FreeValue(ctx, val);
+        if(JS_IsTypedArray(ctx, val = JS_GetPropertyStr(ctx, obj, "cakey"))){
+            size_t len;
+            uint8_t* data = JS_GetUint8Array(ctx, &len, val);
+            mbedtls_pk_context* pk = &server_key;
+            if(data && len && 0 == mbedtls_pk_parse_key(pk, (void*)data, len, 
+                (void*)ca_key_pw, ca_key_pw_len, mb_random, NULL)){
+                // something to do?
+                if(server_verify >= 0) server_verify ++;
+                options.server_key = pk;
+            }
+        }
+        JS_FreeValue(ctx, val);
+
+        if(server_verify >= 0 && server_verify < 2){
+            if(options.ca_cert) mbedtls_x509_crt_free(options.ca_cert);
+            if(options.server_key) mbedtls_pk_free(options.server_key);
+            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: missing or invalid server key or cert", NULL);
+        }
     }
 
     Promise* promise = js_promise(ctx);
@@ -1279,7 +1345,7 @@ EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int 
 #endif
 
     bool try_ipv4 = true;
-retry:
+retry:;
     int fd = socket_create(protocol);
     if(fd < 0) return NULL;
     socket_connect(fd, protocol, hostname, port, hostname);

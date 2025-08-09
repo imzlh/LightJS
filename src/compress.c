@@ -45,8 +45,9 @@ static JSValue js_zlib_zlibformat(JSContext *ctx, JSValueConst this_val, int arg
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments for zlib", "zlib(data: Uint8Array, decompress: boolean, level?: number): Uint8Array");
     }
 
-    size_t bufsize;
-    uint8_t* buf = JS_GetUint8Array(ctx, &bufsize, argv[0]);
+    size_t __bufsize;
+    uint8_t* buf = JS_GetUint8Array(ctx, &__bufsize, argv[0]);
+    uLong bufsize = __bufsize;
     if(!buf) return JS_EXCEPTION;
 
     uint32_t level = Z_DEFAULT_COMPRESSION;
@@ -57,12 +58,12 @@ static JSValue js_zlib_zlibformat(JSContext *ctx, JSValueConst this_val, int arg
     }
 
     bool decompress = JS_ToBool(ctx, argv[1]);
-    size_t outsize = compressBound(bufsize);
+    uLong outsize = compressBound(bufsize);
     uint8_t* outbuf = js_malloc(ctx, outsize);
     if(!outbuf) return JS_ThrowOutOfMemory(ctx);
 
-main:
     int res;
+main:
     if(decompress){
         res = uncompress2(outbuf, &outsize, buf, &bufsize);
     }else{
@@ -115,6 +116,7 @@ static JSValue js_zlib_inflate(JSContext *ctx, JSValueConst this_val, int argc, 
     }
 
     size_t bufsize;
+    int res = 0;
     uint8_t* buf = JS_GetUint8Array(ctx, &bufsize, argv[0]);
     if(!buf) return JS_EXCEPTION;
 
@@ -149,7 +151,6 @@ static JSValue js_zlib_inflate(JSContext *ctx, JSValueConst this_val, int argc, 
     }
 
 main_loop:
-    int res;
     if(decompress){
         res = inflate(&zstream, Z_NO_FLUSH);
     }else{
@@ -204,6 +205,7 @@ struct js_zlib_stream {
 
 static JSValue stream_poll(JSContext* ctx, void* ptr, JSValueConst data){
     struct js_zlib_stream* stream = ptr;
+    uint8_t* outbuf;
     if(stream -> closed) abort();
 
     if(stream -> poll_promise) abort();  // pipe should not be polled again before previous poll is resolved
@@ -222,7 +224,7 @@ static JSValue stream_poll(JSContext* ctx, void* ptr, JSValueConst data){
     // write to zlib
     char* error;
 loop:
-    uint8_t* outbuf = stream -> zstream.next_out;
+    outbuf = stream -> zstream.next_out;
     while(stream -> zstream.avail_in){
         int res = stream -> compress
             ? deflate(&stream -> zstream, Z_NO_FLUSH)

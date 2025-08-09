@@ -27,13 +27,16 @@
 #include <string.h>
 #include <errno.h>
 #include <stdbool.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <stdio.h>
 #include <assert.h>
 #include <signal.h>
 #include <time.h>
 #include <netdb.h>
 #include <fcntl.h>
+#include <linux/fs.h>   // BLOCK_SIZE
 #include <sys/timerfd.h>
 #include <sys/socket.h>
 #include <sys/random.h>
@@ -99,7 +102,7 @@ struct inotify_event {};
 // #define LJS_EVLOOP_THREADSAFE
 
 #ifndef LJS_EVLOOP_FEATURE_PTY
-#define EVFD_PTY EVFD_NORM
+#define EVFD_PTY __EVFD_ENUM_END_PLACEHOLDER__
 #endif
 
 enum EvFDType {
@@ -118,6 +121,8 @@ enum EvFDType {
     EVFD_PTY,
 #endif
     // DTLS removed since v1.1
+
+    __EVFD_ENUM_END_PLACEHOLDER__
 };
 
 enum EvTaskType {
@@ -485,6 +490,7 @@ static inline void evfd_ctl(struct EvFD* evfd, uint32_t epoll_flags) {
         list_del(&evfd -> link);
     }
 end:
+    return;
 }
 
 static inline bool evfd_add(struct EvFD* evfd, uint32_t epoll_flags) {
@@ -702,6 +708,7 @@ static void check_queue_status(EvFD* evfd) {
 #endif
         case EVFD_PTY:
             new_events = EPOLLIN | EPOLLHUP | EPOLLERR;
+        break;
 
         case EVFD_UDP:
             new_events = EPOLLLT;
@@ -807,8 +814,10 @@ static inline int blksize_get(int fd) {
     int blksize;
 #ifdef __CYGWIN__
     blksize = S_BLKSIZE;
-#else
+#elif defined(BLKSSZGET)
     if (fcntl(fd, BLKSSZGET, &blksize) != 0) return 512;
+#else
+    return BLOCK_SIZE;
 #endif
     return blksize;
 }
@@ -1071,7 +1080,9 @@ static void handle_read(int fd, EvFD* evfd, struct io_event* ioev, struct inotif
         }
     }
 
+#ifdef LJS_MBEDTLS
 start:
+#endif
     struct list_head* cur = NULL, * tmp;
     int prevexec = 0;
 mainloop:
@@ -1156,7 +1167,7 @@ mainloop:
             continue;
         }
 
-main:   // while loop
+main:;   // while loop
         uint32_t bufsize = buffer_used(evfd -> incoming_buffer);
         if (bufsize == 0) {
             // no data
@@ -1270,7 +1281,7 @@ main:   // while loop
             goto _continue;
 
             // Note: the main logic of pipeto is in handle_write
-            case EV_TASK_PIPETO:
+            case EV_TASK_PIPETO:{
                 // filter
                 EvPipeToFilter filter = task -> cb.pipeto -> filter;
                 struct Buffer* buf = task -> cb.pipeto -> exchange_buffer;
@@ -1281,7 +1292,7 @@ main:   // while loop
                     // push to target buffer
                     assert(buffer_merge2(task -> cb.pipeto -> to -> incoming_buffer, buf) == n);
                 }
-            goto _return;   // block task execution
+            } goto _return;   // block task execution
 
             _continue:
                 if (evfd -> destroy || !evfd -> task_based)
@@ -1363,7 +1374,7 @@ static void handle_write(int fd, EvFD* evfd, struct io_event* ioev) {
             return;
         }
 
-        free2((void*)ioev -> data);
+        free2((void*)(uintptr_t)(ioev -> data));
         // precheck
         // struct Task* task = list_entry(evfd -> u.task.write_tasks.next, struct Task, list);
         // buffer_seek_cur(task -> buffer, ioev -> res);
@@ -1918,7 +1929,7 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                     break;
 
 #ifndef __CYGWIN__
-                    case EVFD_AIO:
+                    case EVFD_AIO:{
                         struct io_event events[3];
                         static struct timespec timeout = { 0, 0 };
                         uint64_t evfd_read;
@@ -1931,7 +1942,7 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                                 break;
                             }
                             for (int j = 0; j < ret; ++j) {
-                                struct Task* task = (void*)events[j].data;
+                                struct Task* task = (void*)(uintptr_t)events[j].data;
                                 if (task == evfd -> proto.aio -> read_pending)
                                     handle_read(evfd -> fd[0], evfd, &events[j], NULL);
                                 else if (task == evfd -> proto.aio -> write_pending)
@@ -1943,9 +1954,9 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                                     handle_close(evfd -> fd[0], false, evfd);
                             }
                         }
-                    break;
+                    } break;
 
-                    case EVFD_INOTIFY:
+                    case EVFD_INOTIFY:{
                         unsigned char inev[sizeof(struct inotify_event) + NAME_MAX + 1];
                         ssize_t in_prev_n;
                         while ((in_prev_n = read(evfd -> fd[0], &inev, sizeof(inev))) > 0) {
@@ -1958,7 +1969,7 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                             if(errno != EAGAIN && errno != EINTR)
                                 handle_close(evfd -> fd[0], evfd, false);
                         }
-                    break;
+                    } break;
 #endif
 
 #ifdef LJS_MBEDTLS
@@ -1978,6 +1989,8 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                         }
 #endif
                     break;
+
+                    default: abort(); // should not reach here
                 }
 
                 CHECK_TO_BE_CLOSE(evfd);
@@ -2283,7 +2296,11 @@ EvFD* evfd_new(int fd, int flag, uint32_t bufsize,
     evfd -> task_based = true;
     evfd -> fd[0] = fd;
     evfd -> fd[1] = -1;
-    evfd -> type = flag & PIPE_PTY ? EVFD_PTY : EVFD_NORM;
+    evfd -> type = 
+#ifdef LJS_EVLOOP_FEATURE_PTY
+        flag & PIPE_PTY ? EVFD_PTY : 
+#endif
+        EVFD_NORM;
     evfd -> epoll_flags = EPOLLLT | EPOLLERR | EPOLLHUP;
     if (flag & PIPE_READ) evfd -> epoll_flags |= EPOLLIN;
     if (flag & PIPE_WRITE || flag & PIPE_PTY) evfd -> epoll_flags |= EPOLLOUT;
@@ -2400,7 +2417,7 @@ bool evfd_initssl(
     // this may a bug in mbedtls
     // it will not as perform we expected, only TLSv1.2 will be used
     // mbedtls_ssl_conf_min_version(cfg, 3, 1);   // TLSv1.0
-    mbedtls_ssl_conf_max_version(cfg, 3, flag & SSL_USE_TLS1_3 ? 4 : 3);// TLSv1.3/1.2
+    mbedtls_ssl_conf_max_tls_version(cfg, MBEDTLS_SSL_VERSION_TLS1_3);// TLSv1.3/1.2
     mbedtls_ssl_conf_rng(cfg, default_rng, NULL);
     if (config) *config = cfg;
 
@@ -2675,7 +2692,7 @@ task:
     }
     if(evfd -> destroy) goto no_data;   // if continue failed
 
-startup:
+startup:;
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
 
@@ -2739,7 +2756,7 @@ task:
     }
     if(evfd -> destroy) goto no_data;
 
-startup:
+startup:;
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
 
@@ -3148,7 +3165,7 @@ static inline EvFD* timer_new(uint64_t milliseconds, EvTimerCallback callback, v
     evfd -> fd[0] = fd;
     evfd -> type = EVFD_TIMER;
 
-settime:
+settime:;
     // set timer params
     struct timespec itss = {
         .tv_sec = milliseconds / 1000,

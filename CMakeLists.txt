@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.10)
 project(quickjs LANGUAGES C)
 
 include(CheckCCompilerFlag)
+include(CheckSymbolExists)
 include(GNUInstallDirs)
 
 set(CMAKE_C_VISIBILITY_PRESET hidden)
@@ -158,6 +159,18 @@ add_link_options(
 )
 endif()
 
+check_symbol_exists(openpty "pty.h" HAVE_OPENPTY)
+if(NOT HAVE_OPENPTY)
+    add_compile_definitions(L_POLYFILL_OPENPTY)
+endif()
+
+include(CheckIncludeFile)
+check_include_file(threads.h HAVE_THREADS_H)
+if(NOT HAVE_THREADS_H)
+    add_compile_definitions(L_NO_THREADS_H)
+    add_compile_definitions(thread_local=_Thread_local)
+endif()
+
 if(LJS_ENABLE_SOURCE_MAP)
     message(STATUS "Building with source map support")
     add_compile_definitions(LJS_FEATURE_SOURCE_MAP)
@@ -219,14 +232,50 @@ find_library(MBEDTLS_LIBRARIES mbedtls)
 if(MBEDTLS_LIBRARIES)
     # check
     include(CheckSymbolExists)
-    check_symbol_exists(MBEDTLS_X509_CRT_PARSE_C "mbedtls/mbedtls_config.h" HAVE_MBEDTLS_X509)
-    if(NOT HAVE_MBEDTLS_X509)
-        message(FATAL_ERROR "The build of MbedTLS does not support X509 certificates.")
-    endif()
+    
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_INCLUDES ${MBEDTLS_INCLUDE_DIRS})
+    set(CMAKE_REQUIRED_LIBRARIES ${MBEDTLS_LIBRARIES} mbedx509 mbedcrypto)
 
-    message(STATUS "Building with mbedtls support")
-    add_compile_definitions(LJS_MBEDTLS)
-    list(APPEND ljs_libs mbedtls mbedx509 mbedcrypto)
+    check_c_source_compiles("
+        #include <mbedtls/cipher.h>
+        int main() {
+            const mbedtls_cipher_info_t *cipher = mbedtls_cipher_info_from_values(MBEDTLS_CIPHER_ID_AES, 128, MBEDTLS_MODE_CBC);
+            return cipher != NULL;
+        }
+    " HAVE_MBEDTLS_AES_CBC)
+
+    check_c_source_compiles("
+        #include <mbedtls/md.h>
+        int main() {
+            const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+            return md != NULL;
+        }
+    " HAVE_MBEDTLS_SHA256)
+
+    check_c_source_compiles("
+        #include <mbedtls/md.h>
+        int main() {
+            mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), NULL, 0, NULL, 0, NULL);
+            return 0;
+        }
+    " HAVE_MBEDTLS_HMAC)
+
+    check_c_source_compiles("
+        #include <mbedtls/ssl.h>
+        int main() {
+            mbedtls_ssl_init(NULL);
+            return 0;
+        }
+    " HAVE_MBEDTLS_TLS)
+
+    if(HAVE_MBEDTLS_AES_CBC AND HAVE_MBEDTLS_SHA256 AND HAVE_MBEDTLS_HMAC AND HAVE_MBEDTLS_TLS)
+        message(STATUS "Found mbedTLS with required features (AES, SHA, HMAC, TLS)")
+        add_compile_definitions(LJS_MBEDTLS)
+        list(APPEND ljs_libs mbedtls mbedx509 mbedcrypto)
+    else()
+        message(WARNING "mbedTLS found but missing required features")
+    endif()
 endif()
 
 # libffi

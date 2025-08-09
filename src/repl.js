@@ -25,24 +25,10 @@
  */
 
 import { exit, self, signals, stdin, stdout } from 'process';
-import { read, write } from 'fs';
+import { access, read, write } from 'fs';
 import { Sandbox, setVMOptions } from 'vm';
 
 var interrupt = false, exiting = false;
-setVMOptions({
-    disablePromiseReport: true,
-    eventNotifier: (ev, data) => {
-        console.log("Event<", ev, '>', data);
-    },
-    tickCallback(){
-        if (interrupt) {
-            interrupt = false;
-            return true;
-        }else if(exiting){
-            return true;    // block any code execution
-        }
-    }
-});
 
 /**
  * @type {Record<string, string>}
@@ -1619,10 +1605,12 @@ function save_history() {
     }
 }
 function load_history() {
-    var a = read(config_file(".qjs_history"), true);
-    if (a) {
-        history = a.trim().split('\n');
-        history_index = history.length;
+    if(access(config_file(".qjs_history"), access.READ, true)){
+        var a = read(config_file(".qjs_history"), true);
+        if (a) {
+            history = a.trim().split('\n');
+            history_index = history.length;
+        }
     }
 }
 function load_config() {
@@ -1642,6 +1630,21 @@ load_config();
 load_history();
 termInit();
 cmd_readline_start();
+
+setVMOptions({
+    disablePromiseReport: true,
+    eventNotifier: (ev, data) => {
+        console.log("Event<", ev, '>', data);
+    },
+    tickCallback(){
+        if (interrupt) {
+            interrupt = false;
+            return true;
+        }else if(exiting){
+            return true;    // block any code execution
+        }
+    }
+});
 
 while(true){
     const data = await stdin.read();

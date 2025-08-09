@@ -35,7 +35,9 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <errno.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <termios.h>
 
 #ifdef __CYGWIN__
@@ -443,7 +445,7 @@ static void u8pipe_fill_job(JSContext* ctx, bool is_error, JSValue result, void*
     uint32_t export_end = pipe -> read_buf -> end;
 
     if(buffer_is_full(pipe -> read_buf) || job -> once){
-export:
+export:;
         uint32_t size2;
         uint8_t* res = buffer_sub_export(pipe -> read_buf, 
             pipe -> read_buf -> start, export_end, &size2);
@@ -824,7 +826,7 @@ static void pipeto_promisecb2(JSContext* ctx, bool is_error, JSValue val, void* 
             JS_Call2(ctx, tpipe -> pipe.pipe -> close_rs, JS_NULL, 0, NULL);
         }
 
-done:
+done:;
         JSContext* ctx = js_get_promise_context(transfer -> promise);
         js_resolve(transfer -> promise, JS_UNDEFINED);
         FREE_TRANSFER(ctx, transfer -> pipe[0], transfer -> pipe[1]);
@@ -872,7 +874,7 @@ static int pipeto_evloopcb(EvFD* evfd, bool ok, uint8_t* buffer, uint32_t read_s
 _false:
         js_free(ctx, buffer);
     }else{
-done:
+done:;
         JSContext* ctx = js_get_promise_context(t -> promise);
         js_resolve(t -> promise, JS_UNDEFINED);
         FREE_TRANSFER(ctx, t -> pipe[0], t -> pipe[1]);
@@ -1033,6 +1035,7 @@ static inline int get_fd_from_pipe(JSContext* ctx, JSValueConst pipe){
     return evfd_getfd(fd, NULL);
 }
 
+static struct termios rawState;
 static JSValue js_iopipe_setraw(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0)
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a boolean value", "U8Pipe(tty).ttyRaw(set_to_raw: boolean): boolean");
@@ -1068,6 +1071,16 @@ iofailed:
     return JS_TRUE;
 }
 
+__attribute__((constructor)) void init_tty_mode(){
+    tcgetattr(STDIN_FILENO, &rawState);
+}
+
+__attribute__((destructor)) void reset_tty_mode(){
+    for(int i = STDIN_FILENO; i <= STDERR_FILENO; i++){
+        tcsetattr(i, TCSANOW, &rawState);
+    }
+}
+
 #define GET_FD(this) int fdnum = get_fd_from_pipe(ctx, this_val); \
     if(fdnum == -1) return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a U8Pipe object", NULL);
 
@@ -1085,7 +1098,7 @@ static JSValue js_iopipe_get_size(JSContext *ctx, JSValueConst this_val){
 static JSValue js_iopipe_set_size(JSContext *ctx, JSValueConst this_val, JSValueConst value){
     GET_FD(this_val);
 
-    JSValue jsobj[2];
+    JSValue jsobj[2] = { JS_UNDEFINED };
 
     uint32_t rows, cols;
     if (

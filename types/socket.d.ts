@@ -64,9 +64,18 @@ declare module 'socket'{
     }) => IOPipe;
 
     export const upgradeTLS: (client: U8Pipe, settings: {
-        server?: boolean,
+        server?: false,
         ciphers?: Array<string>,
         suiteb?: boolean
+    } | {
+        server: true,
+        ciphers?: Array<string>,
+        suiteb?: boolean,
+        hostname: string,
+        alpn?: Array<string>,
+        cacert: Uint8Array,
+        cakey: Uint8Array,
+        cakey_password?: string
     }) => Promise<void>;
 
     export const resolveDNS: (host: string, dns_server?: string) => Promise<Array<DnsResult>>;

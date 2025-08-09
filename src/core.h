@@ -36,7 +36,13 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdarg.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
+
+#ifdef LJS_MBEDTLS
+#include <mbedtls/ssl.h>
+#endif
 
 #ifdef __CYGWIN__
 // #warning "LightJS may not work correctly on non-linux platforms"
@@ -339,6 +345,9 @@ typedef struct  {
     const char** alpn_protocols;
     const int *ciphersuites;
 } InitSSLOptions;
+
+// (defined in crypto.c) use system random number generator for mbedtls
+int mb_random(void *data, unsigned char *output, size_t len);
 #else 
 #define InitSSLOptions void*
 #endif
