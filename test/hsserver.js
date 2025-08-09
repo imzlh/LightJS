@@ -1,3 +1,4 @@
+import { read } from "fs";
 import { bind, upgradeTLS } from "socket"
 
 test('httpsServer', () => {
@@ -7,6 +8,10 @@ test('httpsServer', () => {
         // upgrade to TLS
         upgradeTLS(client, {
             server: true,
+            cacert: read(import.meta.dirname + '/server.crt'),
+            cakey: read(import.meta.dirname + '/server.key'),
+            alpn: ['http/1.1'],
+            hostname: 'localhost'
         })
     })
 })
