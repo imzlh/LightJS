@@ -124,12 +124,12 @@ static inline JSValue LJS_NewResolvedPromise(JSContext* ctx, JSValue value){
 static inline bool JS_CopyObject(JSContext *ctx, JSValueConst from, JSValue to, uint32_t max_items){
     JSValue val;
 
-    JSPropertyEnum *props[max_items];
-    int proplen = JS_GetOwnPropertyNames(ctx, props, &max_items, from, JS_GPN_ENUM_ONLY);
+    JSPropertyEnum *props;
+    int proplen = JS_GetOwnPropertyNames(ctx, &props, &max_items, from, JS_GPN_ENUM_ONLY);
     if(proplen < 0) return false;
     for(int i = 0; i < proplen; i++){
-        val = JS_GetProperty(ctx, from, props[i] -> atom);
-        JS_SetProperty(ctx, to, props[i] -> atom, val);
+        val = JS_GetProperty(ctx, from, props[i].atom);
+        JS_SetProperty(ctx, to, props[i].atom, val);
     }
     return true;
 }

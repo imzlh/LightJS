@@ -36,7 +36,9 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdarg.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 
 #ifdef __CYGWIN__
 // #warning "LightJS may not work correctly on non-linux platforms"

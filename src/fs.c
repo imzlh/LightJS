@@ -34,7 +34,9 @@
 #include <dirent.h>
 #include <limits.h>
 #include <unistd.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 

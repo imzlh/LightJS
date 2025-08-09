@@ -1,10 +1,11 @@
 # LightJS
 > 一个JavaScript运行环境，极度轻量化，简单又小巧
 
-# 碎碎念
-QuickJS真的好...比NodeJS这样基于v8的引擎小了一个数量级<br>
-LightJS灵感起源于QuickGateway，失败后打算推翻quickjs-libc重写<br>
-本来想要取TinyJS的(起名废)，发现TJS已经有了，于是就叫做LightJS了
+# 速览项目
+ - 100% C库实现，包括`fetch`乃至`atob`实现全部native，在体积与性能间取得平衡！
+ - 超小体积，libc动态编译strip完大小甚至不到 1M，`ljsc`甚至可以更小！
+ - 精挑细选的依赖，mbedtls、ffi、libexpat...全都是静态编译依旧小巧的库
+ - 必选组件(如eventloop/http/pipe)从0到1手写，这意味着你只需要一个`gcc`即可体验`LightJS`!
 
 # 为什么LightJS
  - 库全部使用C实现，二进制可执行文件中除了交互模式坚决不使用JS代码胶合
@@ -24,6 +25,20 @@ LightJS灵感起源于QuickGateway，失败后打算推翻quickjs-libc重写<br>
     - `Sandbox.eval()`不会污染全局作用域，再也不需要危险的`with{}`了！
     - 原生linux shm、使用`new SharedMemory()`实现进程间共享内存！
     - ...
+
+# 编译
+
+以下依赖皆可选！使用`apt-get`安装(for Debian/Ubuntu及衍生系统)
+ - `libmbedtls-dev`
+ - `libffi-dev`
+ - `libexpat1-dev`
+ - `zlib1g-dev`
+
+```sh
+cmake .
+make
+```
+`ljs`即是入口文件
 
 # 警告
 LightJS还在萌芽，不确定是否能用（BUG会很多），希望大家参与进来，欢迎PR！

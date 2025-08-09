@@ -28,14 +28,17 @@
 #include "core.h"
 #include "polyfill.h"
 
-#ifdef LJS_LIBFFI
-#include <ffi.h>
 #include <pthread.h>
 #include <signal.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <setjmp.h>
 #include <dlfcn.h>
 #include <errno.h>
+
+#ifdef LJS_LIBFFI
+#include <ffi.h>
 
 #if defined(LJS_DEBUG) && defined(LJS_EXECINFO)
 // warn: not available in Alpine(musl)
@@ -535,7 +538,7 @@ const JSCFunctionListEntry js_ffi_funcs[] = {};
 #endif
 
 int init_ffi(JSContext *ctx, JSModuleDef *m) {
-#if defined(LJS_DEBUG) && !defined(__CYGWIN__)
+#if defined(LJS_DEBUG) && !defined(__CYGWIN__) && defined(LJS_LIBFFI)
     // signal(SIGUSR1, inthread_sighandler);
     struct sigaction sa = {
         .sa_flags = SA_SIGINFO,

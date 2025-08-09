@@ -22,7 +22,7 @@
             }
         },
         {
-            "name": "Linux",
+            "name": "Windows",
             "includePath": [
                 "${workspaceFolder}/**"
             ],

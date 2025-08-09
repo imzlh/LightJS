@@ -600,7 +600,7 @@ static inline uint32_t buffer_merge2(struct Buffer* dest, struct Buffer* src) {
 static const char map[] = "0123456789ABCDEF";
 static inline uint8_t u32tohex(uint32_t value, char* hex) {
     uint8_t len = 0;
-    char buf[8];
+    char buf[8] = {0};
     int8_t i = 7;
     do {
         buf[i--] = map[value & 0xf];    // big-endian

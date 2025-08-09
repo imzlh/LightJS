@@ -32,7 +32,9 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <errno.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <signal.h>
 #include <fcntl.h>
 #include <netinet/tcp.h>
@@ -1279,7 +1281,7 @@ EvFD* LJS_open_socket(const char* protocol, const char* hostname, int port, int 
 #endif
 
     bool try_ipv4 = true;
-retry:
+retry:;
     int fd = socket_create(protocol);
     if(fd < 0) return NULL;
     socket_connect(fd, protocol, hostname, port, hostname);

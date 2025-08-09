@@ -33,7 +33,9 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <paths.h>
 #include <limits.h>
 #include <signal.h>
@@ -41,6 +43,9 @@
 #include <pty.h>
 #include <errno.h>
 #include <unistd.h>
+#include <pty.h>
+#include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <sys/ioctl.h>
@@ -57,6 +62,59 @@ extern char **environ;
 extern char* __progpath;    // XXX: define a function to set this?
 static JSValue* js_argv;
 static size_t js_argc;
+
+#ifdef L_POLYFILL_OPENPTY
+// polyfill version of openpty
+// openpty requires libc >= 2.26
+int openpty(int *amaster, int *aslave, char *name,
+            const struct termios *termp,
+            const struct winsize *winp){
+    int master, slave;
+    char *slave_name;
+
+    // open pty and grand access
+    master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master == -1)
+        return -1;
+    if (grantpt(master) == -1) {
+        close(master);
+        return -1;
+    }
+
+    // unlock slave pty
+    if (unlockpt(master) == -1) {
+        close(master);
+        return -1;
+    }
+
+    // get slave pty name
+    slave_name = ptsname(master);
+    if (slave_name == NULL) {
+        close(master);
+        return -1;
+    }
+
+    // open slave pty
+    slave = open(slave_name, O_RDWR | O_NOCTTY);
+    if (slave == -1) {
+        close(master);
+        return -1;
+    }
+
+    // set default size
+    if (termp != NULL)
+        tcsetattr(slave, TCSAFLUSH, termp);
+    if (winp != NULL)
+        ioctl(slave, TIOCSWINSZ, winp);
+
+    *amaster = master;
+    *aslave = slave;
+    if (name != NULL)
+        strcpy(name, slave_name);
+
+    return 0;
+}
+#endif
 
 // --- class ReactiveEnviron --- thread_safe
 struct ReactiveEnviron {

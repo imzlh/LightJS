@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.10)
 project(quickjs LANGUAGES C)
 
 include(CheckCCompilerFlag)
+include(CheckSymbolExists)
 include(GNUInstallDirs)
 
 set(CMAKE_C_VISIBILITY_PRESET hidden)
@@ -156,6 +157,18 @@ add_link_options(
     -fno-sanitize-recover=all
     -fno-omit-frame-pointer
 )
+endif()
+
+check_symbol_exists(openpty "pty.h" HAVE_OPENPTY)
+if(NOT HAVE_OPENPTY)
+    add_compile_definitions(L_POLYFILL_OPENPTY)
+endif()
+
+include(CheckIncludeFile)
+check_include_file(threads.h HAVE_THREADS_H)
+if(NOT HAVE_THREADS_H)
+    add_compile_definitions(L_NO_THREADS_H)
+    add_compile_definitions(thread_local=_Thread_local)
 endif()
 
 if(LJS_ENABLE_SOURCE_MAP)

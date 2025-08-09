@@ -6,7 +6,9 @@
 #include "engine/quickjs.h"
 #include "src/polyfill.h"
 
+#ifndef __LJSC
 #include "src/repl.h"
+#endif
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -16,7 +18,9 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <sys/stat.h>
 
 // debug purpose
@@ -433,7 +437,7 @@ not_bundled:
 #endif
     JSValue ret_val = JS_UNDEFINED;
     if(JS_IsException(code)){
-print_error:
+print_error:;
         JSValue exception = JS_GetException(app -> ctx);
         js_dump(app -> ctx, exception, pstderr);
         evfd_syncexec(pstderr);

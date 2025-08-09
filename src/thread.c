@@ -29,7 +29,9 @@
 
 #include <pthread.h>
 #include <signal.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,6 +106,8 @@ int eventfd_write(evfd_t fd, eventfd_t value){
 }
 #else
 #define evfd_t int
+#define EVPIPE_READABLE_FD(fd) fd
+#define EVPIPE_WRITABLE_FD(fd) fd
 #endif
 
 // predef 
@@ -592,7 +596,7 @@ compile:
 
     // import meta
     m = JS_VALUE_GET_PTR(func_val);
-set_meta:
+set_meta:;
     JSValue meta_obj = JS_GetImportMeta(ctx, m);
     JS_DefinePropertyValueStr(ctx, meta_obj, "name",
         JS_NewString(ctx, module_name),

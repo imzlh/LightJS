@@ -31,7 +31,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
+#ifndef L_NO_THREADS_H
 #include <threads.h>
+#endif
 #include <assert.h>
 
 #define MAX_DEPTH 64
@@ -303,7 +305,7 @@ static void print_jsbuffer(JSContext* ctx, JSValue val, int depth, DynBuf* outpu
     uint8_t* buf;
     if (JS_IsArrayBuffer(val)) {
         buf = JS_GetArrayBuffer(ctx, &psize, val);
-        dbuf_printf(output, ANSI_MAGENTA "ArrayBuffer(" ANSI_BLUE "%ld" ANSI_MAGENTA ") {" ANSI_RESET, psize);
+        dbuf_printf(output, ANSI_MAGENTA "ArrayBuffer(" ANSI_BLUE "%zu" ANSI_MAGENTA ") {" ANSI_RESET, psize);
 
         goto print_buffer;
     }
@@ -311,7 +313,7 @@ static void print_jsbuffer(JSContext* ctx, JSValue val, int depth, DynBuf* outpu
     if (JS_IsTypedArray(ctx, val)) {
         buf = JS_GetUint8Array(ctx, &psize, val);
 
-        dbuf_printf(output, ANSI_MAGENTA "TypedArray(" ANSI_BLUE "%ld" ANSI_MAGENTA ")" ANSI_RESET " {", psize);
+        dbuf_printf(output, ANSI_MAGENTA "TypedArray(" ANSI_BLUE "%zu" ANSI_MAGENTA ")" ANSI_RESET " {", psize);
 
 print_buffer:
         if (buf == NULL) {
@@ -465,6 +467,7 @@ main:
                 }
                 pcount++;
 __function_break:
+                continue;
             }
             JS_FreePropertyEnum(ctx, props, prop_count);
             if(pcount > 0) goto obj_restart;
@@ -488,7 +491,7 @@ __function_break:
         }
 
         if(depth >= MAX_DEPTH || check_circular(ctx, val, visited, depth)){
-            dbuf_printf(output, ANSI_RED "ArrayLike(%ld)" ANSI_RESET, length); // 保留格式化输出
+            dbuf_printf(output, ANSI_RED "ArrayLike(%lld)" ANSI_RESET, length); // 保留格式化输出
             goto end;
         }
         
@@ -564,7 +567,7 @@ __function_break:
             obj_showproto = false;
         }
 
-show_content:
+show_content:;
         JSValue proto_str;
         // Symbol.toPrimitive
         JSValue valtmp;
@@ -611,7 +614,7 @@ show_content:
         }
         JS_FreeValue(ctx, proto_str);
 
-obj_restart:
+obj_restart:;
         bool wrap_display = measure_wrap_disp2(ctx, val, obj_showproto);
         // 读取对象键名
         JSPropertyEnum *props;
@@ -705,7 +708,7 @@ obj_restart:
             }
             JS_FreeValue(ctx, proto);
         } else {
-shallow_show_proto:
+shallow_show_proto:;
             // show get/set properties
             JSPropertyEnum* prop;
             uint32_t prop_count;

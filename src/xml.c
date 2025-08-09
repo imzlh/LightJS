@@ -192,7 +192,7 @@ param_error:
     JS_FreeCString(ctx, xmlstr);
     return root_obj;
 
-error:
+error:;
     struct list_head* pos, *tmp;
     list_for_each_safe(pos, tmp, &jsxmlctx -> stack) {
         struct XMLElement* el = list_entry(pos, struct XMLElement, link);
