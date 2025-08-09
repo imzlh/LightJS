@@ -1,5 +1,4 @@
 *.cmake
-CMakeCache.txt
 *.a
 ljs*
 *.log
@@ -9,3 +8,8 @@ build/
 CMakeFiles/
 test.*
 !test.sh
+Cmake*
+*.exe
+*/*.so
+*/*.dll
+dist/**

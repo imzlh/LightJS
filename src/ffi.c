@@ -30,9 +30,7 @@
 
 #include <pthread.h>
 #include <signal.h>
-#ifndef L_NO_THREADS_H
 #include <threads.h>
-#endif
 #include <setjmp.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -122,7 +120,7 @@ static void sig_handler(int sig, siginfo_t *_info, void *ucontext){
     if(running_thread){
         pthread_mutex_unlock(&ffi_mutex);
         pthread_kill(running_thread, SIGUSR2);
-        running_thread = NULL;
+        running_thread = 0;
     }else{
         // Not in FFI thread
         printf("program received unhandled %s\n", info);

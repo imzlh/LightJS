@@ -36,7 +36,6 @@
 #include <time.h>
 #include <netdb.h>
 #include <fcntl.h>
-#include <linux/fs.h>   // BLOCK_SIZE
 #include <sys/timerfd.h>
 #include <sys/socket.h>
 #include <sys/random.h>
@@ -60,6 +59,7 @@ struct inotify_event {};
 #pragma GCC diagnostic ignored "-Wunused-label"
 
 #else 
+#include <linux/fs.h>   // BLOCK_SIZE
 #include <linux/aio_abi.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -102,7 +102,7 @@ struct inotify_event {};
 // #define LJS_EVLOOP_THREADSAFE
 
 #ifndef LJS_EVLOOP_FEATURE_PTY
-#define EVFD_PTY EVFD_NORM
+#define EVFD_PTY __EVFD_ENUM_END_PLACEHOLDER__
 #endif
 
 enum EvFDType {
@@ -121,6 +121,8 @@ enum EvFDType {
     EVFD_PTY,
 #endif
     // DTLS removed since v1.1
+
+    __EVFD_ENUM_END_PLACEHOLDER__
 };
 
 enum EvTaskType {
@@ -656,7 +658,10 @@ static inline void free_task(struct Task* task);
 static void check_queue_status(EvFD* evfd) {
     if (evfd -> destroy || !evfd -> task_based) return;
     if (evfd -> sync){
-        if(evfd -> u.task.rw_state){
+#ifdef LJS_DEBUG
+        printf("check_queue_status: fd=%d, sync, s=%d, \n", evfd -> fd[0], evfd -> u.task.rw_state);
+#endif
+        if(0 == evfd -> u.task.rw_state){
             // execute task
             PERFORM(evfd, PIPE_READ, {
                 if(!list_empty(&evfd -> u.task.read_tasks))
@@ -706,6 +711,7 @@ static void check_queue_status(EvFD* evfd) {
 #endif
         case EVFD_PTY:
             new_events = EPOLLIN | EPOLLHUP | EPOLLERR;
+        break;
 
         case EVFD_UDP:
             new_events = EPOLLLT;
@@ -1986,6 +1992,8 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
                         }
 #endif
                     break;
+
+                    default: abort(); // should not reach here
                 }
 
                 CHECK_TO_BE_CLOSE(evfd);
@@ -2291,7 +2299,11 @@ EvFD* evfd_new(int fd, int flag, uint32_t bufsize,
     evfd -> task_based = true;
     evfd -> fd[0] = fd;
     evfd -> fd[1] = -1;
-    evfd -> type = flag & PIPE_PTY ? EVFD_PTY : EVFD_NORM;
+    evfd -> type = 
+#ifdef LJS_EVLOOP_FEATURE_PTY
+        flag & PIPE_PTY ? EVFD_PTY : 
+#endif
+        EVFD_NORM;
     evfd -> epoll_flags = EPOLLLT | EPOLLERR | EPOLLHUP;
     if (flag & PIPE_READ) evfd -> epoll_flags |= EPOLLIN;
     if (flag & PIPE_WRITE || flag & PIPE_PTY) evfd -> epoll_flags |= EPOLLOUT;
@@ -2312,6 +2324,9 @@ EvFD* evfd_new(int fd, int flag, uint32_t bufsize,
     if(!evfd_add(evfd, EPOLLHUP | EPOLLERR)){
         if(flag & PIPE_SYNC_IF_NOT_SUPPORTED){
             evfd -> sync = true;
+#ifdef LJS_DEBUG
+            printf("downgrade to sync mode for fd:%d\n", evfd -> fd[0]);
+#endif
         }else{
             list_del(&evfd -> link);
             free2(evfd);
@@ -2408,7 +2423,7 @@ bool evfd_initssl(
     // this may a bug in mbedtls
     // it will not as perform we expected, only TLSv1.2 will be used
     // mbedtls_ssl_conf_min_version(cfg, 3, 1);   // TLSv1.0
-    mbedtls_ssl_conf_max_version(cfg, 3, flag & SSL_USE_TLS1_3 ? 4 : 3);// TLSv1.3/1.2
+    mbedtls_ssl_conf_max_tls_version(cfg, MBEDTLS_SSL_VERSION_TLS1_3);// TLSv1.3/1.2
     mbedtls_ssl_conf_rng(cfg, default_rng, NULL);
     if (config) *config = cfg;
 
@@ -2823,10 +2838,12 @@ bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
 
         // add to list
         list_add_tail(&task -> list, &evfd -> u.task.write_tasks);
-    } else {
+    } else 
+#endif
+    {
         list_add_tail(&task -> list, &evfd -> u.task.write_tasks);
     }
-#endif
+
 
     TRACE_EVENTS(evfd, +1);
 

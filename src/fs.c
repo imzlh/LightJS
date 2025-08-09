@@ -578,6 +578,27 @@ static JSValue js_stdio_write(JSContext *ctx, JSValueConst self, int argc, JSVal
     return JS_UNDEFINED;
 }
 
+static JSValue js_stdio_access(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){
+    if(argc < 2 || !JS_IsString(argv[0]) || !JS_IsNumber(argv[1])){
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments", 
+            "stdio.access(path: string, test: number, safe?: boolean): string");
+    }
+
+    const char* path = JS_ToCString(ctx, argv[0]);
+    int32_t mode;
+    if(-1 == JS_ToInt32(ctx, &mode, argv[1])) return JS_EXCEPTION;
+    bool safe = argc > 2 && JS_ToBool(ctx, argv[2]);
+
+    int ret = access(path, mode);
+    if(ret == -1){
+        if(safe) return JS_FALSE;
+        else return LJS_Throw(ctx, EXCEPTION_IO, "failed to access file: %s", NULL, strerror(errno));
+    }else{
+        if(safe) return JS_TRUE;
+        else return JS_UNDEFINED;
+    }
+}
+
 // mkdir
 static JSValue js_stdio_mkdir(JSContext *ctx, JSValueConst self, int argc, JSValueConst *argv){
     const char *path;
@@ -1038,6 +1059,8 @@ static JSValue js_stdio_open(JSContext *ctx, JSValueConst self, int argc, JSValu
 
 static const JSCFunctionListEntry js_stdio_funcs[] = {
     JS_CFUNC_DEF("write", 2, js_stdio_write),
+    // JS_CFUNC_DEF("access", 2, js_stdio_access),
+    JS_PROP_INT32_DEF("access", 0, JS_PROP_C_W_E),  // placeholder
     JS_CFUNC_DEF("mkdir", 1, js_stdio_mkdir),
     JS_CFUNC_DEF("unlink", 1, js_stdio_unlink),
     JS_CFUNC_DEF("symlink", 2, js_stdio_symlink),
@@ -1048,14 +1071,24 @@ static const JSCFunctionListEntry js_stdio_funcs[] = {
     JS_CFUNC_DEF("stat", 1, js_stdio_stat),
     JS_CFUNC_DEF("read", 2, js_stdio_read),
     JS_CFUNC_DEF("rename", 2, js_stdio_rename),
-    JS_CFUNC_DEF("copy", 2, js_stdio_copy),
+    JS_CFUNC_DEF("copy", 2, js_stdio_copy)
+};
+
+static const JSCFunctionListEntry js_access_flag[] = {
+    C_CONST_RENAME(F_OK, ACCESS),
+    C_CONST_RENAME(R_OK, READ),
+    C_CONST_RENAME(W_OK, WRITE),
+    C_CONST_RENAME(X_OK, EXECUTE),
 };
 
 static int js_mod_stdio_init(JSContext *ctx, JSModuleDef *m) {
     JS_SetModuleExportList(ctx, m, js_stdio_funcs, countof(js_stdio_funcs));
-    JS_NewClassID(JS_GetRuntime(ctx), &js_syncpipe_class_id);
-    
+    JSValue access_func = JS_NewCFunction(ctx, js_stdio_access, "access", 2);
+    JS_SetModuleExport(ctx, m, "access", access_func);
+    JS_SetPropertyFunctionList(ctx, access_func, js_access_flag, countof(js_access_flag));
+
     // class SyncPipe
+    JS_NewClassID(JS_GetRuntime(ctx), &js_syncpipe_class_id);
     if(-1 == JS_NewClass(JS_GetRuntime(ctx), js_syncpipe_class_id, &js_syncpipe_class)) 
         return false;
     JSValue proto = JS_NewObject(ctx);

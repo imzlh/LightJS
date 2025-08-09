@@ -42,7 +42,7 @@
 static mbedtls_ctr_drbg_context ctr_drbg;
 
 // The function is thread-safe
-static int mb_random(void *data, unsigned char *output, size_t len) {
+int mb_random(void *data, unsigned char *output, size_t len) {
     static char noise[] = "LightJS " LJS_VERSION; 
 
     // system random

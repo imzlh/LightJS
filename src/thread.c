@@ -2806,7 +2806,7 @@ static inline JSValue get_version_info(JSContext* ctx){
 #endif
 
 #ifdef LJS_LIBEXPAT
-    JS_SetPropertyStr(ctx, obj, "expat", JS_NewString(ctx, XML_ExpatVersion()));
+    // JS_SetPropertyStr(ctx, obj, "expat", JS_NewString(ctx, XML_ExpatVersion()));
 #endif
 
 #ifdef LJS_LIBFFI

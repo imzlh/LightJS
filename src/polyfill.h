@@ -159,8 +159,9 @@ static inline void JS_PromiseCatch(JSContext* ctx, JSValueConst promise, JSValue
 
 static inline bool LJS_IsMainContext(JSContext* ctx){
     App* app = JS_GetContextOpaque(ctx);
-    if(!app -> worker) return true;
-    return false;
+    if(app -> worker) return false; // worker
+    if(JS_GetRuntimeOpaque(JS_GetRuntime(ctx)) != app) return false; // sandbox
+    return true;
 }
 
 static inline bool JS_IsTypedArray(JSContext* ctx, JSValueConst val){

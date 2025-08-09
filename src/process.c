@@ -501,7 +501,7 @@ static JSValue js_sleep(JSContext* ctx, JSValueConst this_val, int argc, JSValue
 
 static JSCFunctionListEntry js_process_self_funcs[] = {
     JS_CFUNC_DEF("exit", 1, js_process_exit),
-    JS_CFUNC_DEF("setSignal", 2, js_set_signal),
+    JS_CFUNC_DEF("signal", 2, js_set_signal),
     JS_CFUNC_DEF("removeSignal", 1, js_del_signal),
     JS_CFUNC_DEF("limit", 2, js_limit),
     JS_CGETSET_DEF("cwd", js_get_cwd, js_set_cwd),

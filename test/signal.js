@@ -7,7 +7,9 @@ if(Worker.onmessage){
     });
 }else{
     // in main thread
-    const worker = new Worker(self.entry, true);
+    const worker = new Worker(self.entry, {
+        module: true
+    });
     self.signal(signals.SIGIO, () => {
         console.log("SIGIO received(mt)");
     });

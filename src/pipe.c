@@ -1035,6 +1035,7 @@ static inline int get_fd_from_pipe(JSContext* ctx, JSValueConst pipe){
     return evfd_getfd(fd, NULL);
 }
 
+static struct termios rawState;
 static JSValue js_iopipe_setraw(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     if(argc == 0)
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Expected a boolean value", "U8Pipe(tty).ttyRaw(set_to_raw: boolean): boolean");
@@ -1068,6 +1069,16 @@ iofailed:
     }
 
     return JS_TRUE;
+}
+
+__attribute__((constructor)) void init_tty_mode(){
+    tcgetattr(STDIN_FILENO, &rawState);
+}
+
+__attribute__((destructor)) void reset_tty_mode(){
+    for(int i = STDIN_FILENO; i <= STDERR_FILENO; i++){
+        tcsetattr(i, TCSANOW, &rawState);
+    }
 }
 
 #define GET_FD(this) int fdnum = get_fd_from_pipe(ctx, this_val); \

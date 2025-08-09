@@ -491,7 +491,7 @@ __function_break:
         }
 
         if(depth >= MAX_DEPTH || check_circular(ctx, val, visited, depth)){
-            dbuf_printf(output, ANSI_RED "ArrayLike(%lld)" ANSI_RESET, length); // 保留格式化输出
+            dbuf_printf(output, ANSI_RED "ArrayLike(%ld)" ANSI_RESET, (long int)length); // 保留格式化输出
             goto end;
         }
         
