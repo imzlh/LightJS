@@ -128,9 +128,19 @@ declare module 'process'{
         readonly process: number
     }
 
+    /**
+     * 警告：请绝对注意，stdin/out/err在任何系统有可能是同步的，请不要依赖于它们的异步性。
+     *  - 在Linux下，若重定向到文件，则是同步的。Windows下任何时候都是同步的
+     *  - 通过Worker重定向数据流实现异步
+     *  - 使用socket覆盖stdpipe(`redirect`)
+     */
     export const stdin: IOPipe;
     export const stdout: IOPipe;
     export const stderr: IOPipe;
 
+    /**
+     * 不要轻易使用这个函数，除非你知道你在做什么。
+     * 这个函数将阻塞线程，等待ms毫秒，然后返回。
+     */
     export function sleep(ms: number): void;
 }

@@ -60,6 +60,7 @@ struct inotify_event {};
 #pragma GCC diagnostic ignored "-Wunused-label"
 
 #else 
+#include <linux/fs.h>   // BLOCK_SIZE
 #include <linux/aio_abi.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -658,7 +659,10 @@ static inline void free_task(struct Task* task);
 static void check_queue_status(EvFD* evfd) {
     if (evfd -> destroy || !evfd -> task_based) return;
     if (evfd -> sync){
-        if(evfd -> u.task.rw_state){
+#ifdef LJS_DEBUG
+        printf("check_queue_status: fd=%d, sync, s=%d, \n", evfd -> fd[0], evfd -> u.task.rw_state);
+#endif
+        if(0 == evfd -> u.task.rw_state){
             // execute task
             PERFORM(evfd, PIPE_READ, {
                 if(!list_empty(&evfd -> u.task.read_tasks))
@@ -2321,6 +2325,9 @@ EvFD* evfd_new(int fd, int flag, uint32_t bufsize,
     if(!evfd_add(evfd, EPOLLHUP | EPOLLERR)){
         if(flag & PIPE_SYNC_IF_NOT_SUPPORTED){
             evfd -> sync = true;
+#ifdef LJS_DEBUG
+            printf("downgrade to sync mode for fd:%d\n", evfd -> fd[0]);
+#endif
         }else{
             list_del(&evfd -> link);
             free2(evfd);
@@ -2832,10 +2839,12 @@ bool evfd_write(EvFD* evfd, const uint8_t* data, uint32_t size,
 
         // add to list
         list_add_tail(&task -> list, &evfd -> u.task.write_tasks);
-    } else {
+    } else 
+#endif
+    {
         list_add_tail(&task -> list, &evfd -> u.task.write_tasks);
     }
-#endif
+
 
     TRACE_EVENTS(evfd, +1);
 

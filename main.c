@@ -354,6 +354,11 @@ not_bundled:
             printf("Failed to resolve module: %s\n", argv[optind]);
             return 1;
         }
+        char* rpath = realpath(script_path, NULL);
+        if(rpath){
+            free(script_path);
+            script_path = rpath;
+        }
     }else {
         script_path = strdup(raw_name = get_current_dir_name());
         repl = true;
