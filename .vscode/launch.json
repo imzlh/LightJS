@@ -65,7 +65,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/ljs.exe",
-            "args": ["--memory-limit=64m", "src/repl.js"],
+            "args": ["--memory-limit=64m", "test", "worker"],
             "stopAtEntry": true,
             "cwd": "${workspaceFolder}",
             "environment": [],

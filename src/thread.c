@@ -91,18 +91,18 @@ typedef uint64_t eventfd_t;
 
 static inline evfd_t eventfd(unsigned int, int flags){
     int fds[2];
-    if(-1 == pipe2(fds, flags)) return -1;
-    return fds[1];
+    if(-1 == socketpair(AF_UNIX, SOCK_STREAM, 0, fds)) return -1;
+    return *(int64_t*)fds;  
 }
 
 int eventfd_read(evfd_t fd, eventfd_t * value){
     int* fds = (void*)&fd;
-    return read(fds[0], value, sizeof(eventfd_t));
+    return recv(fds[0], value, sizeof(eventfd_t), MSG_DONTWAIT);
 }
 
 int eventfd_write(evfd_t fd, eventfd_t value){
     int* fds = (void*)&fd;
-    return write(fds[1], &value, sizeof(eventfd_t)) == sizeof(eventfd_t);
+    return send(fds[1], &value, sizeof(eventfd_t), MSG_DONTWAIT) == sizeof(eventfd_t);
 }
 #else
 #define evfd_t int
