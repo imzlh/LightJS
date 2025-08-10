@@ -13,4 +13,4 @@ CMakeCache.txt
 *.exe
 */*.so
 */*.dll
-dist/**
+dist*/**

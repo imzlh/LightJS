@@ -284,7 +284,7 @@ static char* js_module_format(JSContext *ctx,
             JS_FreeValue(ctx, ret);
             return modpath_dup;
         }else{
-            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild return value of custom module format",
+            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid return value of custom module format",
                 "return value must be a string(module name or path) contains module format.");
             JS_FreeValue(ctx, ret);
             return NULL;
@@ -313,7 +313,7 @@ static char* js_module_format(JSContext *ctx,
 static char* simple_sync_http_request(JSContext* ctx, URL_data* url, uint32_t* pbuf_len){
     // limit: host、path length < 1000
     if(!url -> host || strlen(url -> host) > 1000 || (url -> path && strlen(url -> path) > 1000)){
-        LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild or too long URL", NULL);
+        LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid or too long URL", NULL);
         return NULL;
     }
 
@@ -405,7 +405,7 @@ error1:
                     char* key = readed;
                     char* value = strchr(key, ':');
                     if(!value){
-                        edesc = "invaild header line";
+                        edesc = "invalid header line";
                         goto error2;
                     }
 
@@ -426,7 +426,7 @@ error1:
             default:
 error2:
                 fclose(f);
-                LJS_Throw(ctx, EXCEPTION_INPUT, "invaild response from server: %s", NULL, edesc);
+                LJS_Throw(ctx, EXCEPTION_INPUT, "invalid response from server: %s", NULL, edesc);
                 return NULL;
         }
     }
@@ -553,7 +553,7 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
         }else if((m = module_getdef2(ctx, ret)) != NULL){
             goto set_meta;
         }else{
-            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild return value of custom module loader",
+            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid return value of custom module loader",
                 "return value must be a string(module name or path) or a module object.");
             JS_FreeValue(ctx, ret);
             return NULL;
@@ -572,7 +572,7 @@ static JSModuleDef *js_module_loader(JSContext *ctx,
     if(!url.protocol || memcmp(url.protocol, "file", 5)){
         buf = (char*)read_file(url.path, &buf_len);
         if (!buf){
-            LJS_Throw(ctx, EXCEPTION_NOTFOUND, "Read file failed: %s", NULL, strerror(errno));
+            LJS_Throw(ctx, EXCEPTION_NOTFOUND, "Read file %s failed: %s", NULL, url.path, strerror(errno));
             return NULL;
         }
     }else if(memcmp(url.protocol, "http", 5) == 0){
@@ -2589,6 +2589,7 @@ static JSValue js_vm_setvmopts(JSContext* ctx, JSValueConst this_val, int argc, 
 #undef EACHOPT2
 
 static JSValue js_vm_loadSourceMap(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
+#ifdef LJS_FEATURE_SOURCE_MAP
     if(argc < 2 || !JS_IsString(argv[0]) || (!JS_IsString(argv[1]) && !JS_IsObject(argv[1]))){
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "loadSourceMap() requires 2 string argument",
             "loadSourceMap(module_name: string, source_map: string | Object): boolean"
@@ -2608,6 +2609,9 @@ static JSValue js_vm_loadSourceMap(JSContext *ctx, JSValueConst this_val, int ar
     }
     JS_FreeCString(ctx, module_name);
     return ret;
+#else
+    return LJS_Throw(ctx, EXCEPTION_NOTSUPPORT, "Source map feature is not supported in this build", NULL);
+#endif
 }
 
 const JSCFunctionListEntry js_vm_funcs[] = {

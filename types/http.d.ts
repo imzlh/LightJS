@@ -22,12 +22,12 @@ type FetchOptions<WebSocket> = {
  *  - 由于使用C实现，某些方面会与JS实现(如nodejs)有差异
  *  - `websocket`选项不被LightJS理解，但是指定可以让TypeScript提示正确的类型
  */
-declare function fetch(url: string, options?: FetchOptions<false | undefined>): Promise<import('http').Response>;
+declare function fetch(url: string | URL, options?: FetchOptions<false | undefined>): Promise<import('http').Response>;
 
 /**
  * 发起WebSocket请求，请求成功后兑现已经连接成功的WebSocket对象
  */
-declare function fetch(url: string, options: FetchOptions<true>): Promise<import('http').WebSocket>;
+declare function fetch(url: string | URL, options: FetchOptions<true>): Promise<import('http').WebSocket>;
 
 interface FormData {
     name: string;

@@ -72,34 +72,47 @@ int openpty(int *amaster, int *aslave, char *name,
     int master, slave;
     char *slave_name;
 
+#ifdef LJS_DEBUG
+#define CHECK(ret) \
+    if(ret == -1) { \
+        perror(#ret); \
+        close(master); \
+        return -1; \
+    }
+#else
+#define CHECK(ret) \
+    if(ret == -1) { \
+        close(master); \
+        return -1; \
+    }
+#endif
+
     // open pty and grand access
     master = posix_openpt(O_RDWR | O_NOCTTY);
-    if (master == -1)
-        return -1;
-    if (grantpt(master) == -1) {
-        close(master);
+    if (master == -1){
+#ifdef LJS_DEBUG
+        perror("posix_openpt");
+#endif
         return -1;
     }
+    CHECK(grantpt(master));
 
     // unlock slave pty
-    if (unlockpt(master) == -1) {
-        close(master);
-        return -1;
-    }
+    CHECK(unlockpt(master));
 
     // get slave pty name
     slave_name = ptsname(master);
     if (slave_name == NULL) {
+#ifdef LJS_DEBUG
+        perror("ptsname");
+#endif
         close(master);
         return -1;
     }
 
     // open slave pty
     slave = open(slave_name, O_RDWR | O_NOCTTY);
-    if (slave == -1) {
-        close(master);
-        return -1;
-    }
+    CHECK(slave);
 
     // set default size
     if (termp != NULL)
@@ -480,6 +493,7 @@ static JSValue js_get_cwd(JSContext* ctx, JSValueConst this_val){
     char cwd[PATH_MAX];
     if(getcwd(cwd, PATH_MAX) == NULL)
         return JS_ThrowTypeError(ctx, "Failed to get current working directory");
+    strcat(cwd, "/");
     return JS_NewString(ctx, cwd);
 }
 
@@ -578,6 +592,7 @@ static JSValue js_process_get_pid(JSContext* ctx, JSValueConst this_val){
 
 static void js_process_finalizer(JSRuntime* rt, JSValue this_val){
     struct process_class *obj = JS_GetOpaque(this_val, js_process_class_id);
+    if(!obj) return;
     if(obj -> exit_code < 0){
         // send close signal
         kill(obj -> pid, SIGTERM);
@@ -592,6 +607,8 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     struct process_class *obj = js_malloc(ctx, sizeof(struct process_class));
     JSValue class_obj = JS_NewObjectClass(ctx, js_process_class_id);
     JSValue jsobj;   // cache to free after getprop
+    int master_fd = -1, slave_fd = -1;
+    memset(obj, 0, sizeof(struct process_class));
     if (JS_IsException(class_obj))
         goto fail;
 
@@ -621,7 +638,11 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     char** _argv = malloc((len +1) * sizeof(char*));
     for(int i = 0; i < len; i++){
         JSValue val = JS_GetPropertyUint32(ctx, args, i);
-        if(JS_IsException(val)){
+        if(!JS_IsString(val)){
+            for (int j = 0; j < i; j++) free(_argv[j]);
+            free(_argv);
+            _argv = NULL;
+            JS_ThrowTypeError(ctx, "Expected an array of string as args");
             goto fail;
         }
         const char* str = JS_ToCString(ctx, val);
@@ -635,20 +656,23 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     JSValue promise_cb[2];
     JSValue promise = JS_NewPromiseCapability(ctx, promise_cb);
     JS_SetPropertyStr(ctx, class_obj, "onclose", promise);
+    obj -> exit_code = -1;
+    obj -> ctx = ctx;
+    obj -> onclose = promise_cb[1];
+    JS_FreeValue(ctx, promise_cb[0]);
 
     // Create PTY
     // XXX: use windows native ConPTY API instead of pty.h
-    int master_fd, slave_fd;
     if (openpty(&master_fd, &slave_fd, NULL, NULL, NULL) == -1) {
+#ifdef LJS_DEBUG
+        printf("Failed to create pty: %s\n", strerror(errno));
+#endif
+
         LJS_Throw(ctx, EXCEPTION_IO, "Failed to create pty: %s", NULL, strerror(errno));
         goto fail;
     }
 
     // add to process list
-    obj -> exit_code = -1;
-    obj -> ctx = ctx;
-    obj -> onclose = promise_cb[1];
-    JS_FreeValue(ctx, promise_cb[0]);
     pthread_rwlock_wrlock(&process_lock);
     list_add_tail(&obj -> link, &process_list);
     pthread_rwlock_unlock(&process_lock);
@@ -702,8 +726,8 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
                         JS_FreeCString(ctx, name);
                         JS_FreeValue(ctx, val);
                     }
+                    JS_FreePropertyEnum(ctx, props, len);
                 }
-                JS_FreePropertyEnum(ctx, props, len);
             }
             JS_FreeValue(ctx, envs);
         }
@@ -733,6 +757,9 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     
     // exit immediately
     if(obj -> exit_code >= 0){
+        LJS_Throw(ctx, EXCEPTION_IO, "Process exited too quickly", 
+            "In most cases, it means that you are trying to execute a non-existent or non-executable file or a file without execute permission"
+        );
         close(master_fd);
         goto fail;
     }
@@ -753,12 +780,18 @@ static JSValue js_process_constructor(JSContext* ctx, JSValueConst new_target, i
     return class_obj;
 
 fail:
-    js_free(ctx, obj);
-    JS_FreeValue(ctx, class_obj);
-    JS_Call(ctx, promise_cb[1], JS_UNDEFINED, 0, NULL);
-    JS_FreeValue(ctx, promise_cb[1]);
-    JS_FreeValue(ctx, promise_cb[0]);
-    return JS_EXCEPTION;
+    if (obj) {
+        JS_FreeValue(ctx, obj -> onclose);
+        js_free(ctx, obj);
+    }
+    if (master_fd != -1) close(master_fd);
+    if (slave_fd != -1) close(slave_fd);
+    JS_SetOpaque(class_obj, NULL);  // fail safe
+    JS_FreeValue(ctx, class_obj);   // free classobj and onclose promise
+    JSValue errobj = JS_GetException(ctx);
+    JSValue ret = LJS_NewResolvedPromise(ctx, errobj, false);
+    JS_FreeValue(ctx, errobj);
+    return ret;
 }
 
 static JSValue js_process_static_kill(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv){

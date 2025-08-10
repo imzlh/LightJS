@@ -54,6 +54,7 @@
 #ifdef LJS_MBEDTLS
 #include "../lib/mbedtls_config.h"
 #include <mbedtls/ssl.h>
+#include <mbedtls/error.h>
 #include <mbedtls/x509.h>
 #include <mbedtls/x509_crt.h>
 #endif
@@ -725,7 +726,11 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
         goto fail1;
     }
 
-    // 绑定地址
+    // bind address
+    if(bind_addr.protocol == NULL){
+        JS_ThrowTypeError(ctx, "bind: missing protocol");
+        goto fail2;
+    }
     int sockfd = socket_create(bind_addr.protocol);
     uint32_t bufsize = BUFFER_SIZE;
 
@@ -795,8 +800,12 @@ static JSValue js_bind(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
     }
 
     // start
-    if(!socket_listen(sockfd, bind_addr.protocol, bind_addr.host, bind_addr.port, bind_addr.path)){
-        LJS_Throw(ctx, EXCEPTION_IO, "bind: failed to bind address: %s", NULL, strerror(errno));
+    int ret_bind = socket_listen(sockfd, bind_addr.protocol, bind_addr.host, bind_addr.port, bind_addr.path);
+    if(ret_bind != true){
+        if(ret_bind == -2)
+            LJS_Throw(ctx, EXCEPTION_TYPEERROR, "bind: invalid address or unsupported protocol", NULL);
+        else
+            LJS_Throw(ctx, EXCEPTION_IO, "bind: failed to bind address: %s", NULL, strerror(errno));
         goto fail3;
     }
  
@@ -862,7 +871,7 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     if(sockfd <= 0){
         LJS_free_url(&addr);
         if(errno == EADDRNOTAVAIL)
-            return LJS_Throw(ctx, EXCEPTION_IO, "invaild protocol: %s", NULL, addr.protocol);
+            return LJS_Throw(ctx, EXCEPTION_IO, "invalid protocol: %s", NULL, addr.protocol);
         return LJS_Throw(ctx, EXCEPTION_IO, "failed to create socket: %s", NULL, strerror(errno));
     }
     int con = socket_connect(sockfd, addr.protocol, addr.host, addr.port, addr.path);
@@ -929,44 +938,66 @@ static JSValue js_connect(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     return pipe;
 }
 
-void ssl_handshake_callback(EvFD* evfd, bool success, void* user_data) {
-    Promise* promise = (Promise*)user_data;
-    if(success)
-        js_resolve(promise, JS_UNDEFINED);
-    else
+#ifdef LJS_MBEDTLS
+struct HandshakeContext {
+    struct promise* promise;
+
+    JSValue values[2];
+    JSContext* ctx;
+};
+
+void ssl_handshake_callback(EvFD* evfd, bool success, const mbedtls_x509_crt* peer_cert, void* user_data) {
+    struct HandshakeContext* ctx = user_data;
+    struct promise* promise = ctx -> promise;
+    if(success){
+        // XXX: crt will be freed when evfd is closed
+        //      may cause SEGFAULT if used later
+        JSValue cert = LJS_NewCertificate(ctx -> ctx, peer_cert);
+        js_resolve(promise, cert);
+        JS_FreeValue(ctx -> ctx, cert);
+    }else if(evfd_ssl_errno(evfd)){
+        char buf[128];
+        mbedtls_strerror(evfd_ssl_errno(evfd), buf, sizeof(buf));
+        js_reject3(promise, "handshake failed: %s", buf);
+    }else{
         js_reject(promise, "SSL handshake failed");
+    }
+
+    // unref objects
+    JS_FreeValue(ctx -> ctx, ctx -> values[0]);
+    JS_FreeValue(ctx -> ctx, ctx -> values[1]);
+    js_free(ctx -> ctx, ctx);
 }
 
 static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-#ifdef LJS_MBEDTLS
     if(argc == 0 || !JS_IsObject(argv[0])) {
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: missing or invalid arguments",
             "handshake_ssl(socket: Pipe, options?: Object) => Promise<void>"
         );
     }
 
-    int flag = 0;
+    int flag = SSL_VERIFY;
     int cipher_count = 0;
     InitSSLOptions options = {0};
-    EvFD* fd = LJS_OverrideFDPipe(ctx, argv[0]);
+    EvFD* fd = LJS_GetFDFromPipe(ctx, argv[0], false);
     if(fd == NULL) {
         return JS_ThrowTypeError(ctx, "handshake_ssl: invalid socket");
     }
 
-    // save certs
-    mbedtls_x509_crt server_crt;
-    mbedtls_pk_context server_key;
-
+    JSValue stored[2] = {JS_UNDEFINED, JS_UNDEFINED};
     if(argc >= 2){
         JSValue obj = argv[1];
         JSValue val;
-        int server_verify = -1;
-        if(JS_IsBool(val = JS_GetPropertyStr(ctx, obj, "server"))){
+        if(JS_IsEqual(ctx, val = JS_GetPropertyStr(ctx, obj, "server"), JS_TRUE)){
             flag |= SSL_IS_SERVER;
-
-            // server features
-            JS_FreeValue(ctx, val);
-            server_verify = 0;
+        }
+        JS_FreeValue(ctx, val);
+        if(JS_IsEqual(ctx, val = JS_GetPropertyStr(ctx, obj, "sni"), JS_TRUE)){
+            flag |= SSL_USE_SNI;
+        }
+        JS_FreeValue(ctx, val);
+        if(JS_IsEqual(ctx, val = JS_GetPropertyStr(ctx, obj, "verify"), JS_FALSE)){
+            flag &= ~SSL_VERIFY;
         }
         JS_FreeValue(ctx, val);
         if(JS_IsArray(val = JS_GetPropertyStr(ctx, obj, "ciphers"))) {
@@ -992,11 +1023,6 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
             }
         }
         JS_FreeValue(ctx, val);
-        if(JS_IsString(val = JS_GetPropertyStr(ctx, obj, "hostname"))){
-            options.server_name = JS_ToCString(ctx, val);
-            JS_FreeCString(ctx, options.server_name);
-        }
-        JS_FreeValue(ctx, val);
         if (JS_IsArray(val = JS_GetPropertyStr(ctx, argv[1], "alpn"))) {
             int64_t count;
             if (JS_GetLength(ctx, val, &count) > 0) {
@@ -1007,6 +1033,7 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
                     if (protocol != NULL) {
                         ((char**) options.alpn_protocols)[i] = (void*) protocol;
                     }
+                    // live as long as the function
                     JS_FreeCString(ctx, protocol);
                     JS_FreeValue(ctx, item);
                 }
@@ -1014,50 +1041,63 @@ static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc,
             }
         }
         JS_FreeValue(ctx, val);
-        if(JS_IsTypedArray(ctx, val = JS_GetPropertyStr(ctx, obj, "cacert"))){
-            size_t len;
-            uint8_t* data = JS_GetUint8Array(ctx, &len, val);
-            mbedtls_x509_crt* cacert = &server_crt;
-            if(data && len && 0 == mbedtls_x509_crt_parse(cacert, (void*)data, len)){
-                // something to do?
-                if(server_verify >= 0) server_verify ++;
-                options.ca_cert = cacert;
+        if(JS_IsString(val = JS_GetPropertyStr(ctx, obj, "hostname"))){
+            options.server_name = JS_ToCString(ctx, val);
+            JS_FreeCString(ctx, options.server_name);
+        }
+        JS_FreeValue(ctx, val);
+        if(JS_IsObject(val = JS_GetPropertyStr(ctx, obj, "cert"))){
+            mbedtls_x509_crt* crt = (void*)LJS_GetCertificate(ctx, val);
+            if(!crt){
+                JS_FreeValue(ctx, val);
+                return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: invalid certificate", 
+                    "Require a valid crypto.Certificate class object"
+                );
             }
-        }
-        JS_FreeValue(ctx, val);
 
-        const char* ca_key_pw = NULL;
-        size_t ca_key_pw_len = 0;
-        if(JS_IsString(val = JS_GetPropertyStr(ctx, obj, "cakey_password"))){
-            ca_key_pw = JS_ToCStringLen(ctx, &ca_key_pw_len, val);
+            if(flag & SSL_IS_SERVER)
+                options.server_cert = crt;
+            else
+                options.ca_cert = crt;
+            stored[0] = JS_DupValue(ctx, val);
         }
         JS_FreeValue(ctx, val);
-        if(JS_IsTypedArray(ctx, val = JS_GetPropertyStr(ctx, obj, "cakey"))){
-            size_t len;
-            uint8_t* data = JS_GetUint8Array(ctx, &len, val);
-            mbedtls_pk_context* pk = &server_key;
-            if(data && len && 0 == mbedtls_pk_parse_key(pk, (void*)data, len, 
-                (void*)ca_key_pw, ca_key_pw_len, mb_random, NULL)){
-                // something to do?
-                if(server_verify >= 0) server_verify ++;
-                options.server_key = pk;
+        if(JS_IsObject(val = JS_GetPropertyStr(ctx, obj, "key"))){
+            size_t psize;
+            mbedtls_pk_context* pk = (void*)JS_GetArrayBuffer(ctx, &psize, val);
+            if(!pk || psize != sizeof(mbedtls_pk_context)){
+                JS_FreeValue(ctx, val);
+                if(options.ca_cert) JS_FreeValue(ctx, stored[0]);
+                return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: invalid private key", 
+                    "Require a valid ArrayBuffer allocated by crypto.Certificate.parseKey() "
+                );
             }
+        
+            options.server_key = pk;
+            stored[1] = JS_DupValue(ctx, val);
         }
         JS_FreeValue(ctx, val);
-
-        if(server_verify >= 0 && server_verify < 2){
-            if(options.ca_cert) mbedtls_x509_crt_free(options.ca_cert);
-            if(options.server_key) mbedtls_pk_free(options.server_key);
-            return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: missing or invalid server key or cert", NULL);
-        }
     }
 
+    if((flag & SSL_IS_SERVER) && (JS_IsUndefined(stored[0]) || JS_IsUndefined(stored[1]))){
+        JS_FreeValue(ctx, stored[0]);
+        JS_FreeValue(ctx, stored[1]);
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: missing certificate or private key", NULL);
+    }
+
+    struct HandshakeContext* ctx_data = malloc2(sizeof(struct HandshakeContext));
     Promise* promise = js_promise(ctx);
-    evfd_initssl(fd, NULL, flag, &options, ssl_handshake_callback, promise);
+    JSValue retprom = js_get_promise(promise);
+    ctx_data -> promise = promise;
+    ctx_data -> ctx = ctx;
+    memcpy(ctx_data -> values, stored, sizeof(stored));
+
+    evfd_initssl(fd, NULL, flag, &options, ssl_handshake_callback, ctx_data);
     free((void*)options.ciphersuites);
 
-    return js_get_promise(promise);
+    return retprom;
 #else
+static JSValue js_ssl_handshake(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
     return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "handshake_ssl: mbedtls not enabled in build",
         "remove `-DLJS_MBEDTLS=off` from cmake build flags to enable"
     );
@@ -1187,18 +1227,21 @@ static int default_rng(void *userdata, unsigned char *output, size_t output_size
 
 static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
 #ifdef LJS_MBEDTLS
-    if(argc == 0 || !JS_IsObject(argv[0])) {
+    if(argc == 0 || !JS_IsString(argv[0]) || (!JS_IsString(argv[1]) && !JS_IsTypedArray(ctx, argv[1])) || !JS_IsString(argv[2])) {
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "cert_add: missing or invalid arguments",
-            "regCert(name: string, cert: string, key: string, options?: { keypwd?: string }) => void"
+            "regCert(name: string, cert: string | Uint8Array, key: string, options?: { keypwd?: string }) => void"
         );
     }
-
 
     JSValue name_val = argv[0];
     JSValue cert_val = argv[1];
     JSValue key_val = argv[2];
+    bool cbinary = JS_IsTypedArray(ctx, cert_val);
+    size_t cert_len;
     const char* name_str = JS_ToCString(ctx, name_val);
-    const char* cert_str = JS_ToCString(ctx, cert_val);
+    uint8_t* cert_str = cbinary
+        ? (void*)JS_GetUint8Array(ctx, &cert_len, cert_val)
+        : (void*)JS_ToCStringLen(ctx, &cert_len, cert_val);
     const char* key_str = JS_ToCString(ctx, key_val);
     if(cert_str == NULL || key_str == NULL || name_str == NULL) return JS_EXCEPTION;
 
@@ -1215,12 +1258,14 @@ static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSVa
     
     // mbedtls parse
     int ret;
-    mbedtls_x509_crt* crt = NULL;
-    mbedtls_pk_context* pk = NULL;
+    mbedtls_x509_crt* crt = js_malloc(ctx, sizeof(mbedtls_x509_crt));
+    mbedtls_pk_context* pk = js_malloc(ctx, sizeof(mbedtls_pk_context));
     mbedtls_x509_crt_init(crt);
     mbedtls_pk_init(pk);
-    ret = mbedtls_x509_crt_parse(crt, (const unsigned char*)cert_str, strlen(cert_str) + 1);
-    JS_FreeCString(ctx, cert_str);
+    ret = cbinary
+        ? mbedtls_x509_crt_parse_der(crt, (const unsigned char*)cert_str, cert_len)
+        : mbedtls_x509_crt_parse(crt, (const unsigned char*)cert_str, cert_len +1);
+    if(!cbinary) JS_FreeCString(ctx, (void*)cert_str);
     if(ret != 0){
         mbedtls_x509_crt_free(crt);
         mbedtls_pk_free(pk);
@@ -1235,6 +1280,9 @@ static JSValue js_cert_add(JSContext *ctx, JSValueConst this_val, int argc, JSVa
         mbedtls_pk_free(pk);
         return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "cert_add: failed to parse private key", NULL);
     }
+
+    // add to evloop
+    evcore_set_sni(name_str, name_str, crt, pk);
 
     return JS_UNDEFINED;
 #else
@@ -1255,7 +1303,7 @@ static JSValue js_cert_remove(JSContext *ctx, JSValueConst this_val, int argc, J
     const char* name_str = JS_ToCString(ctx, argv[0]);
     if(name_str == NULL) return JS_EXCEPTION;
 
-    bool ret = evfd_remove_sni(name_str);
+    bool ret = evcore_remove_sni(name_str);
     JS_FreeCString(ctx, name_str);
     return JS_NewBool(ctx, ret);
 #else

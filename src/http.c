@@ -280,7 +280,7 @@ char* LJS_resolve_path(const char* path, const char* _base) {
     if(!base) base = getcwd(NULL, 0);
 
     // relative path
-    size_t base_len = strlen(base);
+    size_t base_len = strlen(base +1);
     size_t path_len = strlen(path);
     char* combined = malloc2(base_len + path_len + 2);
 
@@ -289,20 +289,17 @@ char* LJS_resolve_path(const char* path, const char* _base) {
         char* slash = strrchr(base, '/');
         if(slash){
             *(slash +1) = '\0';
+            base_len = slash - base +1;
         }else{
             // base is too short
-            if(!*base) base = realloc2(base, 2);
-            memcpy(base, ".", 2);
+            if(!*base) base = realloc2(base, 3);
+            memcpy(base, "./", 3);
+            base_len = 2;
         }
     }
     
-    int needs_slash = !(base_len && base[base_len-1] == '/') && 
-                      !(path_len && path[0] == '/');
-    
-    sprintf(combined, "%s%s%s", 
-            base, 
-            needs_slash ? "/" : "", 
-            path);
+    memcpy(combined, base, base_len);
+    memcpy(combined + base_len, path, path_len + 1);
 
     // normalize concatenated path
     char* resolved = normalize_path(combined);
@@ -399,6 +396,11 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
             url_struct -> port = base -> port;
             goto skip_host;
         }
+    }else if(url[0] == '.'){    // path
+        url_struct -> protocol = dup(base -> protocol);
+        url_struct -> host = dup(base -> host);
+        url_struct -> port = base -> port;
+        goto skip_host;
     }else if(url[0] == '?'){    // query
         url_struct -> protocol = dup(base -> protocol);
         url_struct -> host = dup(base -> host);
@@ -429,11 +431,14 @@ bool LJS_parse_url(const char *_url, URL_data *url_struct, URL_data *base) {
         return true;    // finished
 #undef dup
     }
-
     
     if(!url_struct -> protocol){
-        char* pos = strstr(url, ":");
-        if(pos){
+        char* pos = url;
+        // RFC3986: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+        while(*pos != ':' && *pos != '\0' && (isalnum(*pos) || *pos == '+' || *pos == '-' || *pos == '.'))
+            pos ++;
+        if(*pos != ':') goto skip_host; // assume path
+        if(pos && pos < url + 8){
             pos[0] = '\0';
             url_struct -> protocol = strtolower(strdup2(url));
             url = pos + 1;
@@ -455,7 +460,7 @@ skip_protocol:
         if (user_pass_end) {
             char* host_end = strpbrk(user_pass_end, ":/?#");
             if(host_end && user_pass_end > host_end){
-                // invaild u&p field, skip
+                // invalid u&p field, skip
                 goto skip_up;
             }
 
@@ -493,7 +498,7 @@ skip_up:;
                 url_struct -> host = strndup2(host, ipv6_end - host);
                 host_end = ipv6_end + 1;
 
-                // check if ipv6 vaild
+                // check if ipv6 valid
                 for(char* p = host + 1; p < ipv6_end; p++) {
                     if(!strpbrk(p, ":.0123456789")){
                         goto error;
@@ -2095,7 +2100,7 @@ static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValue
             if(JS_IsString(body)) JS_FreeCString(ctx, (char*) data);
         }else if(JS_IsObject(body)){
             // pipeTo chunked
-            EvFD* body_fd = LJS_OverrideFDPipe(ctx, body);
+            EvFD* body_fd = LJS_GetFDFromPipe(ctx, body, false);
             if(!body_fd) {
                 // content 0
                 evfd_write(fd, (uint8_t*) "Content-Length: 0\r\n\r\n", 21, NULL, NULL);
@@ -2344,7 +2349,7 @@ end:
 error:;
     // send close frame
     // \03\234: 1002
-    char close_frame[16] = "\3\234" "Invaild frame";
+    char close_frame[16] = "\3\234" "Invalid frame";
     build_ws_frame(&ws -> wbuffer, true, 0x8, (void*)close_frame, 15, ws -> enable_mask);
     ws -> closed = 1002;
     evfd_consume(ws -> fd, false, true);
@@ -2568,7 +2573,7 @@ static JSValue js_url_constructor(JSContext *ctx, JSValueConst new_target, int a
         URL_data base_url = { 0 };
         URL_data* burl = &base_url;
         if(JS_IsObject(argv[1])){
-            URL_data *burl = JS_GetOpaque2(ctx, argv[1], js_class_url_id);
+            URL_data *burl = JS_GetOpaque(argv[1], js_class_url_id);
             if(burl == NULL){
                 JS_ThrowTypeError(ctx, "Invalid base URL");
                 goto error;
@@ -2696,7 +2701,7 @@ JSValue js_url_addQuery(JSContext *ctx, JSValueConst this_val, int argc, JSValue
     }
     query -> key = js_strdup(ctx, key);
     query -> value = value? js_strdup(ctx, value) : NULL;
-    list_add_tail(&url_struct -> query, &query -> link);
+    list_add_tail(&query -> link, &url_struct -> query);
     return JS_UNDEFINED;
 }
 
@@ -3423,7 +3428,7 @@ static void handler_parse_cb(LHTTPData *data, uint8_t *buffer, uint32_t len, voi
     bool error = data -> state == HTTP_ERROR;
     
     if(error){
-        js_reject(async_result -> promise, "Failed to parse request: Invaild request");
+        js_reject(async_result -> promise, "Failed to parse request: Invalid request");
         free2(async_result);
         return;
     }else if(!JS_IsUndefined(async_result -> reusing_obj)){
@@ -3637,7 +3642,7 @@ static inline struct JSClientAsyncResult* init_async_result(struct JSClientHandl
 
 #define LC_BEFORE_HEADER(type) if(unlikely(handler -> response.state >= HTTP_BODY)) \
     return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Header already sent, cannot " type, \
-        "you can `reuse()` the connection if the connection alive and vaild.");
+        "you can `reuse()` the connection if the connection alive and valid.");
 
 #define CHECK_HANDLER if(unlikely(handler -> destroy)) return JS_ThrowTypeError(ctx, "Connection closed or taken over by WebSocket");
 
@@ -3760,7 +3765,7 @@ static JSValue js_handler_send(JSContext *ctx, JSValueConst this_val, int argc, 
     CHECK_HANDLER;
 
     if(handler -> response.state >= HTTP_DONE){
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Response already finished, cannot send more data.", "you can `reuse()` the connection if the connection alive and vaild.");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Response already finished, cannot send more data.", "you can `reuse()` the connection if the connection alive and valid.");
     }
 
     uint8_t* data;
@@ -3909,7 +3914,7 @@ static JSValue js_handler_done(JSContext *ctx, JSValueConst this_val, int argc, 
         break;
 
         case HTTP_DONE:
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Response already finished, cannot send more data.", "you can `reuse()` the connection if the connection alive and vaild.");
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Response already finished, cannot send more data.", "you can `reuse()` the connection if the connection alive and valid.");
 
         default:
         abort();    // should not happen
@@ -4207,7 +4212,7 @@ param_err:
         );
     }
 
-    EvFD* fd = LJS_OverrideFDPipe(ctx, argv[0]);
+    EvFD* fd = LJS_GetFDFromPipe(ctx, argv[0], true);
     if(!fd) goto param_err;
 
     struct JSClientHandler* handler = js_malloc(ctx, sizeof(struct JSClientHandler));

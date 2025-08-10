@@ -301,7 +301,7 @@ static JSValue stream_close(JSContext* ctx, void* ptr, JSValueConst data){
 }
 
 static JSValue js_zlib_deflate_stream(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
-    if(argc == 0) goto invaild_args;
+    if(argc == 0) goto invalid_args;
     bool decompress = JS_ToBool(ctx, argv[0]);
 
     struct js_zlib_stream* js_stream = js_malloc(ctx, sizeof(struct js_zlib_stream));
@@ -320,7 +320,7 @@ static JSValue js_zlib_deflate_stream(JSContext *ctx, JSValueConst this_val, int
     JSValue stream = LJS_NewU8Pipe(ctx, PIPE_READ | PIPE_WRITE, stream_poll, stream_write, stream_close, js_stream);
     return stream;
 
-invaild_args:
+invalid_args:
     return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "Invalid arguments", "inflateStream(decompress: boolean, level?: number): Uint8Array");
 }
 #endif

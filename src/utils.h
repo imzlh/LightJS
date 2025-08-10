@@ -395,7 +395,7 @@ static inline ssize_t buffer_write(struct Buffer* buffer, int fd, uint32_t max_s
     if (total < 0) return -1; else if(total == 0) goto end;
 
 #ifdef LJS_DEBUG
-    printf("buffer_write: %ld, %d, %d, %d\n", total, first_chunk, can_write, used);
+    printf("buffer_write: %zu, %d, %d, %d\n", total, first_chunk, can_write, used);
 #endif
 
     if (can_write > first_chunk) {

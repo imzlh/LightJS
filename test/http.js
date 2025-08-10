@@ -148,7 +148,7 @@ export {};
 // })
 
 
-// test('url_invaild', () => {
+// test('url_invalid', () => {
 //     for(const url of [
 //         "://:",  // 完全无效
 //         "///////path?",  // 无协议和域名
@@ -159,9 +159,9 @@ export {};
 //         "http://[127.0.0.1:8080]",  // 无效IPV6
 //     ]) try{
 //         const url2 = new URL(url);
-//         throw new Error(`url "${url}" should be invaild`);
+//         throw new Error(`url "${url}" should be invalid`);
 //     }catch{
-//         console.log(url, "is invaild");
+//         console.log(url, "is invalid");
 //     }
 // })
 

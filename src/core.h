@@ -50,6 +50,10 @@
 #include <sys/inotify.h>
 #endif
 
+#ifdef LJS_MBEDTLS
+#include <mbedtls/x509_crt.h>
+#endif
+
 // once include
 #pragma once
 
@@ -123,10 +127,13 @@ typedef void (*EvINotifyCallback)(EvFD* fd, const char* path, uint32_t evtype, c
 typedef void (*EvSyncCallback)(EvFD* evfd, bool success, void* user_data);
 typedef void (*EvFinalizerCallback)(EvFD* evfd, struct Buffer* buffer, void* user_data);
 typedef void (*EvTimerCallback)(uint64_t count, void* user_data);
-typedef void (*EvSSLHandshakeCallback)(EvFD* evfd, bool success, void* user_data);
 typedef bool (*EvPipeToFilter)(struct Buffer* buf, void* user_data);
 typedef void (*EvPipeToNotify)(struct EvFD* from, struct EvFD* to, EvPipeToNotifyType type, void* user_data);
 typedef void (*JSPromiseCallback)(JSContext* ctx, bool is_error, JSValue result, void* user_data);
+
+#ifdef LJS_MBEDTLS
+typedef void (*EvSSLHandshakeCallback)(EvFD* evfd, bool success, const mbedtls_x509_crt* peer_cert, void* user_data);
+#endif
 
 typedef struct {
     char* key;
@@ -166,29 +173,28 @@ typedef struct {
 /* forward */ typedef struct LHTTPData LHTTPData;
 struct LHTTPData {
     EvFD* fd;
-    bool is_client; // read data from client or server
-    HTTP_rw_state state;
-
-    bool __read_all;    // internal use only
-
-    char *method;
-    uint16_t status;
-    float version;
+    char* method;
     char* path;
-
     struct list_head headers;
+    void (*cb)(LHTTPData*, uint8_t*, uint32_t, void*);
+    void* userdata;
+    char* __target_host;
 
-    bool chunked;
     ssize_t content_length;
     size_t content_resolved;
+    float version;
+    HTTP_rw_state state;
+
+    uint16_t status;
+    bool is_client;
+    bool __read_all;
+    bool chunked;
     bool deflate;
+    bool __header_owned;
 
-    void (*cb)(LHTTPData* data, uint8_t* buffer, uint32_t size, void* userdata);
-    void* userdata;
-
-    bool __header_owned; // internal use only
-    char* __target_host; // internal use only
+    char reserved[3];
 };
+
 
 #define PUT_HEADER(hdstruct, _key, _value) { \
     LHttpHeader* h = js_malloc(ctx, sizeof(LHttpHeader)); \
@@ -387,7 +393,7 @@ void LJS_init_timer(JSContext* ctx);
 JSValue LJS_NewFDPipe(JSContext *ctx, int fd, uint32_t flag, bool iopipe, EvFD** ref);
 JSValue LJS_NewU8Pipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
 JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag, PipeCallback poll_cb, PipeCallback write_cb, PipeCallback close_cb, void* user_data);
-EvFD* LJS_OverrideFDPipe(JSContext *ctx, JSValueConst obj);
+EvFD* LJS_GetFDFromPipe(JSContext *ctx, JSValueConst obj, bool override);
 
 // Core event loop
 bool evcore_init();
@@ -422,9 +428,13 @@ void evfd_set_opaque(EvFD* evfd, void* opaque);
 bool evfd_syncexec(EvFD* pipe);
 void evfd_enable_rac(EvFD* evfd, bool enable);
 #ifdef LJS_MBEDTLS
+int evcore_ssl_init_trustedca(const char* ca_file);
+bool evcore_ssl_verify(mbedtls_x509_crt* cert, const char* hostname, uint32_t* flags);
 bool evfd_initssl(EvFD* evfd, mbedtls_ssl_config** config, int flag, InitSSLOptions* options, EvSSLHandshakeCallback handshake_cb, void* user_data);
-void evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
-bool evfd_remove_sni(const char* name);
+bool evfd_initssl2(EvFD* evfd, mbedtls_ssl_config* cfg, int flag, InitSSLOptions* options, EvSSLHandshakeCallback handshake_cb, void* user_data);
+bool evfd_initssl3(EvFD* evfd, EvFD* extends, int flag, InitSSLOptions* options, EvSSLHandshakeCallback handshake_cb, void* user_data);
+void evcore_set_sni(const char* name, const char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey);
+bool evcore_remove_sni(const char* name);
 #endif
 EvFD* evcore_setTimeout(uint64_t milliseconds, EvTimerCallback callback, void* user_data);
 EvFD* evcore_interval(uint64_t milliseconds, EvTimerCallback callback, void* cbopaque, EvCloseCallback close_cb, void* close_opaque);
@@ -489,6 +499,11 @@ bool LJS_init_xml(JSContext* ctx);
 
 // crypto
 bool LJS_init_crypto(JSContext *ctx);
+
+#ifdef LJS_MBEDTLS
+JSValue LJS_NewCertificate(JSContext *ctx, const mbedtls_x509_crt *cert);
+const mbedtls_x509_crt* LJS_GetCertificate(JSContext *ctx, JSValueConst val);
+#endif
 
 // finalizer
 void __js_destroy_process(JSContext* ctx);

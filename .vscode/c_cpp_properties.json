@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**"
+            ],
+            "defines": [
+                "_GNU_SOURCE",
+                "LJS_MBEDTLS",
+                "LJS_LIBFFI",
+                "LJS_LIBEXPAT",
+                "LJS_ZLIB"
+            ],
+            "compilerPath": "/usr/bin/gcc",
+            "intelliSenseMode": "linux-gcc-x64",
+            "cStandard": "gnu23",
+            "cppStandard": "gnu++23"
+        }
+    ],
+    "version": 4
+}

@@ -19,7 +19,7 @@ declare module "fs" {
             { isSocket: true }
         ) & Record<string, undefined>;
 
-    type FileTypes = "directory" | "file" | "symlink" | "chardev" | "blkdrv" | "fifo" | "socket";
+    type FileTypes = "dir" | "file" | "symlink" | "chardev" | "blkdrv" | "fifo" | "socket";
 
     /**
      * Open flags for `open` function.

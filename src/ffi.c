@@ -30,10 +30,13 @@
 
 #include <pthread.h>
 #include <signal.h>
-#include <threads.h>
 #include <setjmp.h>
 #include <dlfcn.h>
 #include <errno.h>
+
+#ifndef L_NO_THREADS_H
+#include <threads.h>
+#endif
 
 #ifdef LJS_LIBFFI
 #include <ffi.h>
@@ -204,7 +207,7 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
     // help message
     int64_t len;
     if(-1 == JS_GetLength(ctx, this_val, &len) || len < 2){
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "This arg is invaild. Expect a Array containing at least 2 types",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "This arg is invalid. Expect a Array containing at least 2 types",
             "eg: dlopen(...).call([/* return type */ type.INT, /* function name */ 'fib', type.FLOAT, ...], [a1,...])"
         );
     }
@@ -214,7 +217,7 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
     int32_t ret_type_num;
     if(JS_ToInt32(ctx, &ret_type_num, ret_type) == -1){
         JS_FreeValue(ctx, ret_type);
-        return JS_ThrowTypeError(ctx, "The return type(this[0]) is invaild. Expect a number(type.XXX)");
+        return JS_ThrowTypeError(ctx, "The return type(this[0]) is invalid. Expect a number(type.XXX)");
     }
     JS_FreeValue(ctx, ret_type);
 
@@ -223,7 +226,7 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
     const char *func_name_str = LJS_ToCString(ctx, func_name, NULL);
     if(!func_name_str){
         JS_FreeValue(ctx, func_name);
-        return JS_ThrowTypeError(ctx, "The function name(this[1]) is invaild. Expect a string");
+        return JS_ThrowTypeError(ctx, "The function name(this[1]) is invalid. Expect a string");
     }
     void* func = dlsym(JS_VALUE_GET_PTR(func_data[0]), func_name_str);
     JS_FreeCString(ctx, func_name_str);
@@ -246,7 +249,7 @@ static JSValue js_ffi_handle(JSContext *ctx, JSValueConst this_val, int argc, JS
         int32_t type;
         if(JS_ToInt32(ctx, &type, val) == -1){
             JS_FreeValue(ctx, val);
-            return JS_ThrowTypeError(ctx, "The type of this arg is invaild. Expect a number(type.XXX)");
+            return JS_ThrowTypeError(ctx, "The type of this arg is invalid. Expect a number(type.XXX)");
         }
         JS_FreeValue(ctx, val);
 

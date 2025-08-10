@@ -1,3 +1,5 @@
+import { Certificate } from "crypto";
+
 type IAddr = {
     type: 'unknown'
 } | {
@@ -63,23 +65,33 @@ declare module 'socket'{
         alpn_protocols?: Array<string>, // for TLS
     }) => IOPipe;
 
-    export const upgradeTLS: (client: U8Pipe, settings: {
-        server?: false,
+    type UpgradeTLSOptions = {
         ciphers?: Array<string>,
         suiteb?: boolean
-    } | {
-        server: true,
-        ciphers?: Array<string>,
-        suiteb?: boolean,
-        hostname: string,
-        alpn?: Array<string>,
-        cacert: Uint8Array,
-        cakey: Uint8Array,
-        cakey_password?: string
-    }) => Promise<void>;
+        alpn?: Array<string>
+    } & (
+        {
+            server?: false,
+            hostname: string,
+        } | {
+            server: true,
+            hostname?: string,
+            cert: typeof Certificate.prototype,
+            key: ArrayBuffer,
+            sni?: boolean
+        }
+    );
+
+    // XXX: move to crypto.d.ts?
+    export const upgradeTLS: (client: U8Pipe, settings: UpgradeTLSOptions) => Promise<typeof Certificate.prototype>;
 
     export const resolveDNS: (host: string, dns_server?: string) => Promise<Array<DnsResult>>;
 
-    export const regCert: (key: string, cert: string, ca: string) => void;
+    /**
+     * 如果cert为二进制，则认为是DER格式的证书，否则认为是PEM格式的证书
+     */
+    export const regCert: (key: string, cert: string | Uint8Array, privkey?: string, options?: {
+        keypwd?: string
+    }) => void;
     export const unregCert: (key: string) => boolean;
 }

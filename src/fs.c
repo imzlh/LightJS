@@ -278,7 +278,7 @@ static const JSCFunctionListEntry js_syncpipe_flags[] = {
 // class Inotify
 static thread_local JSClassID js_inotify_class_id;
 
-#define TELL_ERROR return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild INotify instance", "did you called Inotify.close() before?");
+#define TELL_ERROR return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid INotify instance", "did you called Inotify.close() before?");
 
 #ifndef __CYGWIN__
 static JSValue js_inotify_watch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv){
@@ -455,7 +455,7 @@ static JSValue js_stdio_read(JSContext *ctx, JSValueConst self, int argc, JSValu
     struct stat st;
     if (fstat(fd, &st) == -1 || !S_ISREG(st.st_mode)) {
         close(fd);
-        return LJS_Throw(ctx, EXCEPTION_INVAILDF, "not a regular file: %s", NULL, strerror(errno));
+        return LJS_Throw(ctx, EXCEPTION_INvalidF, "not a regular file: %s", NULL, strerror(errno));
     }
 
     // 读取文件内容

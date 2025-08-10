@@ -71,7 +71,7 @@ struct inotify_event {};
 #endif
 
 // #define LJS_DEBUG    // debug
-// #define LJS_EVLOOP_FULL_DEBUG
+#define LJS_EVLOOP_FULL_DEBUG
 
 #include "../engine/cutils.h"
 #include "../engine/list.h"
@@ -193,7 +193,7 @@ struct Task {
 
 #ifdef LJS_MBEDTLS
 struct EvFD_SSL {
-    mbedtls_ssl_config config;
+    mbedtls_ssl_config* config;
     mbedtls_ssl_context ctx;
     struct Buffer* sendbuf;
     struct Buffer* recvbuf;
@@ -309,7 +309,7 @@ static thread_local
 static thread_local struct list_head timer_list;
 static thread_local ssize_t evloop_events = 0;
 static atomic_int thread_id_pool = 0;
-static thread_local int thread_id = 0;
+static thread_local unsigned int thread_id = 0;
 
 #ifndef __CYGWIN__
 static int is_aio_supported = -1;
@@ -331,9 +331,29 @@ static pthread_rwlock_t tls_cert_mod_lock;
 static int default_rng(void* userdata, unsigned char* output, size_t output_size) {
     if (-1 == getrandom(output, output_size, GRND_NONBLOCK)) {
         long rand = random();
-        memcpy(output, &rand, output_size);
+        memcpy(output, &rand, MIN(output_size, sizeof(rand)));
     }
     return 0;
+}
+
+static int default_verify(void* data, mbedtls_x509_crt* crt, int depth, uint32_t* flags) {
+    char buf[1024];
+    EvFD* evfd = (EvFD*) data;  // Note: possibly NULL
+
+    int ret = mbedtls_x509_crt_info(buf, sizeof(buf) - 1, "", crt);
+    if ((*flags) == 0 && ret == 0) {
+        return 0;
+    } else if(*flags != 0) {
+#ifdef LJS_DEBUG
+        mbedtls_x509_crt_verify_info(buf, sizeof(buf), "  ! ", *flags);
+        printf("verify<E>: %s\n", buf);
+#endif
+        if(evfd) evfd -> proto.ssl -> mb_errno = ret = MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+    } else {
+        if(evfd) evfd -> proto.ssl -> mb_errno = ret;
+    }
+
+    return ret;
 }
 #endif
 
@@ -343,7 +363,7 @@ void __trace_debug(int events, int direction) {
     return;
 }
 #define TRACE_EVENTS(evfd, add) \
-    printf("event_trace: func=%s, line=%d, fd=%d, add=%d, cevents=%ld(thread#%d) \n", __func__, __LINE__, evfd_getfd(evfd, NULL), add, evloop_events + add, thread_id); \
+    printf("event_trace: func=%s, line=%d, fd=%d, add=%d, cevents=%zd(thread#%d) \n", __func__, __LINE__, evfd_getfd(evfd, NULL), add, evloop_events + add, thread_id); \
     __trace_debug(evloop_events, add); \
     evloop_events += add;
 #else
@@ -418,8 +438,15 @@ __attribute__((constructor)) static void evloop_init() {
 
     // mutex for cert modification
     pthread_rwlock_init(&tls_cert_mod_lock, NULL);
+    
+#ifdef MBEDTLS_USE_PSA_CRYPTO
+    psa_crypto_init();
+#endif
 
 #if defined(LJS_DEBUG) && defined(MBEDTLS_DEBUG_C)
+#ifdef LJS_EVLOOP_FULL_DEBUG
+    printf("enable maxium MbedTLS debug level\n");
+#endif
     mbedtls_debug_set_threshold(
 #ifdef LJS_EVLOOP_FULL_DEBUG
         4
@@ -439,8 +466,22 @@ __attribute__((destructor)) static void evloop_cleanup(){
 }
 
 #if defined(LJS_MBEDTLS) && defined(MBEDTLS_DEBUG_C)
-void debug_callback(void* evfd, int level, const char* file, int line, const char* str) {
+static void debug_callback(void* evfd, int level, const char* file, int line, const char* str) {
     printf("[ MbedTLS ] fd=%d %s %s:%04d: %s", ((EvFD*)evfd) -> fd[0], level == MBEDTLS_SSL_ALERT_LEVEL_FATAL ? "E:" : level == MBEDTLS_SSL_ALERT_LEVEL_WARNING ? "W:" : "I:", file, line, str);
+}
+
+int evcore_ssl_init_trustedca(const char* ca_file) {
+    pthread_rwlock_wrlock(&tls_cert_mod_lock);
+    int mbret = mbedtls_x509_crt_parse_file(&tls_global_cert, "/etc/ssl/certs/ca-certificates.crt");
+    pthread_rwlock_unlock(&tls_cert_mod_lock);
+    return mbret;
+}
+
+bool evcore_ssl_verify(mbedtls_x509_crt* cert, const char* hostname, uint32_t* flags){
+    pthread_rwlock_rdlock(&tls_cert_mod_lock);
+    int mbret = mbedtls_x509_crt_verify(cert, &tls_global_cert, NULL, hostname, flags, default_verify, NULL);
+    pthread_rwlock_unlock(&tls_cert_mod_lock);
+    return mbret == 0;
 }
 #endif
 
@@ -522,8 +563,8 @@ static inline bool evfd_add(struct EvFD* evfd, uint32_t epoll_flags) {
 // cautious when using this function
 // it may make the fd inaccessible but not closed
 static inline void evfd_mod(struct EvFD* evfd, bool add, uint32_t epoll_flags) {
-    if(evfd -> sync) return;
-    uint64_t flag = evfd -> modify_flag ? evfd -> modify_flag : evfd -> epoll_flags;
+    if(evfd -> sync || evfd -> destroy) return;
+    uint32_t flag = evfd -> modify_flag ? evfd -> modify_flag : evfd -> epoll_flags;
     if (add)    flag |= epoll_flags;
     else        flag &= ~epoll_flags;
     evfd_ctl(evfd, flag);
@@ -955,8 +996,11 @@ static void handle_handshake_done(EvFD* evfd){
     evfd -> proto.ssl -> ssl_handshaking = false;
 
     // callback
-    if(evfd -> proto.ssl -> handshake_cb)
-        evfd -> proto.ssl -> handshake_cb(evfd, true, evfd -> proto.ssl -> handshake_user_data);
+    if(evfd -> proto.ssl -> handshake_cb){
+        evfd -> proto.ssl -> handshake_cb(evfd, true, 
+            mbedtls_ssl_get_peer_cert(&evfd -> proto.ssl -> ctx),
+            evfd -> proto.ssl -> handshake_user_data);
+    }
 }
 
 static inline ssize_t ssl_poll_data(EvFD* evfd) {
@@ -1694,7 +1738,23 @@ static void handle_close(int fd, EvFD* evfd, bool is_rdhup) {
                 buffer_free(evfd -> proto.ssl -> sendbuf);
                 buffer_free(evfd -> proto.ssl -> recvbuf);
                 mbedtls_ssl_free(&evfd -> proto.ssl -> ctx);
-                mbedtls_ssl_config_free(&evfd -> proto.ssl -> config);
+                // unref ssl object(4-byte header alias to refcount)
+                if(evfd -> proto.ssl -> config)
+                    if((*((uint32_t*)evfd -> proto.ssl -> config -1)) -- == 1){
+                        mbedtls_ssl_config_free(evfd -> proto.ssl -> config);
+                        free2((uint32_t*)evfd -> proto.ssl -> config -1);
+                    }
+
+                if( // callback
+                    evfd -> proto.ssl -> ssl_handshaking &&
+                    evfd -> proto.ssl -> handshake_cb
+                ){
+                    evfd -> proto.ssl -> handshake_cb(evfd, false, 
+                        mbedtls_ssl_get_peer_cert(&evfd -> proto.ssl -> ctx),
+                        evfd -> proto.ssl -> handshake_user_data);
+                }
+
+                close(fd);
                 // Note: ssl object should live as long as evfd to get errno
                 // it will be freed in next epoll loop
             }
@@ -1738,6 +1798,7 @@ static int handle_ssl_recv(void* ctx, unsigned char* buf, size_t len) {
 }
 
 static void ssl_handle_handshake(EvFD* evfd) {
+    assert(evfd -> type == EVFD_SSL && evfd -> proto.ssl -> ssl_handshaking);
 #ifdef LJS_DEBUG
     printf("ssl_handle_handshake: fd=%d; ", evfd -> fd[0]);
 #endif
@@ -1753,19 +1814,20 @@ static void ssl_handle_handshake(EvFD* evfd) {
             return;
         } else {
             // fatal error
-            evfd_close(evfd);
 #ifdef LJS_DEBUG
             char mberror[1024];
             mbedtls_strerror(ret, mberror, sizeof(mberror));
             printf("ssl_handle_handshake: ret=%d, strerror=%s\n", ret, mberror);
 #endif
-            evfd -> proto.ssl -> mb_errno = ret;
+
+            evfd -> proto.ssl -> mb_errno = ret;          
+            evfd_close(evfd);
             return;
         }
     }
     // handshake done
     evfd -> proto.ssl -> ssl_handshaking = false;
-    evfd -> proto.ssl -> handshake_cb(evfd, true, evfd -> proto.ssl -> handshake_user_data);
+    handle_handshake_done(evfd);
 
     // try to execute pending tasks
     handle_read(evfd -> fd[0], evfd, NULL, NULL);
@@ -1800,7 +1862,7 @@ int ssl_sni_callback(void* opaque, mbedtls_ssl_context* ssl, const unsigned char
         }
     }
     pthread_rwlock_unlock(&cert_lock);
-    return -1;
+    return 0;
 }
 #endif
 
@@ -1838,7 +1900,7 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
         // check whether to exit
         if (unlikely(abort_check_result && evloop_events <= 0)) {
 #ifdef LJS_DEBUG
-            printf("evloop_abort_check: abort, events=%ld(thread#%d)\n", evloop_events, thread_id);
+            printf("evloop_abort_check: abort, events=%zd(thread#%d)\n", evloop_events, thread_id);
 #endif
             return true; // no events
         }
@@ -1863,7 +1925,7 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
 
         // wait start
 #ifdef LJS_DEBUG
-        printf("epoll_wait: enter, events=%ld(thread#%d)\n", evloop_events, thread_id);
+        printf("epoll_wait: enter, events=%zd(thread#%d)\n", evloop_events, thread_id);
         // bool first_epoll = true;
 #endif
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
@@ -2056,6 +2118,11 @@ bool evcore_run(bool (*evloop_abort_check)(void* user_data), void* user_data) {
 }
 
 static inline void expand_bufsize(EvFD* evfd, uint32_t minsize) {
+    if (!evfd -> incoming_buffer){
+        evfd -> incoming_buffer = malloc2(sizeof(struct Buffer));
+        assert(evfd -> incoming_buffer);
+        memset(evfd -> incoming_buffer, 0, sizeof(struct Buffer));
+    }
     if (evfd -> incoming_buffer -> size < minsize) {
         buffer_realloc(evfd -> incoming_buffer, minsize + buffer_used(evfd -> incoming_buffer) + 2, false);
     }
@@ -2099,7 +2166,7 @@ void evcore_destroy() {
     epoll_fd = EPOLL_FD_NULL;
 
 #ifdef LJS_DEBUG
-    printf("evcore_destroy: exit, (thread#%d)remains=%ld\n", thread_id, evloop_events);
+    printf("evcore_destroy: exit, (thread#%d)remains=%zd\n", thread_id, evloop_events);
     // assert(evloop_events == 0);
 #endif
 }
@@ -2215,7 +2282,7 @@ struct EvFD* evcore_attach(
     EvWriteCallback wcb, void* write_opaque,
     EvCloseCallback ccb, void* close_opaque
 ) {
-    // fd is vaild?
+    // fd is valid?
 //     if (fd < 0 || (fcntl(fd, F_GETFL, 0) == -1 && errno == EBADF)) {
 // #ifdef LJS_DEBUG
 //         perror("fcntl");
@@ -2386,108 +2453,160 @@ void evfd_setup_udp(EvFD* evfd) {
 }
 
 #ifdef LJS_MBEDTLS
+static int configure_ssl_config(
+    mbedtls_ssl_config* cfg, 
+    int flag, 
+    InitSSLOptions* options,
+    EvFD* evfd
+) {
+#define HANDLE(ret) { int retcode = ret; if(retcode < 0) return retcode; }
+    // Set basic SSL configuration defaults
+    HANDLE(mbedtls_ssl_config_defaults(cfg, 
+        flag & SSL_IS_SERVER,
+        MBEDTLS_SSL_TRANSPORT_STREAM,
+        flag & SSL_PRESET_SUITEB ? MBEDTLS_SSL_PRESET_SUITEB : 0
+    ));
+    mbedtls_ssl_conf_authmode(cfg, ((flag & SSL_VERIFY) && !(flag & SSL_IS_SERVER)) ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_max_tls_version(cfg, MBEDTLS_SSL_VERSION_TLS1_3);
+    mbedtls_ssl_conf_min_tls_version(cfg, MBEDTLS_SSL_VERSION_TLS1_2);
+    mbedtls_ssl_conf_ciphersuites(cfg, mbedtls_ssl_list_ciphersuites());
+    mbedtls_ssl_conf_rng(cfg, default_rng, NULL);
+
+    // Server-specific configuration
+    if (flag & SSL_IS_SERVER) {
+#ifdef MBEDTLS_SSL_EARLY_DATA
+        // Configure early data if specified
+        if(options && options -> early_data_len) {
+            mbedtls_ssl_conf_early_data(cfg, true);
+            mbedtls_ssl_conf_max_early_data_size(cfg, options -> early_data_len);
+        }
+#endif
+        // Configure SNI or server certificate
+        if(options && options -> server_cert && options -> server_key)
+            HANDLE(mbedtls_ssl_conf_own_cert(cfg, options -> server_cert, options -> server_key))
+        if(flag & SSL_USE_SNI)
+            mbedtls_ssl_conf_sni(cfg, ssl_sni_callback, evfd);
+        else if(!options || !options -> server_cert || !options -> server_key)
+            return MBEDTLS_ERR_SSL_BAD_CONFIG;
+    } else {  
+        // Client configuration
+        // Disable verification if no server name provided
+        if(!(options && options -> server_name))
+            mbedtls_ssl_conf_authmode(cfg, MBEDTLS_SSL_VERIFY_NONE);
+    }
+
+    // Set CA certificate or use global default
+    if(options && options -> ca_cert)
+        mbedtls_ssl_conf_ca_chain(cfg, options -> ca_cert, NULL);
+    else
+        mbedtls_ssl_conf_ca_chain(cfg, &tls_global_cert, NULL);
+        
+
+#if defined(LJS_MBEDTLS) && defined(MBEDTLS_DEBUG_C)
+    // Enable debug output if configured
+    mbedtls_ssl_conf_dbg(cfg, debug_callback, evfd);
+#endif
+
+    // Configure custom ciphersuites if specified
+    if(options && options -> ciphersuites)
+        mbedtls_ssl_conf_ciphersuites(cfg, options -> ciphersuites);
+
+    return 0;
+}
+
+static int configure_ssl_config2(
+    mbedtls_ssl_config** config2, int flag, InitSSLOptions* options, EvFD* evfd
+){
+    uint32_t* config = malloc2(sizeof(mbedtls_ssl_config) + sizeof(uint32_t));
+    if(!config) return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+    memset(config, 0, sizeof(mbedtls_ssl_config) + sizeof(uint32_t));
+
+    // use 4-byte header to save ref_count
+    config[0] = 1;
+    
+    // initialize SSL context
+    mbedtls_ssl_config* cfg = (void*)(config +1);
+    mbedtls_ssl_config_init(cfg);
+    int ret = configure_ssl_config(cfg, flag, options, evfd);
+    if(ret != 0){
+        free2(config);
+        return ret;
+    }
+    *config2 = cfg;
+    return 0;
+}
+
+static int initialize_ssl_context(
+    mbedtls_ssl_context* ctx,
+    mbedtls_ssl_config* cfg,
+    EvFD* evfd, int flag,
+    InitSSLOptions* options
+) {
+    // Configure BIO callbacks
+    mbedtls_ssl_set_bio(ctx, evfd, handle_ssl_send, handle_ssl_recv, NULL);
+
+    // Set hostname for client (SNI)
+    if(!(flag & SSL_IS_SERVER) && options && options -> server_name)
+        mbedtls_ssl_set_hostname(ctx, options -> server_name);
+
+    // Set custom verification callback if specified
+    if(!(flag & SSL_IS_SERVER) && (flag & SSL_VERIFY) && options){
+        if(options -> verify)
+            mbedtls_ssl_set_verify(ctx, options -> verify, options -> verify_opaque);
+        else
+            mbedtls_ssl_set_verify(ctx, default_verify, evfd);
+    }
+
+    // Store evfd pointer in SSL context
+    mbedtls_ssl_set_user_data_p(ctx, evfd);
+
+    // Finalize SSL context setup
+    return mbedtls_ssl_setup(ctx, cfg);
+}
+
 /**
- * Initialize SSL/DTLS context for evfd.
- * the arguments except `evfd` and `is_client` are all optional.
- * 
- * Warning: evfd should be task-based and not destroyed before SSL/DTLS context is initialized.
- * \param evfd The evfd to initialize SSL/DTLS context for.
- * \param flag Flag like `SSL_*` in `core.h`
- * \param server_name (SNI required) set to hostname to enable SNI feature
- * \param handshake_cb The callback to call when the SSL/DTLS handshake is complete.
- * \param user_data The user data to pass to the handshake callback.
+ * Initialize SSL context
+ * If error occurs, `false` will be returned and you can use `evfd_ssl_errno` to get the error code.
+ * \param cfg Associated SSL configuration 
+ * \param evfd Associated evfd object
+ * \param options Initialization options
+ * \param handshake_cb SSL handshake callback
+ * \param user_data User data for SSL handshake callback
  */
-bool evfd_initssl(
-    EvFD* evfd, mbedtls_ssl_config** config,
-    int flag, InitSSLOptions* options,
+bool evfd_initssl2(
+    EvFD* evfd, mbedtls_ssl_config* cfg, int flag, InitSSLOptions* options,
     EvSSLHandshakeCallback handshake_cb, void* user_data
 ) {
 #ifdef LJS_EVLOOP_THREADSAFE
     evfd_perform(evfd);
 #endif
-    tassert(!evfd -> destroy && evfd -> task_based);
+    tassert(!evfd -> destroy && evfd -> task_based && evfd -> type != EVFD_SSL);
     evfd -> type = EVFD_SSL;
     int ret = MBEDTLS_ERR_SSL_BAD_CONFIG;
 
-    // init basic config
+    // Allocate and initialize SSL structures
     evfd -> proto.ssl = malloc2(sizeof(struct EvFD_SSL));
-    mbedtls_ssl_config* cfg = &evfd -> proto.ssl -> config;
+    evfd -> proto.ssl -> config = cfg;
     mbedtls_ssl_context* ctx = &evfd -> proto.ssl -> ctx;
     mbedtls_ssl_init(ctx);
-    mbedtls_ssl_config_init(cfg);
-    mbedtls_ssl_config_defaults(cfg, 
-        flag & SSL_IS_SERVER,   // MBEDTLS_SSL_IS_CLIENT = 0
-        MBEDTLS_SSL_TRANSPORT_STREAM, 
-        flag & SSL_PRESET_SUITEB ? MBEDTLS_SSL_PRESET_SUITEB : 0
-    );
-    mbedtls_ssl_conf_authmode(cfg, flag & SSL_VERIFY ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_OPTIONAL);
-    // this may a bug in mbedtls
-    // it will not as perform we expected, only TLSv1.2 will be used
-    // mbedtls_ssl_conf_min_version(cfg, 3, 1);   // TLSv1.0
-    mbedtls_ssl_conf_max_tls_version(cfg, MBEDTLS_SSL_VERSION_TLS1_3);// TLSv1.3/1.2
-    mbedtls_ssl_conf_rng(cfg, default_rng, NULL);
-    if (config) *config = cfg;
 
-    // server specific config
-    if (flag & SSL_IS_SERVER) {
-#ifdef MBEDTLS_SSL_EARLY_DATA
-        if(options && options -> early_data_len){
-            mbedtls_ssl_conf_early_data(cfg, true);
-            mbedtls_ssl_conf_max_early_data_size(cfg, options -> early_data_len);
-        }
-#endif
-        if(flag & SSL_USE_SNI)
-            mbedtls_ssl_conf_sni(cfg, ssl_sni_callback, evfd);
-        else if(options && options -> server_cert && options -> server_key)
-            mbedtls_ssl_conf_own_cert(cfg, options -> server_cert, options -> server_key);
-        else
-            goto error;
-    }else{  // sni support
-        if(options && options -> ca_cert)
-            mbedtls_ssl_conf_own_cert(cfg, options -> ca_cert, NULL);
-        else
-            mbedtls_ssl_conf_own_cert(cfg, &tls_global_cert, NULL);
-        if(options && options -> server_name)
-            mbedtls_ssl_set_hostname(ctx, options -> server_name);
-        else
-            mbedtls_ssl_conf_authmode(cfg, MBEDTLS_SSL_VERIFY_NONE);
-        if(options && options -> verify)
-            mbedtls_ssl_set_verify(ctx, options -> verify, options -> verify_opaque);
-    }
+    // Initialize SSL context
+    if((ret = initialize_ssl_context(ctx, cfg, evfd, flag, options)) != 0)
+        goto error;
 
-#if defined(LJS_MBEDTLS) && defined(MBEDTLS_DEBUG_C)
-    // debug?
-    mbedtls_ssl_conf_dbg(cfg, debug_callback, evfd);
-#endif
-
-    // mbedtls bio set
-    mbedtls_ssl_conf_read_timeout(cfg, 0);
-    mbedtls_ssl_set_bio(ctx, evfd, handle_ssl_send, handle_ssl_recv, NULL);
-
-    // alpn
-    if(options && options -> alpn_protocols){
-        // mbedtls_ssl_conf_alpn_protocols(cfg, options -> alpn_protocols); 
-    }
-
-    // init ssl context
-    if(options && options -> ciphersuites)
-        mbedtls_ssl_conf_ciphersuites(cfg, options -> ciphersuites);
-    mbedtls_ssl_set_user_data_p(ctx, evfd);
-    ret = mbedtls_ssl_setup(ctx, cfg);
-    if (0 != ret) goto error;
-
-    // initial user-space SSL buffer
+    // Initialize SSL buffers
     buffer_init(&evfd -> proto.ssl -> sendbuf, NULL, EVFD_BUFSIZE);
     buffer_init(&evfd -> proto.ssl -> recvbuf, NULL, EVFD_BUFSIZE);
 
-    // callback
+    // Store handshake callback and user data
     evfd -> proto.ssl -> handshake_cb = handshake_cb;
     evfd -> proto.ssl -> handshake_user_data = user_data;
     evfd -> proto.ssl -> mb_errno = 0;
 
-    // start handshake
+    // Start handshake process
     evfd -> proto.ssl -> ssl_handshaking = true;
     ssl_handle_handshake(evfd);
+    
 #ifdef LJS_EVLOOP_THREADSAFE
     evfd_perform_end(evfd);
 #endif
@@ -2503,7 +2622,55 @@ error:
     return false;
 }
 
-bool evfd_remove_sni(const char* name) {
+// same as evfd_initssl2, but donot extends evfd config
+bool evfd_initssl(
+    EvFD* evfd, mbedtls_ssl_config** config, int flag, InitSSLOptions* options, 
+    EvSSLHandshakeCallback handshake_cb, void* user_data
+){
+    mbedtls_ssl_config* cfg;
+    int ret = configure_ssl_config2(&cfg, flag, options, evfd);
+    if(ret != 0) {
+#ifdef LJS_DEBUG
+        char mberror[1024];
+        mbedtls_strerror(ret, mberror, sizeof(mberror));
+        printf("evfd_initssl: %s\n", mberror);
+#endif
+        return false;
+    }
+    return evfd_initssl2(evfd, cfg, flag, options, handshake_cb, user_data);
+}
+
+// SSL config will be extended from another evfd config
+bool evfd_initssl3(EvFD* evfd, EvFD* extends, int flag, InitSSLOptions* options,
+    EvSSLHandshakeCallback handshake_cb, void* user_data) {
+    tassert(extends && extends -> type == EVFD_SSL && extends -> proto.ssl -> config);
+    tassert(evfd -> task_based && evfd -> type != EVFD_SSL);
+    evfd -> proto.ssl = malloc2(sizeof(struct EvFD_SSL));
+    memset(evfd -> proto.ssl, 0, sizeof(struct EvFD_SSL));
+    evfd -> proto.ssl -> config = extends -> proto.ssl -> config;
+    evfd -> proto.ssl -> handshake_cb = handshake_cb;
+    evfd -> proto.ssl -> handshake_user_data = user_data;
+
+    // init ssl context
+    mbedtls_ssl_context* ctx = &evfd -> proto.ssl -> ctx;
+    if(0 != initialize_ssl_context(ctx, evfd -> proto.ssl -> config, evfd, flag, options)){
+        free2(evfd -> proto.ssl);
+        evfd -> proto.ssl = NULL;
+        return false;
+    }
+
+    // add refcount
+    uint32_t* ref_count = (uint32_t*)extends -> proto.ssl -> config - 1;
+    *ref_count += 1;
+
+    // start handshake process
+    evfd -> type = EVFD_SSL;
+    evfd -> proto.ssl -> ssl_handshaking = true;
+    ssl_handle_handshake(evfd);
+    return true;
+}
+
+bool evcore_remove_sni(const char* name) {
     struct list_head* pos, * tmp;
     pthread_rwlock_wrlock(&cert_lock);
     list_for_each_prev_safe(pos, tmp, &cert_list) {
@@ -2523,13 +2690,13 @@ bool evfd_remove_sni(const char* name) {
     return false;
 }
 
-void evfd_set_sni(char* name, char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey) {
+void evcore_set_sni(const char* name, const char* server_name, mbedtls_x509_crt* cacert, mbedtls_pk_context* cakey) {
     struct SSL_data* data = malloc2(sizeof(struct SSL_data));
     pthread_rwlock_wrlock(&cert_lock);
-    evfd_remove_sni(name);  // remove old cert
+    evcore_remove_sni(name);  // remove old cert
     list_add_tail(&data -> link, &cert_list);
-    data -> name = name;
-    data -> server_name = server_name;
+    data -> name = strdup2(name);
+    data -> server_name = strdup2(server_name);
     data -> cacert = cacert;
     data -> cakey = cakey;
     pthread_rwlock_unlock(&cert_lock);
@@ -2895,7 +3062,10 @@ bool evfd_write_dgram(EvFD* evfd, const uint8_t* data, uint32_t size,
 // onclose
 // Note: passing callback as NULL will clear the callback.
 bool evfd_onclose(EvFD* evfd, EvCloseCallback callback, void* user_data) {
-    if(evfd -> destroy) callback(evfd, false, user_data);
+    if(evfd -> destroy){
+        callback(evfd, false, user_data);
+        return true;
+    }
     
     struct Task* task = malloc2(sizeof(struct Task));
     if (!task) return false;
@@ -3102,6 +3272,10 @@ static void __sync_cb(EvFD* evfd, bool success, void* opaque) {
 
 // wait read and write all completed
 bool evfd_wait2(EvFD* evfd, EvSyncCallback cb, void* opaque) {
+    if(evfd -> destroy){
+        cb(evfd, false, opaque);
+        return true;
+    }
     struct __sync_cb_arg* arg = malloc2(sizeof(struct __sync_cb_arg));
     if (!arg) return false;
     arg -> count = 0;

@@ -150,5 +150,6 @@
         "cstring": "c"
     },
     "C_Cpp.errorSquiggles": "enabled",
-    "cmake.sourceDirectory": "/root/LightJS"
+    "cmake.sourceDirectory": "/root/LightJS",
+    "C_Cpp.default.compilerPath": "/usr/bin/gcc"
 }

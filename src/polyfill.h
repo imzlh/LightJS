@@ -44,7 +44,7 @@ typedef enum {
     EXCEPTION_IO,
     EXCEPTION_NOTFOUND,
     EXCEPTION_INPUT,
-    EXCEPTION_INVAILDF,
+    EXCEPTION_INvalidF,
     EXCEPTION_INTERNAL,
     EXCEPTION_NOTSUPPORT,
 
@@ -56,7 +56,7 @@ static const char* __exception_type_str[] = {
     "TypeError",
     "IOException",
     "NotFoundException",
-    "InvaildFileException",
+    "InvalidFileException",
     "InputError",
     "InternalError",
     "NotSupportError"
@@ -112,10 +112,12 @@ static inline JSValue LJS_ThrowWithError(JSContext *ctx, const char *msg, const 
     return JS_EXCEPTION;
 }
 
-static inline JSValue LJS_NewResolvedPromise(JSContext* ctx, JSValue value){
+// by default, resolve a promise with the given value
+// define is_resolve to false to reject the promise with the given value
+static inline JSValue LJS_NewResolvedPromise(JSContext* ctx, JSValue value, bool is_resolve){
     JSValue cb[2];
     JSValue ret = JS_NewPromiseCapability(ctx, cb);
-    JS_Call(ctx, cb[0], JS_UNDEFINED, 1, (JSValueConst[]){value});
+    JS_Call(ctx, is_resolve ? cb[0] : cb[1], JS_UNDEFINED, 1, (JSValueConst[]){value});
     JS_FreeValue(ctx, cb[0]);
     JS_FreeValue(ctx, cb[1]);
     return ret;

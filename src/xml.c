@@ -160,7 +160,7 @@ static inline void xml_end(XML_Parser parser, struct JSXMLParserCtx* jsxmlctx) {
 static JSValue js_xml_parse(JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) { 
     if (argc == 0) {
 param_error:
-        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invaild arguments",
+        return LJS_Throw(ctx, EXCEPTION_TYPEERROR, "invalid arguments",
             "parse(xml: string): RootNode"
         );
     }

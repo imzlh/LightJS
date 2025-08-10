@@ -118,6 +118,7 @@ static thread_local uint32_t PIPE_u8_buf_size = 4 * 1024;
 #define CHECK_PIPE_READABLE(pipe) if(!(pipe -> flag & PIPE_READ)) return JS_ThrowTypeError(ctx, "Pipe is not readable");
 #define CHECK_PIPE_WRITEABLE(pipe) if(!(pipe -> flag & PIPE_WRITE)) return JS_ThrowTypeError(ctx, "Pipe is not writable");
 #define EXCEPTION_THEN_CLOSE(error, val, ret) if(error){ pipe_handle_close(JS_GetRuntime(ctx), pipe); JS_FreeValue(ctx, val); return ret; }
+#define EXCEPTION_THEN_CLOSE2(error, val, cb) if(error){ pipe_handle_close(JS_GetRuntime(ctx), pipe); JS_FreeValue(ctx, val); cb; }
 #define UNLOCK_AFTER(promise, ref) LJS_enqueue_promise_job(ctx, promise, pipe_unlock_job, ref);
 #define DEF_ONCLOSE(pipe) { \
     JSValue promise[2]; \
@@ -186,7 +187,7 @@ static JSValue js_pipe_read(JSContext *ctx, JSValueConst this_val, int argc, JSV
     pipe -> read_lock = true;
     bool exception;
     data = JS_CallSafe(ctx, pipe -> pull_func, this_val, 0, NULL, &exception);
-    EXCEPTION_THEN_CLOSE(exception, data, JS_NULL);
+    EXCEPTION_THEN_CLOSE(exception, data, LJS_NewResolvedPromise(ctx, JS_NULL, true));
     pipe_handle_promise(ctx, data, pipe);
     UNLOCK_AFTER(data, &pipe -> read_lock);
 
@@ -208,7 +209,7 @@ static JSValue js_pipe_write(JSContext *ctx, JSValueConst this_val, int argc, JS
     bool exception;
     JSValue ret = JS_CallSafe(ctx, pipe -> write_func, this_val, 1, (JSValueConst[]){data}, &exception);
     pipe -> write_lock = true;
-    EXCEPTION_THEN_CLOSE(exception, ret, LJS_NewResolvedPromise(ctx, JS_ThrowTypeError(ctx, "Pipe write failed")));
+    EXCEPTION_THEN_CLOSE2(exception, ret, LJS_ThrowInAsync(ctx, EXCEPTION_ERROR, "Pipe write failed", NULL) );
     pipe_handle_promise(ctx, data, pipe);
     UNLOCK_AFTER(ret, &pipe -> write_lock);
 
@@ -291,6 +292,9 @@ else \
 #define U8PIPE_UNREF_RT(pipe) if(u8pipe_unref(pipe)) u8pipe_free(rt, pipe);
 #undef EXCEPTION_THEN_CLOSE
 #define EXCEPTION_THEN_CLOSE(exception, val, ret) if(exception){ U8PIPE_UNREF(pipe); u8pipe_handle_close(JS_GetRuntime(ctx), pipe); return ret; } \
+    else if(JS_IsPromise(val)) JS_PromiseHandleError(ctx, val);
+#undef EXCEPTION_THEN_CLOSE2
+#define EXCEPTION_THEN_CLOSE2(exception, val, cb) if(exception){ U8PIPE_UNREF(pipe); u8pipe_handle_close(JS_GetRuntime(ctx), pipe); cb; } \
     else if(JS_IsPromise(val)) JS_PromiseHandleError(ctx, val);
 #define CALL_ONCLOSE(pipe) JS_Call(pipe -> ctx, pipe -> close_rs, JS_NULL, 0, NULL);
 
@@ -436,7 +440,7 @@ static void u8pipe_fill_job(JSContext* ctx, bool is_error, JSValue result, void*
     size_t size;
     uint8_t* data = JS_GetUint8Array(ctx, &size, result);
     if(!data){
-        js_reject(job -> promise, "Invaild data returned by pull()");
+        js_reject(job -> promise, "Invalid data returned by pull()");
         goto done;
     }
     JS_FreeValue(ctx, result);
@@ -606,7 +610,7 @@ static JSValue js_U8Pipe_write(JSContext *ctx, JSValueConst this_val, int argc, 
     buffer = JS_GetUint8Array(ctx, &expected_size, argv[0]);
     if(!buffer) return JS_EXCEPTION;
 
-    if(expected_size == 0) return LJS_NewResolvedPromise(ctx, JS_UNDEFINED);
+    if(expected_size == 0) return LJS_NewResolvedPromise(ctx, JS_UNDEFINED, true);
 
     u8pipe_ref(pipe);
     if (pipe -> fdpipe){
@@ -623,7 +627,7 @@ static JSValue js_U8Pipe_write(JSContext *ctx, JSValueConst this_val, int argc, 
         pipe -> pipe.pipe -> write_lock = true;
         bool exception;
         JSValue ret = JS_CallSafe(ctx, pipe -> pipe.pipe -> write_func, this_val, 1, (JSValueConst[]){argv[1]}, &exception);
-        EXCEPTION_THEN_CLOSE(exception, ret, JS_ThrowTypeError(ctx, "Pipe write failed"));
+        EXCEPTION_THEN_CLOSE2(exception, ret, LJS_ThrowInAsync(ctx, EXCEPTION_ERROR, "Pipe write failed", NULL));
         pipe_handle_promise(ctx, ret, pipe -> pipe.pipe);
         U8PIPE_UNREF(pipe);
         return ret;
@@ -1459,16 +1463,18 @@ JSValue LJS_NewPipe(JSContext *ctx, uint32_t flag,
     return obj;
 }
 
-EvFD* LJS_OverrideFDPipe(JSContext *ctx, JSValueConst obj){
+EvFD* LJS_GetFDFromPipe(JSContext *ctx, JSValueConst obj, bool override){
     struct U8Pipe_T* pipe = JS_GetOpaque(obj, u8pipe_class_id);
     if(!pipe || !pipe -> pipe.fdpipe) return NULL;
 
     // override
     EvFD* evfd = pipe -> pipe.fdpipe -> fd;
-    evfd_onclose(evfd, NULL, NULL); // cleanup
-    evfd_enable_rac(evfd, false);   // read after close feature
-    pipe -> pipe.fdpipe -> closed = true;
-    U8PIPE_FD_EOF(pipe);
-    U8PIPE_UNREF(pipe);
+    if(override){
+        evfd_onclose(evfd, NULL, NULL); // cleanup
+        evfd_enable_rac(evfd, false);   // read after close feature
+        pipe -> pipe.fdpipe -> closed = true;
+        U8PIPE_FD_EOF(pipe);
+        U8PIPE_UNREF(pipe);
+    }
     return evfd;
 }

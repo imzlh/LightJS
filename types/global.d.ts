@@ -63,7 +63,7 @@ declare class URL {
      */
     static canParse(url: string, base?: string): boolean;
 
-    constructor(url: string, base?: string);
+    constructor(url: string, base?: string | URL);
     href: string;
     protocol: string;
     username: string;
